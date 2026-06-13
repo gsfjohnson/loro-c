@@ -32,3 +32,27 @@ macro_rules! deref_or {
         }
     }};
 }
+
+/// Dispatches an `insert_container`/`push_container`/`set_container` call over a
+/// `loro::Container` enum, performing the type-erased attach generically.
+///
+/// `$child` is the detached child container; `$c` is bound to the typed inner handle for
+/// `$op`, whose result is rewrapped into a `loro::Container`. Evaluates to
+/// `loro::LoroResult<loro::Container>`. Example:
+/// `attach_container!(child, |c| map.inner().insert_container(key, c))`.
+#[macro_export]
+macro_rules! attach_container {
+    ($child:expr, |$c:ident| $op:expr) => {
+        match $child {
+            loro::Container::Map($c) => $op.map(loro::Container::Map),
+            loro::Container::List($c) => $op.map(loro::Container::List),
+            loro::Container::Text($c) => $op.map(loro::Container::Text),
+            loro::Container::MovableList($c) => $op.map(loro::Container::MovableList),
+            loro::Container::Tree($c) => $op.map(loro::Container::Tree),
+            loro::Container::Counter($c) => $op.map(loro::Container::Counter),
+            loro::Container::Unknown(_) => Err(loro::LoroError::ArgErr(
+                "cannot attach a container of unknown type".into(),
+            )),
+        }
+    };
+}

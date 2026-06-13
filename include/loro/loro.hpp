@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -68,6 +69,14 @@ inline void check(LoroStatus s) {
     }
 }
 
+/// Returns true if `s` is LORO_OK, false if LORO_ERR_NOT_FOUND, and throws otherwise.
+/// Used by lookups that map "absent" to an empty std::optional.
+inline bool check_found(LoroStatus s) {
+    if (s == LORO_OK) return true;
+    if (s == LORO_ERR_NOT_FOUND) return false;
+    throw Error(s, last_error_message());
+}
+
 /// RAII holder for a LoroBytes buffer returned across the FFI boundary.
 class Bytes {
 public:
@@ -97,6 +106,24 @@ private:
 };
 
 }  // namespace detail
+
+// Forward declarations: the typed container wrappers and the type-erased Container are
+// mutually referential (e.g. Map::insert_container takes/returns a Container, while
+// Container::as_map returns a Map). Methods that couple a typed wrapper to Container are
+// declared in-class and defined out-of-line once every class is complete (see below).
+class Text;
+class Map;
+class List;
+class MovableList;
+class Counter;
+class Tree;
+class Container;
+
+/// The kind of a type-erased loro::Container. Alias of the C ABI enum.
+using ContainerType = ::LoroContainerType;
+
+/// Identifies a tree node (`peer`, `counter`). Alias of the C ABI struct.
+using TreeId = ::LoroTreeID;
 
 /// RAII wrapper around a `LoroText*` container handle. Move-only.
 class Text {
@@ -152,6 +179,491 @@ private:
     std::unique_ptr<LoroText, Deleter> handle_;
 };
 
+/// RAII wrapper around a `LoroMap*` container handle. Move-only. Values are exchanged as
+/// JSON strings; nested containers via the type-erased Container.
+class Map {
+public:
+    /// Takes ownership of a raw handle (e.g. returned by loro_doc_get_map).
+    explicit Map(LoroMap* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// The underlying C handle (non-owning).
+    LoroMap* raw() const noexcept { return handle_.get(); }
+
+    /// Inserts the JSON-encoded value `json` under `key`.
+    void insert(std::string_view key, std::string_view json) {
+        detail::check(
+            loro_map_insert(handle_.get(), key.data(), key.size(), json.data(), json.size()));
+    }
+
+    /// The value at `key` as a JSON string (containers resolved to their deep value), or
+    /// std::nullopt if absent. For a child container handle, use get_container.
+    std::optional<std::string> get(std::string_view key) const {
+        detail::Bytes b;
+        if (!detail::check_found(loro_map_get(handle_.get(), key.data(), key.size(), b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+
+    /// The child container at `key`, or std::nullopt if absent or a plain value.
+    std::optional<Container> get_container(std::string_view key) const;
+
+    /// Attaches `child` under `key`, returning the attached handle. Consumes `child`.
+    Container insert_container(std::string_view key, Container&& child);
+
+    /// Deletes the entry at `key` (no error if absent).
+    void remove(std::string_view key) {
+        detail::check(loro_map_delete(handle_.get(), key.data(), key.size()));
+    }
+
+    /// The map's keys as a JSON array string.
+    std::string keys() const {
+        detail::Bytes b;
+        detail::check(loro_map_keys(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// The whole map as a JSON object string.
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_map_to_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    std::size_t size() const { return loro_map_len(handle_.get()); }
+    bool empty() const { return loro_map_is_empty(handle_.get()); }
+    void clear() { detail::check(loro_map_clear(handle_.get())); }
+
+private:
+    struct Deleter {
+        void operator()(LoroMap* p) const noexcept { loro_map_free(p); }
+    };
+    std::unique_ptr<LoroMap, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroList*` container handle. Move-only.
+class List {
+public:
+    explicit List(LoroList* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroList* raw() const noexcept { return handle_.get(); }
+
+    /// Inserts the JSON-encoded value `json` at `pos`.
+    void insert(std::size_t pos, std::string_view json) {
+        detail::check(loro_list_insert(handle_.get(), pos, json.data(), json.size()));
+    }
+
+    /// Appends the JSON-encoded value `json`.
+    void push(std::string_view json) {
+        detail::check(loro_list_push(handle_.get(), json.data(), json.size()));
+    }
+
+    /// The value at `index` as a JSON string, or std::nullopt if out of range.
+    std::optional<std::string> get(std::size_t index) const {
+        detail::Bytes b;
+        if (!detail::check_found(loro_list_get(handle_.get(), index, b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+
+    /// The child container at `index`, or std::nullopt if out of range or a plain value.
+    std::optional<Container> get_container(std::size_t index) const;
+
+    /// Inserts `child` at `pos`, returning the attached handle. Consumes `child`.
+    Container insert_container(std::size_t pos, Container&& child);
+
+    /// Appends `child`, returning the attached handle. Consumes `child`.
+    Container push_container(Container&& child);
+
+    /// Deletes `len` elements starting at `pos`.
+    void remove(std::size_t pos, std::size_t len) {
+        detail::check(loro_list_delete(handle_.get(), pos, len));
+    }
+
+    /// Pops the last element as a JSON string, or std::nullopt if the list is empty.
+    std::optional<std::string> pop() {
+        detail::Bytes b;
+        bool present = false;
+        detail::check(loro_list_pop(handle_.get(), b.out(), &present));
+        if (!present) return std::nullopt;
+        return b.to_string();
+    }
+
+    /// The whole list as a JSON array string.
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_list_to_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    std::size_t size() const { return loro_list_len(handle_.get()); }
+    bool empty() const { return loro_list_is_empty(handle_.get()); }
+    void clear() { detail::check(loro_list_clear(handle_.get())); }
+
+private:
+    struct Deleter {
+        void operator()(LoroList* p) const noexcept { loro_list_free(p); }
+    };
+    std::unique_ptr<LoroList, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroMovableList*` container handle. Move-only. Adds in-place
+/// `set` and element `move` over the plain List surface.
+class MovableList {
+public:
+    explicit MovableList(LoroMovableList* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroMovableList* raw() const noexcept { return handle_.get(); }
+
+    void insert(std::size_t pos, std::string_view json) {
+        detail::check(loro_movable_list_insert(handle_.get(), pos, json.data(), json.size()));
+    }
+
+    void push(std::string_view json) {
+        detail::check(loro_movable_list_push(handle_.get(), json.data(), json.size()));
+    }
+
+    /// Replaces the value at `pos` in place with the JSON-encoded value `json`.
+    void set(std::size_t pos, std::string_view json) {
+        detail::check(loro_movable_list_set(handle_.get(), pos, json.data(), json.size()));
+    }
+
+    /// Moves the element at `from` to `to`, preserving its identity.
+    void move(std::size_t from, std::size_t to) {
+        detail::check(loro_movable_list_mov(handle_.get(), from, to));
+    }
+
+    std::optional<std::string> get(std::size_t index) const {
+        detail::Bytes b;
+        if (!detail::check_found(loro_movable_list_get(handle_.get(), index, b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+
+    std::optional<Container> get_container(std::size_t index) const;
+    Container insert_container(std::size_t pos, Container&& child);
+    Container push_container(Container&& child);
+
+    /// Replaces the element at `pos` in place with `child`, returning the attached handle.
+    /// Consumes `child`.
+    Container set_container(std::size_t pos, Container&& child);
+
+    void remove(std::size_t pos, std::size_t len) {
+        detail::check(loro_movable_list_delete(handle_.get(), pos, len));
+    }
+
+    std::optional<std::string> pop() {
+        detail::Bytes b;
+        bool present = false;
+        detail::check(loro_movable_list_pop(handle_.get(), b.out(), &present));
+        if (!present) return std::nullopt;
+        return b.to_string();
+    }
+
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_movable_list_to_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    std::size_t size() const { return loro_movable_list_len(handle_.get()); }
+    bool empty() const { return loro_movable_list_is_empty(handle_.get()); }
+    void clear() { detail::check(loro_movable_list_clear(handle_.get())); }
+
+private:
+    struct Deleter {
+        void operator()(LoroMovableList* p) const noexcept { loro_movable_list_free(p); }
+    };
+    std::unique_ptr<LoroMovableList, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroCounter*` container handle. Move-only.
+class Counter {
+public:
+    explicit Counter(LoroCounter* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroCounter* raw() const noexcept { return handle_.get(); }
+
+    /// Increments the counter by `value` (may be negative).
+    void increment(double value) { detail::check(loro_counter_increment(handle_.get(), value)); }
+
+    /// Decrements the counter by `value` (may be negative).
+    void decrement(double value) { detail::check(loro_counter_decrement(handle_.get(), value)); }
+
+    /// The counter's current value.
+    double value() const { return loro_counter_get_value(handle_.get()); }
+
+private:
+    struct Deleter {
+        void operator()(LoroCounter* p) const noexcept { loro_counter_free(p); }
+    };
+    std::unique_ptr<LoroCounter, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroTree*` container handle. Move-only. A node is a TreeId; a
+/// null/absent parent means a root.
+class Tree {
+public:
+    explicit Tree(LoroTree* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroTree* raw() const noexcept { return handle_.get(); }
+
+    /// Creates a node under `parent` (nullopt = root).
+    TreeId create(std::optional<TreeId> parent = std::nullopt) {
+        TreeId out{};
+        const LoroTreeID* p = parent ? &parent.value() : nullptr;
+        detail::check(loro_tree_create(handle_.get(), p, &out));
+        return out;
+    }
+
+    /// Creates a node under `parent` (nullopt = root) at child position `index`. Requires
+    /// the fractional index to be enabled.
+    TreeId create_at(std::size_t index, std::optional<TreeId> parent = std::nullopt) {
+        TreeId out{};
+        const LoroTreeID* p = parent ? &parent.value() : nullptr;
+        detail::check(loro_tree_create_at(handle_.get(), p, index, &out));
+        return out;
+    }
+
+    /// Moves `target` to be a child of `parent` (nullopt = root).
+    void move_to(TreeId target, std::optional<TreeId> parent = std::nullopt) {
+        const LoroTreeID* p = parent ? &parent.value() : nullptr;
+        detail::check(loro_tree_mov(handle_.get(), target, p));
+    }
+
+    /// Moves `target` to child position `index` under `parent` (nullopt = root). Requires
+    /// the fractional index to be enabled.
+    void move_to_index(TreeId target, std::size_t index,
+                       std::optional<TreeId> parent = std::nullopt) {
+        const LoroTreeID* p = parent ? &parent.value() : nullptr;
+        detail::check(loro_tree_mov_to(handle_.get(), target, p, index));
+    }
+
+    /// Moves `target` to be the sibling immediately after `after`. Requires the fractional
+    /// index to be enabled.
+    void move_after(TreeId target, TreeId after) {
+        detail::check(loro_tree_mov_after(handle_.get(), target, after));
+    }
+
+    /// Moves `target` to be the sibling immediately before `before`. Requires the
+    /// fractional index to be enabled.
+    void move_before(TreeId target, TreeId before) {
+        detail::check(loro_tree_mov_before(handle_.get(), target, before));
+    }
+
+    /// Deletes `target` and its subtree.
+    void erase(TreeId target) { detail::check(loro_tree_delete(handle_.get(), target)); }
+
+    /// The metadata map of `target`.
+    Map get_meta(TreeId target) const {
+        LoroMap* m = loro_tree_get_meta(handle_.get(), target);
+        if (!m) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Map(m);
+    }
+
+    bool contains(TreeId target) const { return loro_tree_contains(handle_.get(), target); }
+
+    bool is_node_deleted(TreeId target) const {
+        bool out = false;
+        detail::check(loro_tree_is_node_deleted(handle_.get(), target, &out));
+        return out;
+    }
+
+    /// `target`'s fractional index, or std::nullopt if it has none.
+    std::optional<std::string> fractional_index(TreeId target) const {
+        detail::Bytes b;
+        if (!detail::check_found(loro_tree_fractional_index(handle_.get(), target, b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+
+    /// All root nodes.
+    std::vector<TreeId> roots() const {
+        const std::size_t n = loro_tree_roots_len(handle_.get());
+        std::vector<TreeId> out;
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            TreeId id{};
+            detail::check(loro_tree_root_at(handle_.get(), i, &id));
+            out.push_back(id);
+        }
+        return out;
+    }
+
+    /// The children of `parent` (nullopt = root), or std::nullopt if `parent` does not
+    /// exist.
+    std::optional<std::vector<TreeId>> children(std::optional<TreeId> parent = std::nullopt) const {
+        const LoroTreeID* p = parent ? &parent.value() : nullptr;
+        std::size_t n = 0;
+        if (!detail::check_found(loro_tree_children_len(handle_.get(), p, &n)))
+            return std::nullopt;
+        std::vector<TreeId> out;
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            TreeId id{};
+            detail::check(loro_tree_child_at(handle_.get(), p, i, &id));
+            out.push_back(id);
+        }
+        return out;
+    }
+
+    /// Enables the fractional index (required for positional moves).
+    void enable_fractional_index(std::uint8_t jitter = 0) {
+        detail::check(loro_tree_enable_fractional_index(handle_.get(), jitter));
+    }
+
+    bool is_fractional_index_enabled() const {
+        return loro_tree_is_fractional_index_enabled(handle_.get());
+    }
+
+    bool empty() const { return loro_tree_is_empty(handle_.get()); }
+
+    /// The whole tree as a JSON string.
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_tree_to_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroTree* p) const noexcept { loro_tree_free(p); }
+    };
+    std::unique_ptr<LoroTree, Deleter> handle_;
+};
+
+/// RAII wrapper around a type-erased `LoroContainer*`. Move-only. Created detached with a
+/// factory (e.g. Container::map()), attached via a typed wrapper's *_container method, and
+/// downcast to a typed wrapper with as_*().
+class Container {
+public:
+    explicit Container(LoroContainer* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// Creates a new detached container of `type`.
+    static Container create(ContainerType type) { return Container(loro_container_new(type)); }
+    static Container map() { return create(LORO_CONTAINER_MAP); }
+    static Container list() { return create(LORO_CONTAINER_LIST); }
+    static Container text() { return create(LORO_CONTAINER_TEXT); }
+    static Container movable_list() { return create(LORO_CONTAINER_MOVABLE_LIST); }
+    static Container tree() { return create(LORO_CONTAINER_TREE); }
+    static Container counter() { return create(LORO_CONTAINER_COUNTER); }
+
+    LoroContainer* raw() const noexcept { return handle_.get(); }
+
+    /// Relinquishes ownership of the raw handle. Used internally when passing a container
+    /// into a *_insert_container function, which consumes it.
+    LoroContainer* release() noexcept { return handle_.release(); }
+
+    /// The kind of container.
+    ContainerType type() const { return loro_container_type(handle_.get()); }
+
+    Map as_map() const {
+        LoroMap* m = loro_container_get_map(handle_.get());
+        if (!m) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Map(m);
+    }
+    List as_list() const {
+        LoroList* l = loro_container_get_list(handle_.get());
+        if (!l) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return List(l);
+    }
+    Text as_text() const {
+        LoroText* t = loro_container_get_text(handle_.get());
+        if (!t) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Text(t);
+    }
+    MovableList as_movable_list() const {
+        LoroMovableList* l = loro_container_get_movable_list(handle_.get());
+        if (!l) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return MovableList(l);
+    }
+    Tree as_tree() const {
+        LoroTree* t = loro_container_get_tree(handle_.get());
+        if (!t) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Tree(t);
+    }
+    Counter as_counter() const {
+        LoroCounter* c = loro_container_get_counter(handle_.get());
+        if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Counter(c);
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroContainer* p) const noexcept { loro_container_free(p); }
+    };
+    std::unique_ptr<LoroContainer, Deleter> handle_;
+};
+
+// Out-of-line definitions of the typed wrappers' Container-coupled methods (Container is
+// now complete).
+
+inline std::optional<Container> Map::get_container(std::string_view key) const {
+    LoroContainer* c = loro_map_get_container(handle_.get(), key.data(), key.size());
+    if (!c) return std::nullopt;
+    return Container(c);
+}
+
+inline Container Map::insert_container(std::string_view key, Container&& child) {
+    LoroContainer* a =
+        loro_map_insert_container(handle_.get(), key.data(), key.size(), child.release());
+    if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Container(a);
+}
+
+inline std::optional<Container> List::get_container(std::size_t index) const {
+    LoroContainer* c = loro_list_get_container(handle_.get(), index);
+    if (!c) return std::nullopt;
+    return Container(c);
+}
+
+inline Container List::insert_container(std::size_t pos, Container&& child) {
+    LoroContainer* a = loro_list_insert_container(handle_.get(), pos, child.release());
+    if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Container(a);
+}
+
+inline Container List::push_container(Container&& child) {
+    LoroContainer* a = loro_list_push_container(handle_.get(), child.release());
+    if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Container(a);
+}
+
+inline std::optional<Container> MovableList::get_container(std::size_t index) const {
+    LoroContainer* c = loro_movable_list_get_container(handle_.get(), index);
+    if (!c) return std::nullopt;
+    return Container(c);
+}
+
+inline Container MovableList::insert_container(std::size_t pos, Container&& child) {
+    LoroContainer* a = loro_movable_list_insert_container(handle_.get(), pos, child.release());
+    if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Container(a);
+}
+
+inline Container MovableList::push_container(Container&& child) {
+    LoroContainer* a = loro_movable_list_push_container(handle_.get(), child.release());
+    if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Container(a);
+}
+
+inline Container MovableList::set_container(std::size_t pos, Container&& child) {
+    LoroContainer* a = loro_movable_list_set_container(handle_.get(), pos, child.release());
+    if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Container(a);
+}
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -171,6 +683,31 @@ public:
     /// Returns the root text container `id`, creating it if absent.
     Text get_text(std::string_view id) {
         return Text(loro_doc_get_text(handle_.get(), id.data(), id.size()));
+    }
+
+    /// Returns the root map container `id`, creating it if absent.
+    Map get_map(std::string_view id) {
+        return Map(loro_doc_get_map(handle_.get(), id.data(), id.size()));
+    }
+
+    /// Returns the root list container `id`, creating it if absent.
+    List get_list(std::string_view id) {
+        return List(loro_doc_get_list(handle_.get(), id.data(), id.size()));
+    }
+
+    /// Returns the root movable-list container `id`, creating it if absent.
+    MovableList get_movable_list(std::string_view id) {
+        return MovableList(loro_doc_get_movable_list(handle_.get(), id.data(), id.size()));
+    }
+
+    /// Returns the root tree container `id`, creating it if absent.
+    Tree get_tree(std::string_view id) {
+        return Tree(loro_doc_get_tree(handle_.get(), id.data(), id.size()));
+    }
+
+    /// Returns the root counter container `id`, creating it if absent.
+    Counter get_counter(std::string_view id) {
+        return Counter(loro_doc_get_counter(handle_.get(), id.data(), id.size()));
     }
 
     /// Commits pending operations into the oplog.

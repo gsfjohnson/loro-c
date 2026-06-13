@@ -11,6 +11,22 @@
 #include <stdbool.h>
 
 /**
+ * The kind of a [`LoroContainer`]. Mirrors `loro::ContainerType`.
+ */
+typedef enum LoroContainerType {
+    LORO_CONTAINER_MAP = 0,
+    LORO_CONTAINER_LIST = 1,
+    LORO_CONTAINER_TEXT = 2,
+    LORO_CONTAINER_MOVABLE_LIST = 3,
+    LORO_CONTAINER_TREE = 4,
+    LORO_CONTAINER_COUNTER = 5,
+    /**
+     * An unknown / unsupported container kind. Cannot be created.
+     */
+    LORO_CONTAINER_UNKNOWN = 6,
+} LoroContainerType;
+
+/**
  * Status / error code returned by fallible `loro-c-api` functions.
  *
  * `LORO_OK` is guaranteed to be `0`, so callers may treat any non-zero value as failure.
@@ -52,15 +68,45 @@ typedef enum LoroStatus {
 } LoroStatus;
 
 /**
+ * Opaque, type-erased handle to any Loro container.
+ */
+typedef struct LoroContainer LoroContainer;
+
+/**
+ * Opaque handle to a Loro counter container.
+ */
+typedef struct LoroCounter LoroCounter;
+
+/**
  * Opaque handle to a Loro document. Create with [`loro_doc_new`], release with
  * [`loro_doc_free`].
  */
 typedef struct LoroDoc LoroDoc;
 
 /**
+ * Opaque handle to a Loro list container.
+ */
+typedef struct LoroList LoroList;
+
+/**
+ * Opaque handle to a Loro map container.
+ */
+typedef struct LoroMap LoroMap;
+
+/**
+ * Opaque handle to a Loro movable-list container.
+ */
+typedef struct LoroMovableList LoroMovableList;
+
+/**
  * Opaque handle to a Loro text container.
  */
 typedef struct LoroText LoroText;
+
+/**
+ * Opaque handle to a Loro tree container.
+ */
+typedef struct LoroTree LoroTree;
 
 /**
  * An owned, heap-allocated byte buffer handed to the caller.
@@ -83,6 +129,15 @@ typedef struct LoroBytes {
     uintptr_t cap;
 } LoroBytes;
 
+/**
+ * Identifies a tree node. Mirrors `loro::TreeID` (`peer`: the creating peer id;
+ * `counter`: that peer's op counter at creation).
+ */
+typedef struct LoroTreeID {
+    uint64_t peer;
+    int32_t counter;
+} LoroTreeID;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -93,6 +148,358 @@ extern "C" {
  * program and must NOT be freed.
  */
 const char *loro_version(void);
+
+/**
+ * Creates a new *detached* container of the given kind. Attach it by passing it to a
+ * `*_insert_container` / `*_push_container` / `*_set_container` function, which returns
+ * the attached handle and consumes this one. Returns null for
+ * `LORO_CONTAINER_UNKNOWN` or on a caught panic. Release an unused handle with
+ * [`loro_container_free`].
+ */
+struct LoroContainer *loro_container_new(enum LoroContainerType ty);
+
+/**
+ * Frees a container handle. Passing null is a no-op.
+ */
+void loro_container_free(struct LoroContainer *container);
+
+/**
+ * Returns the kind of the container. Returns `LORO_CONTAINER_UNKNOWN` on a null handle.
+ */
+enum LoroContainerType loro_container_type(const struct LoroContainer *container);
+
+/**
+ * Recovers a typed `LoroMap*` from a container, or null (with an error recorded) if the
+ * container is not a map. The returned handle is independent; free it with
+ * `loro_map_free`. The source `LoroContainer*` is unaffected.
+ */
+struct LoroMap *loro_container_get_map(const struct LoroContainer *container);
+
+/**
+ * Recovers a typed `LoroList*` from a container, or null if it is not a list.
+ */
+struct LoroList *loro_container_get_list(const struct LoroContainer *container);
+
+/**
+ * Recovers a typed `LoroText*` from a container, or null if it is not a text container.
+ */
+struct LoroText *loro_container_get_text(const struct LoroContainer *container);
+
+/**
+ * Recovers a typed `LoroMovableList*` from a container, or null if it is not a movable
+ * list.
+ */
+struct LoroMovableList *loro_container_get_movable_list(const struct LoroContainer *container);
+
+/**
+ * Recovers a typed `LoroTree*` from a container, or null if it is not a tree.
+ */
+struct LoroTree *loro_container_get_tree(const struct LoroContainer *container);
+
+/**
+ * Recovers a typed `LoroCounter*` from a container, or null if it is not a counter.
+ */
+struct LoroCounter *loro_container_get_counter(const struct LoroContainer *container);
+
+/**
+ * Frees a counter handle. Passing null is a no-op. Safe to call before or after the
+ * originating `LoroDoc*` is freed.
+ */
+void loro_counter_free(struct LoroCounter *counter);
+
+/**
+ * Increments the counter by `value` (may be negative).
+ */
+enum LoroStatus loro_counter_increment(struct LoroCounter *counter, double value);
+
+/**
+ * Decrements the counter by `value` (may be negative).
+ */
+enum LoroStatus loro_counter_decrement(struct LoroCounter *counter, double value);
+
+/**
+ * Returns the counter's current value. Returns 0.0 on a null handle.
+ */
+double loro_counter_get_value(const struct LoroCounter *counter);
+
+/**
+ * Frees a list handle. Passing null is a no-op. Safe to call before or after the
+ * originating `LoroDoc*` is freed.
+ */
+void loro_list_free(struct LoroList *list);
+
+/**
+ * Inserts the JSON-encoded value `(value, value_len)` at index `pos`.
+ */
+enum LoroStatus loro_list_insert(struct LoroList *list,
+                                 uintptr_t pos,
+                                 const char *value,
+                                 uintptr_t value_len);
+
+/**
+ * Appends the JSON-encoded value `(value, value_len)` to the end of the list.
+ */
+enum LoroStatus loro_list_push(struct LoroList *list, const char *value, uintptr_t value_len);
+
+/**
+ * Writes the value at `index` as JSON bytes into `*out` (containers resolved to their
+ * deep JSON value). Returns `LORO_ERR_NOT_FOUND` if `index` is out of range. `*out` is
+ * only written on `LORO_OK`; free it with `loro_bytes_free`. For a child container handle
+ * instead, use [`loro_list_get_container`].
+ */
+enum LoroStatus loro_list_get(const struct LoroList *list, uintptr_t index, struct LoroBytes *out);
+
+/**
+ * Returns the child container stored at `index` as a type-erased `LoroContainer*`, or
+ * null if the index is out of range or holds a plain value. Free the returned handle with
+ * `loro_container_free`.
+ */
+struct LoroContainer *loro_list_get_container(const struct LoroList *list, uintptr_t index);
+
+/**
+ * Inserts the detached `child` container at `index` and returns the attached handle.
+ * Consumes `child` (do not free it). Returns null on error. Free the returned handle with
+ * `loro_container_free`.
+ */
+struct LoroContainer *loro_list_insert_container(struct LoroList *list,
+                                                 uintptr_t pos,
+                                                 struct LoroContainer *child);
+
+/**
+ * Appends the detached `child` container and returns the attached handle. Consumes
+ * `child` (do not free it). Returns null on error. Free the returned handle with
+ * `loro_container_free`.
+ */
+struct LoroContainer *loro_list_push_container(struct LoroList *list, struct LoroContainer *child);
+
+/**
+ * Deletes `len` elements starting at index `pos`.
+ */
+enum LoroStatus loro_list_delete(struct LoroList *list, uintptr_t pos, uintptr_t len);
+
+/**
+ * Pops the last element. On success, `*out_present` is set to whether a value was popped;
+ * if so, the value is written as JSON into `*out`. `out` must be non-null; `out_present`
+ * may be null. Free a written `*out` with `loro_bytes_free`.
+ */
+enum LoroStatus loro_list_pop(struct LoroList *list, struct LoroBytes *out, bool *out_present);
+
+/**
+ * Writes the whole list as a JSON array (deep values) into `*out`. `*out` is only written
+ * on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_list_to_json(const struct LoroList *list, struct LoroBytes *out);
+
+/**
+ * Returns the number of elements in the list. Returns 0 on a null handle.
+ */
+uintptr_t loro_list_len(const struct LoroList *list);
+
+/**
+ * Returns `true` if the list is empty (also returns `true`, with an error recorded, on a
+ * null handle).
+ */
+bool loro_list_is_empty(const struct LoroList *list);
+
+/**
+ * Removes all elements from the list.
+ */
+enum LoroStatus loro_list_clear(struct LoroList *list);
+
+/**
+ * Frees a map handle. Passing null is a no-op. Safe to call before or after the
+ * originating `LoroDoc*` is freed.
+ */
+void loro_map_free(struct LoroMap *map);
+
+/**
+ * Inserts the JSON-encoded value `(value, value_len)` under UTF-8 key `(key, key_len)`.
+ */
+enum LoroStatus loro_map_insert(struct LoroMap *map,
+                                const char *key,
+                                uintptr_t key_len,
+                                const char *value,
+                                uintptr_t value_len);
+
+/**
+ * Writes the value at `(key, key_len)` as JSON bytes into `*out` (containers are
+ * resolved to their deep JSON value). Returns `LORO_ERR_NOT_FOUND` if the key is absent.
+ * `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. For a child
+ * container handle instead, use [`loro_map_get_container`].
+ */
+enum LoroStatus loro_map_get(const struct LoroMap *map,
+                             const char *key,
+                             uintptr_t key_len,
+                             struct LoroBytes *out);
+
+/**
+ * Returns the child container stored at `(key, key_len)` as a type-erased
+ * `LoroContainer*`, or null if the key is absent or holds a plain value. Free the
+ * returned handle with `loro_container_free`.
+ */
+struct LoroContainer *loro_map_get_container(const struct LoroMap *map,
+                                             const char *key,
+                                             uintptr_t key_len);
+
+/**
+ * Attaches the detached `child` container under `(key, key_len)` and returns the attached
+ * handle. Consumes `child` (do not free it). Returns null on error. Free the returned
+ * handle with `loro_container_free`.
+ */
+struct LoroContainer *loro_map_insert_container(struct LoroMap *map,
+                                                const char *key,
+                                                uintptr_t key_len,
+                                                struct LoroContainer *child);
+
+/**
+ * Deletes the entry at `(key, key_len)`. Succeeds even if the key is absent.
+ */
+enum LoroStatus loro_map_delete(struct LoroMap *map, const char *key, uintptr_t key_len);
+
+/**
+ * Writes the map's keys as a JSON array of strings into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_map_keys(const struct LoroMap *map, struct LoroBytes *out);
+
+/**
+ * Writes the whole map (keys + deep values) as a JSON object into `*out`. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_map_to_json(const struct LoroMap *map, struct LoroBytes *out);
+
+/**
+ * Returns the number of entries in the map. Returns 0 on a null handle.
+ */
+uintptr_t loro_map_len(const struct LoroMap *map);
+
+/**
+ * Returns `true` if the map is empty (also returns `true`, with an error recorded, on a
+ * null handle).
+ */
+bool loro_map_is_empty(const struct LoroMap *map);
+
+/**
+ * Removes all entries from the map.
+ */
+enum LoroStatus loro_map_clear(struct LoroMap *map);
+
+/**
+ * Frees a movable-list handle. Passing null is a no-op. Safe to call before or after the
+ * originating `LoroDoc*` is freed.
+ */
+void loro_movable_list_free(struct LoroMovableList *list);
+
+/**
+ * Inserts the JSON-encoded value `(value, value_len)` at index `pos`.
+ */
+enum LoroStatus loro_movable_list_insert(struct LoroMovableList *list,
+                                         uintptr_t pos,
+                                         const char *value,
+                                         uintptr_t value_len);
+
+/**
+ * Appends the JSON-encoded value `(value, value_len)` to the end of the list.
+ */
+enum LoroStatus loro_movable_list_push(struct LoroMovableList *list,
+                                       const char *value,
+                                       uintptr_t value_len);
+
+/**
+ * Replaces the value at index `pos` in place with the JSON-encoded value
+ * `(value, value_len)`.
+ */
+enum LoroStatus loro_movable_list_set(struct LoroMovableList *list,
+                                      uintptr_t pos,
+                                      const char *value,
+                                      uintptr_t value_len);
+
+/**
+ * Moves the element at index `from` to index `to`, preserving its identity.
+ */
+enum LoroStatus loro_movable_list_mov(struct LoroMovableList *list, uintptr_t from, uintptr_t to);
+
+/**
+ * Writes the value at `index` as JSON bytes into `*out` (containers resolved to their deep
+ * JSON value). Returns `LORO_ERR_NOT_FOUND` if `index` is out of range. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`. For a child container handle
+ * instead, use [`loro_movable_list_get_container`].
+ */
+enum LoroStatus loro_movable_list_get(const struct LoroMovableList *list,
+                                      uintptr_t index,
+                                      struct LoroBytes *out);
+
+/**
+ * Returns the child container stored at `index` as a type-erased `LoroContainer*`, or null
+ * if the index is out of range or holds a plain value. Free the returned handle with
+ * `loro_container_free`.
+ */
+struct LoroContainer *loro_movable_list_get_container(const struct LoroMovableList *list,
+                                                      uintptr_t index);
+
+/**
+ * Inserts the detached `child` container at `index` and returns the attached handle.
+ * Consumes `child`. Returns null on error. Free the returned handle with
+ * `loro_container_free`.
+ */
+struct LoroContainer *loro_movable_list_insert_container(struct LoroMovableList *list,
+                                                         uintptr_t pos,
+                                                         struct LoroContainer *child);
+
+/**
+ * Appends the detached `child` container and returns the attached handle. Consumes
+ * `child`. Returns null on error. Free the returned handle with `loro_container_free`.
+ */
+struct LoroContainer *loro_movable_list_push_container(struct LoroMovableList *list,
+                                                       struct LoroContainer *child);
+
+/**
+ * Replaces the element at `index` in place with the detached `child` container and returns
+ * the attached handle. Consumes `child`. Returns null on error. Free the returned handle
+ * with `loro_container_free`.
+ */
+struct LoroContainer *loro_movable_list_set_container(struct LoroMovableList *list,
+                                                      uintptr_t pos,
+                                                      struct LoroContainer *child);
+
+/**
+ * Deletes `len` elements starting at index `pos`.
+ */
+enum LoroStatus loro_movable_list_delete(struct LoroMovableList *list,
+                                         uintptr_t pos,
+                                         uintptr_t len);
+
+/**
+ * Pops the last element. On success, `*out_present` is set to whether a value was popped;
+ * if so, its deep JSON value is written into `*out`. `out` must be non-null; `out_present`
+ * may be null. Free a written `*out` with `loro_bytes_free`.
+ */
+enum LoroStatus loro_movable_list_pop(struct LoroMovableList *list,
+                                      struct LoroBytes *out,
+                                      bool *out_present);
+
+/**
+ * Writes the whole list as a JSON array (deep values) into `*out`. `*out` is only written
+ * on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_movable_list_to_json(const struct LoroMovableList *list,
+                                          struct LoroBytes *out);
+
+/**
+ * Returns the number of elements in the list. Returns 0 on a null handle.
+ */
+uintptr_t loro_movable_list_len(const struct LoroMovableList *list);
+
+/**
+ * Returns `true` if the list is empty (also returns `true`, with an error recorded, on a
+ * null handle).
+ */
+bool loro_movable_list_is_empty(const struct LoroMovableList *list);
+
+/**
+ * Removes all elements from the list.
+ */
+enum LoroStatus loro_movable_list_clear(struct LoroMovableList *list);
 
 /**
  * Frees a text handle. Passing null is a no-op. Safe to call before or after the
@@ -149,6 +556,148 @@ bool loro_text_is_empty(const struct LoroText *text);
 enum LoroStatus loro_text_to_string(const struct LoroText *text, struct LoroBytes *out);
 
 /**
+ * Frees a tree handle. Passing null is a no-op. Safe to call before or after the
+ * originating `LoroDoc*` is freed.
+ */
+void loro_tree_free(struct LoroTree *tree);
+
+/**
+ * Creates a node under `parent` (null = root) and writes its id into `*out`. `*out` is
+ * only written on `LORO_OK`.
+ */
+enum LoroStatus loro_tree_create(struct LoroTree *tree,
+                                 const struct LoroTreeID *parent,
+                                 struct LoroTreeID *out);
+
+/**
+ * Creates a node under `parent` (null = root) at child position `index`, writing its id
+ * into `*out`. Requires the fractional index to be enabled.
+ */
+enum LoroStatus loro_tree_create_at(struct LoroTree *tree,
+                                    const struct LoroTreeID *parent,
+                                    uintptr_t index,
+                                    struct LoroTreeID *out);
+
+/**
+ * Moves `target` to be a child of `parent` (null = root).
+ */
+enum LoroStatus loro_tree_mov(struct LoroTree *tree,
+                              struct LoroTreeID target,
+                              const struct LoroTreeID *parent);
+
+/**
+ * Moves `target` to child position `index` under `parent` (null = root). Requires the
+ * fractional index to be enabled.
+ */
+enum LoroStatus loro_tree_mov_to(struct LoroTree *tree,
+                                 struct LoroTreeID target,
+                                 const struct LoroTreeID *parent,
+                                 uintptr_t index);
+
+/**
+ * Moves `target` to be the sibling immediately after `after`. Requires the fractional
+ * index to be enabled.
+ */
+enum LoroStatus loro_tree_mov_after(struct LoroTree *tree,
+                                    struct LoroTreeID target,
+                                    struct LoroTreeID after);
+
+/**
+ * Moves `target` to be the sibling immediately before `before`. Requires the fractional
+ * index to be enabled.
+ */
+enum LoroStatus loro_tree_mov_before(struct LoroTree *tree,
+                                     struct LoroTreeID target,
+                                     struct LoroTreeID before);
+
+/**
+ * Deletes the node `target` (and its subtree).
+ */
+enum LoroStatus loro_tree_delete(struct LoroTree *tree, struct LoroTreeID target);
+
+/**
+ * Returns the metadata map of `target` as a `LoroMap*`, or null on error. Free the
+ * returned handle with `loro_map_free`.
+ */
+struct LoroMap *loro_tree_get_meta(const struct LoroTree *tree, struct LoroTreeID target);
+
+/**
+ * Returns `true` if `target` currently exists (is alive) in the tree.
+ */
+bool loro_tree_contains(const struct LoroTree *tree, struct LoroTreeID target);
+
+/**
+ * Writes whether `target` has been deleted into `*out`. Returns `LORO_ERR_NOT_FOUND` if
+ * the node never existed.
+ */
+enum LoroStatus loro_tree_is_node_deleted(const struct LoroTree *tree,
+                                          struct LoroTreeID target,
+                                          bool *out);
+
+/**
+ * Writes `target`'s fractional index (as a UTF-8 string) into `*out`. Returns
+ * `LORO_ERR_NOT_FOUND` if the node has none (e.g. the fractional index is disabled).
+ * Free a written `*out` with `loro_bytes_free`.
+ */
+enum LoroStatus loro_tree_fractional_index(const struct LoroTree *tree,
+                                           struct LoroTreeID target,
+                                           struct LoroBytes *out);
+
+/**
+ * Returns the number of root nodes. Returns 0 on a null handle.
+ */
+uintptr_t loro_tree_roots_len(const struct LoroTree *tree);
+
+/**
+ * Writes the root node at `index` into `*out`. Returns `LORO_ERR_NOT_FOUND` if `index`
+ * is out of range.
+ */
+enum LoroStatus loro_tree_root_at(const struct LoroTree *tree,
+                                  uintptr_t index,
+                                  struct LoroTreeID *out);
+
+/**
+ * Writes the number of children of `parent` (null = root) into `*out`. Returns
+ * `LORO_ERR_NOT_FOUND` if `parent` does not exist.
+ */
+enum LoroStatus loro_tree_children_len(const struct LoroTree *tree,
+                                       const struct LoroTreeID *parent,
+                                       uintptr_t *out);
+
+/**
+ * Writes the child of `parent` (null = root) at `index` into `*out`. Returns
+ * `LORO_ERR_NOT_FOUND` if `parent` does not exist or `index` is out of range.
+ */
+enum LoroStatus loro_tree_child_at(const struct LoroTree *tree,
+                                   const struct LoroTreeID *parent,
+                                   uintptr_t index,
+                                   struct LoroTreeID *out);
+
+/**
+ * Enables the tree's fractional index (required for positional moves), using `jitter`
+ * bits of randomness to reduce interleaving between concurrent inserts.
+ */
+enum LoroStatus loro_tree_enable_fractional_index(struct LoroTree *tree, uint8_t jitter);
+
+/**
+ * Returns whether the tree's fractional index is enabled. Returns `false` on a null
+ * handle.
+ */
+bool loro_tree_is_fractional_index_enabled(const struct LoroTree *tree);
+
+/**
+ * Returns `true` if the tree has no nodes (also returns `true`, with an error recorded,
+ * on a null handle).
+ */
+bool loro_tree_is_empty(const struct LoroTree *tree);
+
+/**
+ * Writes the whole tree as a JSON value into `*out`. `*out` is only written on `LORO_OK`;
+ * free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_tree_to_json(const struct LoroTree *tree, struct LoroBytes *out);
+
+/**
  * Creates a new, empty document. Never returns null except on allocation failure /
  * caught panic. Release with [`loro_doc_free`].
  */
@@ -192,6 +741,41 @@ enum LoroStatus loro_doc_set_peer_id(struct LoroDoc *doc, uint64_t peer);
  * handle with `loro_text_free`.
  */
 struct LoroText *loro_doc_get_text(const struct LoroDoc *doc, const char *id, uintptr_t id_len);
+
+/**
+ * Returns the root map container named `(id, id_len)`, creating it if it does not yet
+ * exist. Returns null on error. Release the returned handle with `loro_map_free`.
+ */
+struct LoroMap *loro_doc_get_map(const struct LoroDoc *doc, const char *id, uintptr_t id_len);
+
+/**
+ * Returns the root list container named `(id, id_len)`, creating it if it does not yet
+ * exist. Returns null on error. Release the returned handle with `loro_list_free`.
+ */
+struct LoroList *loro_doc_get_list(const struct LoroDoc *doc, const char *id, uintptr_t id_len);
+
+/**
+ * Returns the root movable-list container named `(id, id_len)`, creating it if it does
+ * not yet exist. Returns null on error. Release the returned handle with
+ * `loro_movable_list_free`.
+ */
+struct LoroMovableList *loro_doc_get_movable_list(const struct LoroDoc *doc,
+                                                  const char *id,
+                                                  uintptr_t id_len);
+
+/**
+ * Returns the root tree container named `(id, id_len)`, creating it if it does not yet
+ * exist. Returns null on error. Release the returned handle with `loro_tree_free`.
+ */
+struct LoroTree *loro_doc_get_tree(const struct LoroDoc *doc, const char *id, uintptr_t id_len);
+
+/**
+ * Returns the root counter container named `(id, id_len)`, creating it if it does not yet
+ * exist. Returns null on error. Release the returned handle with `loro_counter_free`.
+ */
+struct LoroCounter *loro_doc_get_counter(const struct LoroDoc *doc,
+                                         const char *id,
+                                         uintptr_t id_len);
 
 /**
  * Exports a full snapshot (complete history + current state) into `*out`.

@@ -2,7 +2,12 @@
 //! commit, peer id, snapshot & update export/import, whole-document JSON, and obtaining
 //! the root `LoroText` container.
 
+use crate::container::counter::LoroCounter;
+use crate::container::list::LoroList;
+use crate::container::map::LoroMap;
+use crate::container::movable_list::LoroMovableList;
 use crate::container::text::LoroText;
+use crate::container::tree::LoroTree;
 use crate::error::{record_encode_error, record_loro_error, set_last_error, LoroStatus};
 use crate::value::LoroBytes;
 use loro::ExportMode;
@@ -124,6 +129,102 @@ pub extern "C" fn loro_doc_get_text(
         };
         let text = doc.inner().get_text(name);
         Box::into_raw(Box::new(LoroText::from_inner(text)))
+    })
+}
+
+/// Returns the root map container named `(id, id_len)`, creating it if it does not yet
+/// exist. Returns null on error. Release the returned handle with `loro_map_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_map(
+    doc: *const LoroDoc,
+    id: *const c_char,
+    id_len: usize,
+) -> *mut LoroMap {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let name = match str_from_raw(id, id_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        let map = doc.inner().get_map(name);
+        Box::into_raw(Box::new(LoroMap::from_inner(map)))
+    })
+}
+
+/// Returns the root list container named `(id, id_len)`, creating it if it does not yet
+/// exist. Returns null on error. Release the returned handle with `loro_list_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_list(
+    doc: *const LoroDoc,
+    id: *const c_char,
+    id_len: usize,
+) -> *mut LoroList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let name = match str_from_raw(id, id_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        let list = doc.inner().get_list(name);
+        Box::into_raw(Box::new(LoroList::from_inner(list)))
+    })
+}
+
+/// Returns the root movable-list container named `(id, id_len)`, creating it if it does
+/// not yet exist. Returns null on error. Release the returned handle with
+/// `loro_movable_list_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_movable_list(
+    doc: *const LoroDoc,
+    id: *const c_char,
+    id_len: usize,
+) -> *mut LoroMovableList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let name = match str_from_raw(id, id_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        let list = doc.inner().get_movable_list(name);
+        Box::into_raw(Box::new(LoroMovableList::from_inner(list)))
+    })
+}
+
+/// Returns the root tree container named `(id, id_len)`, creating it if it does not yet
+/// exist. Returns null on error. Release the returned handle with `loro_tree_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_tree(
+    doc: *const LoroDoc,
+    id: *const c_char,
+    id_len: usize,
+) -> *mut LoroTree {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let name = match str_from_raw(id, id_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        let tree = doc.inner().get_tree(name);
+        Box::into_raw(Box::new(LoroTree::from_inner(tree)))
+    })
+}
+
+/// Returns the root counter container named `(id, id_len)`, creating it if it does not yet
+/// exist. Returns null on error. Release the returned handle with `loro_counter_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_counter(
+    doc: *const LoroDoc,
+    id: *const c_char,
+    id_len: usize,
+) -> *mut LoroCounter {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let name = match str_from_raw(id, id_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        let counter = doc.inner().get_counter(name);
+        Box::into_raw(Box::new(LoroCounter::from_inner(counter)))
     })
 }
 

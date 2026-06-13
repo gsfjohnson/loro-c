@@ -91,11 +91,74 @@ static void test_error_path(void) {
     loro_doc_free(doc);
 }
 
+/* M2 containers from plain C: map insert/get, list push/get, and a nested map inside a
+ * list attached and read back through the type-erased LoroContainer. */
+static void test_containers(void) {
+    LoroDoc* doc = loro_doc_new();
+
+    /* Map: insert a couple of JSON values and read one back. */
+    LoroMap* m = loro_doc_get_map(doc, "m", 1);
+    CHECK(m != NULL);
+    CHECK(loro_map_insert(m, "n", 1, "42", 2) == LORO_OK);
+    CHECK(loro_map_insert(m, "s", 1, "\"hi\"", 4) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(loro_map_len(m) == 2);
+
+    LoroBytes nval = {0};
+    CHECK(loro_map_get(m, "n", 1, &nval) == LORO_OK);
+    CHECK(bytes_eq(&nval, "42"));
+    loro_bytes_free(nval);
+
+    /* A missing key reports NOT_FOUND. */
+    LoroBytes missing = {0};
+    CHECK(loro_map_get(m, "x", 1, &missing) == LORO_ERR_NOT_FOUND);
+
+    /* List: push two values, read one back. */
+    LoroList* l = loro_doc_get_list(doc, "l", 1);
+    CHECK(loro_list_push(l, "1", 1) == LORO_OK);
+    CHECK(loro_list_push(l, "2", 1) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(loro_list_len(l) == 2);
+
+    LoroBytes first = {0};
+    CHECK(loro_list_get(l, 0, &first) == LORO_OK);
+    CHECK(bytes_eq(&first, "1"));
+    loro_bytes_free(first);
+
+    /* Nested: attach a detached map into the list, write a key, read it back. */
+    LoroContainer* detached = loro_container_new(LORO_CONTAINER_MAP);
+    CHECK(detached != NULL);
+    LoroContainer* attached = loro_list_push_container(l, detached);
+    CHECK(attached != NULL);
+    CHECK(loro_container_type(attached) == LORO_CONTAINER_MAP);
+    LoroMap* child = loro_container_get_map(attached);
+    CHECK(child != NULL);
+    CHECK(loro_map_insert(child, "k", 1, "true", 4) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    LoroContainer* got = loro_list_get_container(l, 2);
+    CHECK(got != NULL);
+    LoroMap* child2 = loro_container_get_map(got);
+    LoroBytes kval = {0};
+    CHECK(loro_map_get(child2, "k", 1, &kval) == LORO_OK);
+    CHECK(bytes_eq(&kval, "true"));
+    loro_bytes_free(kval);
+
+    loro_map_free(child2);
+    loro_container_free(got);
+    loro_map_free(child);
+    loro_container_free(attached);
+    loro_list_free(l);
+    loro_map_free(m);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
     test_free_ordering();
     test_error_path();
+    test_containers();
 
     if (failures == 0) {
         puts("test_c_only: OK");

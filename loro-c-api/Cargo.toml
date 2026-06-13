@@ -1,0 +1,27 @@
+[package]
+name = "loro-c-api"
+version = "0.1.0"
+edition = "2021"
+description = "C/C++ ABI wrapper around the Loro CRDT library"
+license = "MIT"
+publish = false
+
+[lib]
+name = "loro_c_api"
+# M1 ships the staticlib only (the test suite links statically). The `cdylib` /
+# shared-library output plus `.so`/SONAME versioning is deferred to M5, per the plan —
+# and Corrosion 0.5.1 cannot yet name the import library for the `gnullvm` Windows
+# environment used on the dev box. Re-add "cdylib" here in M5.
+crate-type = ["staticlib"]
+
+[dependencies]
+loro = { version = "=1.13.1", features = ["counter", "jsonpath"] }
+serde_json = "1"
+
+# No [build-dependencies]: cbindgen is invoked as a pinned CLI tool, not from build.rs.
+# CI installs it with: cargo install --locked cbindgen@0.29.4
+# Regenerate the committed header with the CMake `regenerate-header` target.
+
+[profile.release]
+# Keep panics unwinding so the FFI panic guard (catch_unwind) actually works.
+panic = "unwind"

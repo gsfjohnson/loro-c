@@ -1,0 +1,13 @@
+# CMake build trees
+/build/
+/build-*/
+
+# Cargo build output
+/loro-c-api/target/
+target/
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/

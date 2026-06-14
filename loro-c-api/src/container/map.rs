@@ -40,6 +40,23 @@ pub extern "C" fn loro_map_free(map: *mut LoroMap) {
     });
 }
 
+/// Writes this container's id (a string such as `cid:root-name:Map`) into `*out`. `*out`
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+/// to `loro_doc_subscribe` to subscribe to this container's events.
+#[no_mangle]
+pub extern "C" fn loro_map_id(map: *const LoroMap, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let map = deref_or!(map, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let id = loro::ContainerTrait::id(map.inner());
+        unsafe { out.write(LoroBytes::from_vec(id.to_string().into_bytes())) };
+        LoroStatus::LORO_OK
+    })
+}
+
 /// Inserts the JSON-encoded value `(value, value_len)` under UTF-8 key `(key, key_len)`.
 #[no_mangle]
 pub extern "C" fn loro_map_insert(

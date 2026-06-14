@@ -153,12 +153,97 @@ static void test_containers(void) {
     loro_doc_free(doc);
 }
 
+/* M3: subscribe to the whole document, walk the DiffEvent envelope + JSON payload, and
+ * confirm unsubscribe (free) stops callbacks and runs free_user_data exactly once. */
+typedef struct {
+    int calls;
+    int last_trigger;
+    size_t last_count;
+    char target[64];
+    char json[256];
+} sub_capture;
+
+static int g_freed = 0;
+
+static void copy_bytes(char* dst, size_t dst_cap, const LoroBytes* b) {
+    size_t n = b->len < dst_cap - 1 ? b->len : dst_cap - 1;
+    if (n > 0) memcpy(dst, b->data, n);
+    dst[n] = '\0';
+}
+
+static void on_event(const LoroDiffEvent* ev, void* ud) {
+    sub_capture* cap = (sub_capture*)ud;
+    ++cap->calls;
+    cap->last_trigger = (int)loro_diff_event_triggered_by(ev);
+    cap->last_count = loro_diff_event_count(ev);
+    if (loro_diff_event_count(ev) > 0) {
+        const LoroContainerDiff* d = loro_diff_event_get(ev, 0);
+        LoroBytes tb = {0};
+        if (loro_container_diff_target(d, &tb) == LORO_OK) {
+            copy_bytes(cap->target, sizeof cap->target, &tb);
+            loro_bytes_free(tb);
+        }
+        LoroBytes jb = {0};
+        if (loro_container_diff_to_json(d, &jb) == LORO_OK) {
+            copy_bytes(cap->json, sizeof cap->json, &jb);
+            loro_bytes_free(jb);
+        }
+    }
+}
+
+static void on_free(void* ud) {
+    (void)ud;
+    ++g_freed;
+}
+
+static void test_subscribe(void) {
+    LoroDoc* doc = loro_doc_new();
+    LoroText* t = loro_doc_get_text(doc, "t", 1);
+
+    sub_capture cap;
+    memset(&cap, 0, sizeof cap);
+
+    LoroSubscriber cb;
+    cb.invoke = on_event;
+    cb.user_data = &cap;
+    cb.free_user_data = on_free;
+
+    LoroSubscription* sub = loro_doc_subscribe_root(doc, cb);
+    CHECK(sub != NULL);
+
+    CHECK(loro_text_insert(t, 0, "hello", 5) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    CHECK(cap.calls == 1);
+    CHECK(cap.last_trigger == LORO_EVENT_TRIGGER_LOCAL);
+    CHECK(cap.last_count >= 1);
+    CHECK(strstr(cap.json, "hello") != NULL);
+
+    /* The diff target matches the text container's id string. */
+    LoroBytes id = {0};
+    CHECK(loro_text_id(t, &id) == LORO_OK);
+    CHECK(bytes_eq(&id, cap.target));
+    loro_bytes_free(id);
+
+    /* Freeing the subscription unsubscribes and runs free_user_data exactly once. */
+    loro_subscription_free(sub);
+    CHECK(g_freed == 1);
+
+    CHECK(loro_text_insert(t, 5, "!", 1) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(cap.calls == 1); /* no further callbacks after unsubscribe */
+
+    loro_text_free(t);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
     test_free_ordering();
     test_error_path();
     test_containers();
+    test_subscribe();
 
     if (failures == 0) {
         puts("test_c_only: OK");

@@ -26,6 +26,7 @@
 #include <loro/loro.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -136,6 +137,13 @@ public:
     /// The underlying C handle (non-owning).
     LoroText* raw() const noexcept { return handle_.get(); }
 
+    /// This container's id string (e.g. "cid:root-name:Text"); pass to Doc::subscribe.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_text_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
     /// Inserts `s` (UTF-8) at Unicode codepoint index `pos`.
     void insert(std::size_t pos, std::string_view s) {
         detail::check(loro_text_insert(handle_.get(), pos, s.data(), s.size()));
@@ -190,6 +198,13 @@ public:
 
     /// The underlying C handle (non-owning).
     LoroMap* raw() const noexcept { return handle_.get(); }
+
+    /// This container's id string (e.g. "cid:root-name:Map"); pass to Doc::subscribe.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_map_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
 
     /// Inserts the JSON-encoded value `json` under `key`.
     void insert(std::string_view key, std::string_view json) {
@@ -250,6 +265,13 @@ public:
     }
 
     LoroList* raw() const noexcept { return handle_.get(); }
+
+    /// This container's id string (e.g. "cid:root-name:List"); pass to Doc::subscribe.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_list_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
 
     /// Inserts the JSON-encoded value `json` at `pos`.
     void insert(std::size_t pos, std::string_view json) {
@@ -319,6 +341,13 @@ public:
     }
 
     LoroMovableList* raw() const noexcept { return handle_.get(); }
+
+    /// This container's id string (e.g. "cid:root-name:MovableList"); pass to Doc::subscribe.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_movable_list_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
 
     void insert(std::size_t pos, std::string_view json) {
         detail::check(loro_movable_list_insert(handle_.get(), pos, json.data(), json.size()));
@@ -391,6 +420,13 @@ public:
 
     LoroCounter* raw() const noexcept { return handle_.get(); }
 
+    /// This container's id string (e.g. "cid:root-name:Counter"); pass to Doc::subscribe.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_counter_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
     /// Increments the counter by `value` (may be negative).
     void increment(double value) { detail::check(loro_counter_increment(handle_.get(), value)); }
 
@@ -416,6 +452,13 @@ public:
     }
 
     LoroTree* raw() const noexcept { return handle_.get(); }
+
+    /// This container's id string (e.g. "cid:root-name:Tree"); pass to Doc::subscribe.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_tree_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
 
     /// Creates a node under `parent` (nullopt = root).
     TreeId create(std::optional<TreeId> parent = std::nullopt) {
@@ -561,6 +604,14 @@ public:
 
     LoroContainer* raw() const noexcept { return handle_.get(); }
 
+    /// This container's id string (e.g. "cid:root-name:Map"); pass to Doc::subscribe.
+    /// Only meaningful once the container is attached to a document.
+    std::string id() const {
+        detail::Bytes b;
+        detail::check(loro_container_id(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
     /// Relinquishes ownership of the raw handle. Used internally when passing a container
     /// into a *_insert_container function, which consumes it.
     LoroContainer* release() noexcept { return handle_.release(); }
@@ -664,6 +715,144 @@ inline Container MovableList::set_container(std::size_t pos, Container&& child) 
     return Container(a);
 }
 
+/// How a diff event was triggered. Alias of the C ABI enum.
+using EventTriggerKind = ::LoroEventTriggerKind;
+
+/// The kind of a container diff (selects how to read ContainerDiff::to_json). Alias of the
+/// C ABI enum.
+using DiffKind = ::LoroDiffKind;
+
+/// Non-owning, **callback-scoped** view of one container's diff within a DiffEvent. Valid
+/// only for the duration of the subscriber callback; never store it or any string obtained
+/// from it beyond the call.
+class ContainerDiff {
+public:
+    explicit ContainerDiff(const LoroContainerDiff* raw) noexcept : raw_(raw) {}
+
+    const LoroContainerDiff* raw() const noexcept { return raw_; }
+
+    /// The target container's id string (matches e.g. Text::id()).
+    std::string target() const {
+        detail::Bytes b;
+        detail::check(loro_container_diff_target(raw_, b.out()));
+        return b.to_string();
+    }
+
+    /// Whether the diff is from an unknown container type.
+    bool is_unknown() const { return loro_container_diff_is_unknown(raw_); }
+
+    /// The kind of this diff; selects how to interpret to_json().
+    DiffKind kind() const { return loro_container_diff_kind(raw_); }
+
+    /// The path from the document root to this container, as a JSON array string.
+    std::string path_json() const {
+        detail::Bytes b;
+        detail::check(loro_container_diff_path_json(raw_, b.out()));
+        return b.to_string();
+    }
+
+    /// This container's delta payload as a JSON string (schema depends on kind()).
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_container_diff_to_json(raw_, b.out()));
+        return b.to_string();
+    }
+
+private:
+    const LoroContainerDiff* raw_;
+};
+
+/// Non-owning, **callback-scoped** view of a diff event passed to a subscriber. Valid only
+/// for the duration of the callback; never store it (or any ContainerDiff / string obtained
+/// from it) beyond the call.
+class DiffEvent {
+public:
+    explicit DiffEvent(const LoroDiffEvent* raw) noexcept : raw_(raw) {}
+
+    const LoroDiffEvent* raw() const noexcept { return raw_; }
+
+    /// How the event was triggered.
+    EventTriggerKind triggered_by() const { return loro_diff_event_triggered_by(raw_); }
+
+    /// The event origin string (possibly empty).
+    std::string origin() const {
+        detail::Bytes b;
+        detail::check(loro_diff_event_origin(raw_, b.out()));
+        return b.to_string();
+    }
+
+    /// The current target container id, or std::nullopt (e.g. for a root subscription).
+    std::optional<std::string> current_target() const {
+        detail::Bytes b;
+        if (!detail::check_found(loro_diff_event_current_target(raw_, b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+
+    /// The number of per-container diffs.
+    std::size_t size() const { return loro_diff_event_count(raw_); }
+
+    /// The container diff at `index`. Throws loro::Error if out of range.
+    ContainerDiff operator[](std::size_t index) const {
+        const LoroContainerDiff* cd = loro_diff_event_get(raw_, index);
+        if (!cd) throw Error(LORO_ERR_NOT_FOUND, detail::last_error_message());
+        return ContainerDiff(cd);
+    }
+
+private:
+    const LoroDiffEvent* raw_;
+};
+
+/// RAII handle for a subscription. Destroying it unsubscribes and runs the callback's
+/// user-data destructor. Move-only.
+class Subscription {
+public:
+    explicit Subscription(LoroSubscription* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroSubscription* raw() const noexcept { return handle_.get(); }
+
+    /// Detaches: stops managing the subscription here, leaving the callback firing until the
+    /// document is dropped. The handle becomes empty.
+    void detach() { loro_subscription_detach(handle_.release()); }
+
+private:
+    struct Deleter {
+        void operator()(LoroSubscription* p) const noexcept { loro_subscription_free(p); }
+    };
+    std::unique_ptr<LoroSubscription, Deleter> handle_;
+};
+
+/// A document/container subscriber: invoked with a callback-scoped DiffEvent on each change.
+/// May fire from any thread that mutates the document, so it must be reentrant.
+using SubscriberFn = std::function<void(const DiffEvent&)>;
+
+/// A local-update subscriber: invoked with the update bytes of each local commit; return
+/// false to auto-unsubscribe. May fire from any thread that mutates the document.
+using LocalUpdateFn = std::function<bool(const std::uint8_t*, std::size_t)>;
+
+namespace detail {
+
+// `extern "C"` trampolines bridging the type-erased C callback triple to the stored
+// std::function. Uniquely named to avoid clashing with other C symbols.
+extern "C" inline void loro_hpp_subscriber_invoke(const LoroDiffEvent* ev, void* ud) {
+    DiffEvent event(ev);
+    (*static_cast<SubscriberFn*>(ud))(event);
+}
+extern "C" inline void loro_hpp_subscriber_free(void* ud) {
+    delete static_cast<SubscriberFn*>(ud);
+}
+extern "C" inline bool loro_hpp_local_update_invoke(const std::uint8_t* data, std::uintptr_t len,
+                                                    void* ud) {
+    return (*static_cast<LocalUpdateFn*>(ud))(data, len);
+}
+extern "C" inline void loro_hpp_local_update_free(void* ud) {
+    delete static_cast<LocalUpdateFn*>(ud);
+}
+
+}  // namespace detail
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -754,6 +943,49 @@ public:
 
     /// A deep fork of the document at its current version.
     Doc fork() const { return Doc(loro_doc_fork(handle_.get())); }
+
+    /// Subscribes to changes of the container with id `cid` (e.g. `text.id()`). The callback
+    /// fires after each relevant commit/import with a callback-scoped DiffEvent. Destroy the
+    /// returned Subscription to unsubscribe. The callback must be reentrant (it may fire from
+    /// any thread that mutates the document).
+    Subscription subscribe(std::string_view cid, SubscriberFn cb) {
+        auto* fn = new SubscriberFn(std::move(cb));
+        LoroSubscriber c{detail::loro_hpp_subscriber_invoke, fn, detail::loro_hpp_subscriber_free};
+        LoroSubscription* s = loro_doc_subscribe(handle_.get(), cid.data(), cid.size(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+    /// Subscribes to all changes of the whole document. Destroy the returned Subscription to
+    /// unsubscribe.
+    Subscription subscribe_root(SubscriberFn cb) {
+        auto* fn = new SubscriberFn(std::move(cb));
+        LoroSubscriber c{detail::loro_hpp_subscriber_invoke, fn, detail::loro_hpp_subscriber_free};
+        LoroSubscription* s = loro_doc_subscribe_root(handle_.get(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+    /// Subscribes to the raw update bytes of each local commit. The callback returns true to
+    /// stay subscribed (false auto-unsubscribes). Destroy the returned Subscription to
+    /// unsubscribe.
+    Subscription subscribe_local_update(LocalUpdateFn cb) {
+        auto* fn = new LocalUpdateFn(std::move(cb));
+        LoroLocalUpdateCallback c{detail::loro_hpp_local_update_invoke, fn,
+                                  detail::loro_hpp_local_update_free};
+        LoroSubscription* s = loro_doc_subscribe_local_update(handle_.get(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
 
 private:
     struct Deleter {

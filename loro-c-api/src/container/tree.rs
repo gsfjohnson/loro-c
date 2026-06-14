@@ -69,6 +69,23 @@ pub extern "C" fn loro_tree_free(tree: *mut LoroTree) {
     });
 }
 
+/// Writes this container's id (a string such as `cid:root-name:Tree`) into `*out`. `*out`
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+/// to `loro_doc_subscribe` to subscribe to this container's events.
+#[no_mangle]
+pub extern "C" fn loro_tree_id(tree: *const LoroTree, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let id = loro::ContainerTrait::id(tree.inner());
+        unsafe { out.write(LoroBytes::from_vec(id.to_string().into_bytes())) };
+        LoroStatus::LORO_OK
+    })
+}
+
 /// Creates a node under `parent` (null = root) and writes its id into `*out`. `*out` is
 /// only written on `LORO_OK`.
 #[no_mangle]

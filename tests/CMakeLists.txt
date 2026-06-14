@@ -25,6 +25,11 @@ add_executable(loro_test_tree test_tree.cpp)
 target_link_libraries(loro_test_tree PRIVATE loro::loro)
 add_test(NAME test_tree COMMAND loro_test_tree)
 
+# M3 events/subscriptions.
+add_executable(loro_test_subscriptions test_subscriptions.cpp)
+target_link_libraries(loro_test_subscriptions PRIVATE loro::loro)
+add_test(NAME test_subscriptions COMMAND loro_test_subscriptions)
+
 # Proves the C ABI is usable from plain C (compiled as C, not C++).
 add_executable(loro_test_c_only test_c_only.c)
 target_link_libraries(loro_test_c_only PRIVATE loro::loro)
@@ -38,5 +43,6 @@ if(TARGET loro_cargo_build)
     add_dependencies(loro_test_movable_list loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)
     add_dependencies(loro_test_tree loro_cargo_build)
+    add_dependencies(loro_test_subscriptions loro_cargo_build)
     add_dependencies(loro_test_c_only loro_cargo_build)
 endif()

@@ -68,14 +68,64 @@ typedef enum LoroStatus {
 } LoroStatus;
 
 /**
+ * How a diff event was triggered. Mirrors `loro::EventTriggerKind`.
+ */
+typedef enum LoroEventTriggerKind {
+    /**
+     * A local transaction (commit).
+     */
+    LORO_EVENT_TRIGGER_LOCAL = 0,
+    /**
+     * Importing remote updates / a snapshot.
+     */
+    LORO_EVENT_TRIGGER_IMPORT = 1,
+    /**
+     * A `checkout` (time travel) to another version.
+     */
+    LORO_EVENT_TRIGGER_CHECKOUT = 2,
+} LoroEventTriggerKind;
+
+/**
+ * The kind of a container diff — selects how to interpret
+ * [`loro_container_diff_to_json`]'s payload. Mirrors the `loro::event::Diff` variants.
+ */
+typedef enum LoroDiffKind {
+    LORO_DIFF_LIST = 0,
+    LORO_DIFF_TEXT = 1,
+    LORO_DIFF_MAP = 2,
+    LORO_DIFF_TREE = 3,
+    LORO_DIFF_COUNTER = 4,
+    LORO_DIFF_UNKNOWN = 5,
+} LoroDiffKind;
+
+/**
  * Opaque, type-erased handle to any Loro container.
  */
 typedef struct LoroContainer LoroContainer;
 
 /**
+ * Opaque, **callback-scoped** view of one container's diff, obtained from
+ * [`loro_diff_event_get`]. Only valid for the duration of the subscriber callback. Like
+ * [`LoroDiffEvent`], a `*const LoroContainerDiff` actually points to a borrowed
+ * `loro::event::ContainerDiff` (see [`container_diff_ref`]).
+ */
+typedef struct LoroContainerDiff LoroContainerDiff;
+
+/**
  * Opaque handle to a Loro counter container.
  */
 typedef struct LoroCounter LoroCounter;
+
+/**
+ * Opaque, **callback-scoped** view of a diff event. Only valid for the duration of the
+ * subscriber callback; never store it or use it afterwards.
+ *
+ * This is an opaque token for C only. A `*const LoroDiffEvent` always actually points to
+ * a borrowed `loro::event::DiffEvent`; the accessors reinterpret the pointer back to that
+ * type (see [`event_ref`]). The wrapper's own layout is never relied upon — the field
+ * exists only so cbindgen renders the type as an opaque `struct`.
+ */
+typedef struct LoroDiffEvent LoroDiffEvent;
 
 /**
  * Opaque handle to a Loro document. Create with [`loro_doc_new`], release with
@@ -97,6 +147,12 @@ typedef struct LoroMap LoroMap;
  * Opaque handle to a Loro movable-list container.
  */
 typedef struct LoroMovableList LoroMovableList;
+
+/**
+ * Opaque subscription handle / unsubscriber. Free with [`loro_subscription_free`]
+ * (unsubscribes) or [`loro_subscription_detach`] (keep firing until the doc drops).
+ */
+typedef struct LoroSubscription LoroSubscription;
 
 /**
  * Opaque handle to a Loro text container.
@@ -138,6 +194,33 @@ typedef struct LoroTreeID {
     int32_t counter;
 } LoroTreeID;
 
+/**
+ * A C subscriber callback for [`loro_doc_subscribe`] / [`loro_doc_subscribe_root`].
+ *
+ * `invoke` is called with a callback-scoped `const LoroDiffEvent*` and the opaque
+ * `user_data`. `free_user_data` (may be null) is called once when the subscription is
+ * released. The callback may be invoked from any thread that mutates the document, so it
+ * must be reentrant / thread-safe.
+ */
+typedef struct LoroSubscriber {
+    void (*invoke)(const struct LoroDiffEvent *event, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroSubscriber;
+
+/**
+ * A C callback for [`loro_doc_subscribe_local_update`].
+ *
+ * `invoke` receives the update bytes `(data, len)` of a local commit and the opaque
+ * `user_data`; returning `false` auto-unsubscribes. `free_user_data` (may be null) runs
+ * once when the subscription is released.
+ */
+typedef struct LoroLocalUpdateCallback {
+    bool (*invoke)(const uint8_t *data, uintptr_t len, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroLocalUpdateCallback;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -162,6 +245,14 @@ struct LoroContainer *loro_container_new(enum LoroContainerType ty);
  * Frees a container handle. Passing null is a no-op.
  */
 void loro_container_free(struct LoroContainer *container);
+
+/**
+ * Writes this container's id (a string such as `cid:root-name:Map`) into `*out`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+ * to `loro_doc_subscribe` to subscribe to this container's events. Returns
+ * `LORO_ERR_INVALID_ARG` for a detached (not-yet-attached) container.
+ */
+enum LoroStatus loro_container_id(const struct LoroContainer *container, struct LoroBytes *out);
 
 /**
  * Returns the kind of the container. Returns `LORO_CONTAINER_UNKNOWN` on a null handle.
@@ -208,6 +299,13 @@ struct LoroCounter *loro_container_get_counter(const struct LoroContainer *conta
 void loro_counter_free(struct LoroCounter *counter);
 
 /**
+ * Writes this container's id (a string such as `cid:root-name:Counter`) into `*out`.
+ * `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written
+ * string to `loro_doc_subscribe` to subscribe to this container's events.
+ */
+enum LoroStatus loro_counter_id(const struct LoroCounter *counter, struct LoroBytes *out);
+
+/**
  * Increments the counter by `value` (may be negative).
  */
 enum LoroStatus loro_counter_increment(struct LoroCounter *counter, double value);
@@ -227,6 +325,13 @@ double loro_counter_get_value(const struct LoroCounter *counter);
  * originating `LoroDoc*` is freed.
  */
 void loro_list_free(struct LoroList *list);
+
+/**
+ * Writes this container's id (a string such as `cid:root-name:List`) into `*out`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+ * to `loro_doc_subscribe` to subscribe to this container's events.
+ */
+enum LoroStatus loro_list_id(const struct LoroList *list, struct LoroBytes *out);
 
 /**
  * Inserts the JSON-encoded value `(value, value_len)` at index `pos`.
@@ -313,6 +418,13 @@ enum LoroStatus loro_list_clear(struct LoroList *list);
 void loro_map_free(struct LoroMap *map);
 
 /**
+ * Writes this container's id (a string such as `cid:root-name:Map`) into `*out`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+ * to `loro_doc_subscribe` to subscribe to this container's events.
+ */
+enum LoroStatus loro_map_id(const struct LoroMap *map, struct LoroBytes *out);
+
+/**
  * Inserts the JSON-encoded value `(value, value_len)` under UTF-8 key `(key, key_len)`.
  */
 enum LoroStatus loro_map_insert(struct LoroMap *map,
@@ -389,6 +501,13 @@ enum LoroStatus loro_map_clear(struct LoroMap *map);
  * originating `LoroDoc*` is freed.
  */
 void loro_movable_list_free(struct LoroMovableList *list);
+
+/**
+ * Writes this container's id (a string such as `cid:root-name:MovableList`) into `*out`.
+ * `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written
+ * string to `loro_doc_subscribe` to subscribe to this container's events.
+ */
+enum LoroStatus loro_movable_list_id(const struct LoroMovableList *list, struct LoroBytes *out);
 
 /**
  * Inserts the JSON-encoded value `(value, value_len)` at index `pos`.
@@ -508,6 +627,13 @@ enum LoroStatus loro_movable_list_clear(struct LoroMovableList *list);
 void loro_text_free(struct LoroText *text);
 
 /**
+ * Writes this container's id (a string such as `cid:root-name:Text`) into `*out`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+ * to `loro_doc_subscribe` to subscribe to this container's events.
+ */
+enum LoroStatus loro_text_id(const struct LoroText *text, struct LoroBytes *out);
+
+/**
  * Inserts the UTF-8 string `(s, len)` at Unicode codepoint index `pos`.
  */
 enum LoroStatus loro_text_insert(struct LoroText *text,
@@ -560,6 +686,13 @@ enum LoroStatus loro_text_to_string(const struct LoroText *text, struct LoroByte
  * originating `LoroDoc*` is freed.
  */
 void loro_tree_free(struct LoroTree *tree);
+
+/**
+ * Writes this container's id (a string such as `cid:root-name:Tree`) into `*out`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+ * to `loro_doc_subscribe` to subscribe to this container's events.
+ */
+enum LoroStatus loro_tree_id(const struct LoroTree *tree, struct LoroBytes *out);
 
 /**
  * Creates a node under `parent` (null = root) and writes its id into `*out`. `*out` is
@@ -810,6 +943,119 @@ enum LoroStatus loro_doc_get_deep_value_json(const struct LoroDoc *doc, struct L
  * string if you need to keep it.
  */
 const char *loro_last_error_message(void);
+
+/**
+ * Subscribes to changes of the container identified by the container-id string
+ * `(cid, cid_len)` (e.g. as produced by `loro_text_id`). Returns a `LoroSubscription*`,
+ * or null on a null doc / invalid id / caught panic. Free it with
+ * [`loro_subscription_free`] (which unsubscribes).
+ */
+struct LoroSubscription *loro_doc_subscribe(const struct LoroDoc *doc,
+                                            const char *cid,
+                                            uintptr_t cid_len,
+                                            struct LoroSubscriber callback);
+
+/**
+ * Subscribes to all changes of the whole document. Returns a `LoroSubscription*`, or null
+ * on a null doc / caught panic. Free it with [`loro_subscription_free`].
+ */
+struct LoroSubscription *loro_doc_subscribe_root(const struct LoroDoc *doc,
+                                                 struct LoroSubscriber callback);
+
+/**
+ * Subscribes to the raw update bytes produced by each local commit. The callback returns
+ * `true` to stay subscribed (`false` auto-unsubscribes). Returns a `LoroSubscription*`,
+ * or null on a null doc / caught panic. Free it with [`loro_subscription_free`].
+ */
+struct LoroSubscription *loro_doc_subscribe_local_update(const struct LoroDoc *doc,
+                                                         struct LoroLocalUpdateCallback callback);
+
+/**
+ * Releases a subscription, **unsubscribing** the callback and running its
+ * `free_user_data`. Passing null is a no-op.
+ */
+void loro_subscription_free(struct LoroSubscription *sub);
+
+/**
+ * Detaches a subscription: frees the handle but leaves the callback firing until the
+ * document itself is dropped (at which point `free_user_data` runs). Passing null is a
+ * no-op.
+ */
+void loro_subscription_detach(struct LoroSubscription *sub);
+
+/**
+ * Returns how the event was triggered. Returns `LORO_EVENT_TRIGGER_LOCAL` on a null
+ * handle.
+ */
+enum LoroEventTriggerKind loro_diff_event_triggered_by(const struct LoroDiffEvent *ev);
+
+/**
+ * Writes the event's origin string (UTF-8, possibly empty) into `*out`. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_diff_event_origin(const struct LoroDiffEvent *ev, struct LoroBytes *out);
+
+/**
+ * Writes the current target container id (as a string) into `*out`. Returns
+ * `LORO_ERR_NOT_FOUND` if the event has no current target (e.g. a root subscription).
+ * `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_diff_event_current_target(const struct LoroDiffEvent *ev,
+                                               struct LoroBytes *out);
+
+/**
+ * Returns the number of per-container diffs in the event. Returns 0 on a null handle.
+ */
+uintptr_t loro_diff_event_count(const struct LoroDiffEvent *ev);
+
+/**
+ * Returns a callback-scoped pointer to the container diff at `index`, or null (with an
+ * error recorded) if `index` is out of range. Do NOT free or store the returned pointer.
+ */
+const struct LoroContainerDiff *loro_diff_event_get(const struct LoroDiffEvent *ev,
+                                                    uintptr_t index);
+
+/**
+ * Writes the target container id (as a string) into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_container_diff_target(const struct LoroContainerDiff *cd,
+                                           struct LoroBytes *out);
+
+/**
+ * Returns whether this diff is from an unknown container type. Returns `false` on a null
+ * handle.
+ */
+bool loro_container_diff_is_unknown(const struct LoroContainerDiff *cd);
+
+/**
+ * Returns the kind of this container diff. Returns `LORO_DIFF_UNKNOWN` on a null handle.
+ */
+enum LoroDiffKind loro_container_diff_kind(const struct LoroContainerDiff *cd);
+
+/**
+ * Writes the diff's path (from the root to this container) into `*out` as a JSON array of
+ * `{"cid": <string>, "index": {"key"|"seq"|"node": ...}}`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_container_diff_path_json(const struct LoroContainerDiff *cd,
+                                              struct LoroBytes *out);
+
+/**
+ * Writes this container's delta payload into `*out` as JSON. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`. The shape depends on the diff kind
+ * ([`loro_container_diff_kind`]):
+ * - **Text**: `[{"retain":n,"attributes":{...}?},{"insert":"..","attributes":{...}?},{"delete":n}]`
+ * - **List**: `[{"retain":n},{"insert":[<value>...],"is_move":bool},{"delete":n}]`
+ * - **Map**: `{"<key>": <value> | null}` (null = key deleted)
+ * - **Tree**: `[{"target":{...},"action":"create"|"move"|"delete",...}]`
+ * - **Counter**: `<number>`  •  **Unknown**: `null`
+ *
+ * Inserted values/containers are rendered as their deep value (JSON); a live container
+ * handle is not surfaced here.
+ */
+enum LoroStatus loro_container_diff_to_json(const struct LoroContainerDiff *cd,
+                                            struct LoroBytes *out);
 
 /**
  * Frees a [`LoroBytes`] previously returned by this library. Passing an

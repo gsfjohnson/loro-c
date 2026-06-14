@@ -56,6 +56,23 @@ pub extern "C" fn loro_text_free(text: *mut LoroText) {
     });
 }
 
+/// Writes this container's id (a string such as `cid:root-name:Text`) into `*out`. `*out`
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+/// to `loro_doc_subscribe` to subscribe to this container's events.
+#[no_mangle]
+pub extern "C" fn loro_text_id(text: *const LoroText, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let text = deref_or!(text, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let id = loro::ContainerTrait::id(text.inner());
+        unsafe { out.write(LoroBytes::from_vec(id.to_string().into_bytes())) };
+        LoroStatus::LORO_OK
+    })
+}
+
 /// Inserts the UTF-8 string `(s, len)` at Unicode codepoint index `pos`.
 #[no_mangle]
 pub extern "C" fn loro_text_insert(

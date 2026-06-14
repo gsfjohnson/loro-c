@@ -5,7 +5,8 @@
 //! handle, a `LoroCounter*` is a strong co-owner of the document state (see `doc.rs`) and
 //! may be freed in any order.
 
-use crate::error::{record_loro_error, LoroStatus};
+use crate::error::{record_loro_error, set_last_error, LoroStatus};
+use crate::value::LoroBytes;
 
 /// Opaque handle to a Loro counter container.
 pub struct LoroCounter(loro::LoroCounter);
@@ -31,6 +32,23 @@ pub extern "C" fn loro_counter_free(counter: *mut LoroCounter) {
             }
         }
     });
+}
+
+/// Writes this container's id (a string such as `cid:root-name:Counter`) into `*out`.
+/// `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written
+/// string to `loro_doc_subscribe` to subscribe to this container's events.
+#[no_mangle]
+pub extern "C" fn loro_counter_id(counter: *const LoroCounter, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let counter = deref_or!(counter, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let id = loro::ContainerTrait::id(counter.inner());
+        unsafe { out.write(LoroBytes::from_vec(id.to_string().into_bytes())) };
+        LoroStatus::LORO_OK
+    })
 }
 
 /// Increments the counter by `value` (may be negative).

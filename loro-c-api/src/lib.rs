@@ -13,9 +13,11 @@
 #[macro_use]
 mod macros;
 
+pub mod callbacks;
 pub mod container;
 pub mod doc;
 pub mod error;
+pub mod event;
 pub mod value;
 
 use std::os::raw::c_char;

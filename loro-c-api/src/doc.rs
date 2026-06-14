@@ -18,7 +18,7 @@ use std::os::raw::c_char;
 pub struct LoroDoc(loro::LoroDoc);
 
 impl LoroDoc {
-    fn inner(&self) -> &loro::LoroDoc {
+    pub(crate) fn inner(&self) -> &loro::LoroDoc {
         &self.0
     }
 }

@@ -17,7 +17,8 @@ use crate::container::map::LoroMap;
 use crate::container::movable_list::LoroMovableList;
 use crate::container::text::LoroText;
 use crate::container::tree::LoroTree;
-use crate::error::set_last_error;
+use crate::error::{set_last_error, LoroStatus};
+use crate::value::LoroBytes;
 
 /// Opaque, type-erased handle to any Loro container.
 pub struct LoroContainer(loro::Container);
@@ -96,6 +97,27 @@ pub extern "C" fn loro_container_free(container: *mut LoroContainer) {
             }
         }
     });
+}
+
+/// Writes this container's id (a string such as `cid:root-name:Map`) into `*out`. `*out`
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+/// to `loro_doc_subscribe` to subscribe to this container's events. Returns
+/// `LORO_ERR_INVALID_ARG` for a detached (not-yet-attached) container.
+#[no_mangle]
+pub extern "C" fn loro_container_id(
+    container: *const LoroContainer,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let container = deref_or!(container, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let id = loro::ContainerTrait::id(container.inner());
+        unsafe { out.write(LoroBytes::from_vec(id.to_string().into_bytes())) };
+        LoroStatus::LORO_OK
+    })
 }
 
 /// Returns the kind of the container. Returns `LORO_CONTAINER_UNKNOWN` on a null handle.

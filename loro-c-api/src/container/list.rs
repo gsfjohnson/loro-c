@@ -40,6 +40,23 @@ pub extern "C" fn loro_list_free(list: *mut LoroList) {
     });
 }
 
+/// Writes this container's id (a string such as `cid:root-name:List`) into `*out`. `*out`
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`. Pass the written string
+/// to `loro_doc_subscribe` to subscribe to this container's events.
+#[no_mangle]
+pub extern "C" fn loro_list_id(list: *const LoroList, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let list = deref_or!(list, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let id = loro::ContainerTrait::id(list.inner());
+        unsafe { out.write(LoroBytes::from_vec(id.to_string().into_bytes())) };
+        LoroStatus::LORO_OK
+    })
+}
+
 /// Inserts the JSON-encoded value `(value, value_len)` at index `pos`.
 #[no_mangle]
 pub extern "C" fn loro_list_insert(

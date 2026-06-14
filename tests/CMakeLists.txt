@@ -30,6 +30,12 @@ add_executable(loro_test_subscriptions test_subscriptions.cpp)
 target_link_libraries(loro_test_subscriptions PRIVATE loro::loro)
 add_test(NAME test_subscriptions COMMAND loro_test_subscriptions)
 
+# M4 advanced: versions/frontiers, time travel, fractional index, awareness/ephemeral,
+# undo manager, jsonpath, commit hooks, change ancestors.
+add_executable(loro_test_advanced test_advanced.cpp)
+target_link_libraries(loro_test_advanced PRIVATE loro::loro)
+add_test(NAME test_advanced COMMAND loro_test_advanced)
+
 # Proves the C ABI is usable from plain C (compiled as C, not C++).
 add_executable(loro_test_c_only test_c_only.c)
 target_link_libraries(loro_test_c_only PRIVATE loro::loro)
@@ -44,5 +50,6 @@ if(TARGET loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)
     add_dependencies(loro_test_tree loro_cargo_build)
     add_dependencies(loro_test_subscriptions loro_cargo_build)
+    add_dependencies(loro_test_advanced loro_cargo_build)
     add_dependencies(loro_test_c_only loro_cargo_build)
 endif()

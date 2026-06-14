@@ -11,22 +11,6 @@
 #include <stdbool.h>
 
 /**
- * The kind of a [`LoroContainer`]. Mirrors `loro::ContainerType`.
- */
-typedef enum LoroContainerType {
-    LORO_CONTAINER_MAP = 0,
-    LORO_CONTAINER_LIST = 1,
-    LORO_CONTAINER_TEXT = 2,
-    LORO_CONTAINER_MOVABLE_LIST = 3,
-    LORO_CONTAINER_TREE = 4,
-    LORO_CONTAINER_COUNTER = 5,
-    /**
-     * An unknown / unsupported container kind. Cannot be created.
-     */
-    LORO_CONTAINER_UNKNOWN = 6,
-} LoroContainerType;
-
-/**
  * Status / error code returned by fallible `loro-c-api` functions.
  *
  * `LORO_OK` is guaranteed to be `0`, so callers may treat any non-zero value as failure.
@@ -68,6 +52,41 @@ typedef enum LoroStatus {
 } LoroStatus;
 
 /**
+ * How an ephemeral-store event was triggered. Mirrors
+ * `loro::awareness::EphemeralEventTrigger`.
+ */
+typedef enum LoroEphemeralEventTrigger {
+    /**
+     * A local `set`/`delete`.
+     */
+    LORO_EPHEMERAL_LOCAL = 0,
+    /**
+     * An `apply` of remote data.
+     */
+    LORO_EPHEMERAL_IMPORT = 1,
+    /**
+     * A `remove_outdated` expiry sweep.
+     */
+    LORO_EPHEMERAL_TIMEOUT = 2,
+} LoroEphemeralEventTrigger;
+
+/**
+ * The kind of a [`LoroContainer`]. Mirrors `loro::ContainerType`.
+ */
+typedef enum LoroContainerType {
+    LORO_CONTAINER_MAP = 0,
+    LORO_CONTAINER_LIST = 1,
+    LORO_CONTAINER_TEXT = 2,
+    LORO_CONTAINER_MOVABLE_LIST = 3,
+    LORO_CONTAINER_TREE = 4,
+    LORO_CONTAINER_COUNTER = 5,
+    /**
+     * An unknown / unsupported container kind. Cannot be created.
+     */
+    LORO_CONTAINER_UNKNOWN = 6,
+} LoroContainerType;
+
+/**
  * How a diff event was triggered. Mirrors `loro::EventTriggerKind`.
  */
 typedef enum LoroEventTriggerKind {
@@ -97,6 +116,28 @@ typedef enum LoroDiffKind {
     LORO_DIFF_COUNTER = 4,
     LORO_DIFF_UNKNOWN = 5,
 } LoroDiffKind;
+
+/**
+ * Whether a pushed/popped item belongs to the undo or the redo stack. Mirrors
+ * `loro::UndoOrRedo`.
+ */
+typedef enum LoroUndoOrRedo {
+    LORO_UNDO = 0,
+    LORO_REDO = 1,
+} LoroUndoOrRedo;
+
+/**
+ * Opaque handle to a [`loro::awareness::Awareness`]. Free with [`loro_awareness_free`].
+ */
+typedef struct LoroAwareness LoroAwareness;
+
+/**
+ * Opaque, **callback-scoped** view of one change's metadata. Only valid for the duration of
+ * the callback that receives it (a change-ancestor traveler or a pre-commit hook); never
+ * store the pointer. Internally a `*const LoroChangeMeta` always points to a borrowed
+ * `loro::ChangeMeta` (see [`change_meta_ref`]).
+ */
+typedef struct LoroChangeMeta LoroChangeMeta;
 
 /**
  * Opaque, type-erased handle to any Loro container.
@@ -134,6 +175,35 @@ typedef struct LoroDiffEvent LoroDiffEvent;
 typedef struct LoroDoc LoroDoc;
 
 /**
+ * Opaque handle to a [`loro::awareness::EphemeralStore`]. Free with
+ * [`loro_ephemeral_store_free`].
+ */
+typedef struct LoroEphemeralStore LoroEphemeralStore;
+
+/**
+ * Opaque, **callback-scoped** view of an ephemeral-store change event. Only valid for the
+ * duration of the subscriber callback; never store it. A `*const LoroEphemeralStoreEvent`
+ * always points to a borrowed `loro::awareness::EphemeralStoreEvent`.
+ */
+typedef struct LoroEphemeralStoreEvent LoroEphemeralStoreEvent;
+
+/**
+ * Opaque handle to a [`loro::FractionalIndex`].
+ */
+typedef struct LoroFractionalIndex LoroFractionalIndex;
+
+/**
+ * Opaque handle to a [`loro::Frontiers`]. Free with [`loro_frontiers_free`].
+ */
+typedef struct LoroFrontiers LoroFrontiers;
+
+/**
+ * Opaque, owned collection of JSONPath query results. Free with
+ * [`loro_jsonpath_results_free`].
+ */
+typedef struct LoroJsonPathResults LoroJsonPathResults;
+
+/**
  * Opaque handle to a Loro list container.
  */
 typedef struct LoroList LoroList;
@@ -147,6 +217,13 @@ typedef struct LoroMap LoroMap;
  * Opaque handle to a Loro movable-list container.
  */
 typedef struct LoroMovableList LoroMovableList;
+
+/**
+ * Opaque, **callback-scoped** view of a pre-commit payload. Only valid for the duration of
+ * the pre-commit callback. A `*const LoroPreCommitPayload` always points to a borrowed
+ * `loro::PreCommitCallbackPayload`.
+ */
+typedef struct LoroPreCommitPayload LoroPreCommitPayload;
 
 /**
  * Opaque subscription handle / unsubscriber. Free with [`loro_subscription_free`]
@@ -163,6 +240,22 @@ typedef struct LoroText LoroText;
  * Opaque handle to a Loro tree container.
  */
 typedef struct LoroTree LoroTree;
+
+/**
+ * Opaque handle to a [`loro::UndoManager`]. Free with [`loro_undo_manager_free`].
+ */
+typedef struct LoroUndoManager LoroUndoManager;
+
+/**
+ * Opaque, **callback-scoped** handle to an undo item's metadata, passed to the on_push /
+ * on_pop callbacks. A `*mut LoroUndoMeta` always points to a real `loro::UndoItemMeta`.
+ */
+typedef struct LoroUndoMeta LoroUndoMeta;
+
+/**
+ * Opaque handle to a [`loro::VersionVector`]. Free with [`loro_version_vector_free`].
+ */
+typedef struct LoroVersionVector LoroVersionVector;
 
 /**
  * An owned, heap-allocated byte buffer handed to the caller.
@@ -184,6 +277,54 @@ typedef struct LoroBytes {
      */
     uintptr_t cap;
 } LoroBytes;
+
+/**
+ * A C subscriber callback for [`loro_ephemeral_store_subscribe`].
+ *
+ * `invoke` is called with a callback-scoped `const LoroEphemeralStoreEvent*` and the opaque
+ * `user_data`. `free_user_data` (may be null) runs once when the subscription is released.
+ */
+typedef struct LoroEphemeralSubscriber {
+    void (*invoke)(const struct LoroEphemeralStoreEvent *event, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroEphemeralSubscriber;
+
+/**
+ * A C callback for [`loro_doc_subscribe_local_update`].
+ *
+ * `invoke` receives the update bytes `(data, len)` of a local commit and the opaque
+ * `user_data`; returning `false` auto-unsubscribes. `free_user_data` (may be null) runs
+ * once when the subscription is released.
+ */
+typedef struct LoroLocalUpdateCallback {
+    bool (*invoke)(const uint8_t *data, uintptr_t len, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroLocalUpdateCallback;
+
+/**
+ * A C pre-commit callback. `invoke` receives a callback-scoped `const LoroPreCommitPayload*`
+ * and the opaque `user_data`, and returns `true` to stay subscribed (`false`
+ * auto-unsubscribes). `free_user_data` (may be null) runs once when the subscription is
+ * released.
+ */
+typedef struct LoroPreCommitCallback {
+    bool (*invoke)(const struct LoroPreCommitPayload *payload, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroPreCommitCallback;
+
+/**
+ * A C first-commit-from-peer callback. `invoke` receives the committing `peer` id and the
+ * opaque `user_data`, and returns `true` to stay subscribed (`false` auto-unsubscribes).
+ * `free_user_data` (may be null) runs once when the subscription is released.
+ */
+typedef struct LoroFirstCommitFromPeerCallback {
+    bool (*invoke)(uint64_t peer, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroFirstCommitFromPeerCallback;
 
 /**
  * Identifies a tree node. Mirrors `loro::TreeID` (`peer`: the creating peer id;
@@ -209,17 +350,76 @@ typedef struct LoroSubscriber {
 } LoroSubscriber;
 
 /**
- * A C callback for [`loro_doc_subscribe_local_update`].
- *
- * `invoke` receives the update bytes `(data, len)` of a local commit and the opaque
- * `user_data`; returning `false` auto-unsubscribes. `free_user_data` (may be null) runs
- * once when the subscription is released.
+ * A C subscriber callback for [`loro_doc_subscribe_jsonpath`]. `invoke` is a payload-free
+ * notification; `free_user_data` (may be null) runs once when the subscription is released.
  */
-typedef struct LoroLocalUpdateCallback {
-    bool (*invoke)(const uint8_t *data, uintptr_t len, void *user_data);
+typedef struct LoroJsonPathSubscriber {
+    void (*invoke)(void *user_data);
     void *user_data;
     void (*free_user_data)(void*);
-} LoroLocalUpdateCallback;
+} LoroJsonPathSubscriber;
+
+/**
+ * A half-open span of op counters `[start, end)` for the change being pushed/popped.
+ * Mirrors `loro::CounterSpan`.
+ */
+typedef struct LoroCounterSpan {
+    int32_t start;
+    int32_t end;
+} LoroCounterSpan;
+
+/**
+ * The on_push listener. `invoke` is called with the stack kind, the change's counter span,
+ * the originating [`LoroDiffEvent`] (`null` unless it was a local edit), a writable
+ * [`LoroUndoMeta`] for attaching metadata, and the opaque `user_data`. `free_user_data`
+ * (may be null) runs once when the listener is replaced or the manager is freed.
+ */
+typedef struct LoroUndoOnPush {
+    void (*invoke)(enum LoroUndoOrRedo kind,
+                   struct LoroCounterSpan span,
+                   const struct LoroDiffEvent *event,
+                   struct LoroUndoMeta *meta,
+                   void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroUndoOnPush;
+
+/**
+ * The on_pop listener. `invoke` is called with the stack kind, the change's counter span, a
+ * read-only [`LoroUndoMeta`] (carrying whatever on_push stored), and the opaque
+ * `user_data`. `free_user_data` (may be null) runs once when the listener is replaced or the
+ * manager is freed.
+ */
+typedef struct LoroUndoOnPop {
+    void (*invoke)(enum LoroUndoOrRedo kind,
+                   struct LoroCounterSpan span,
+                   const struct LoroUndoMeta *meta,
+                   void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroUndoOnPop;
+
+/**
+ * A single operation id: the creating peer and that peer's op counter. Mirrors `loro::ID`.
+ */
+typedef struct LoroId {
+    uint64_t peer;
+    int32_t counter;
+} LoroId;
+
+/**
+ * A traveler callback for [`loro_doc_travel_change_ancestors`].
+ *
+ * `invoke` is called for each ancestor change (latest to oldest) with a callback-scoped
+ * `const LoroChangeMeta*` and the opaque `user_data`; it returns `true` to continue or
+ * `false` to stop the traversal early. `free_user_data` (may be null) runs once when the
+ * traversal finishes.
+ */
+typedef struct LoroChangeAncestorsTraveler {
+    bool (*invoke)(const struct LoroChangeMeta *meta, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroChangeAncestorsTraveler;
 
 #ifdef __cplusplus
 extern "C" {
@@ -231,6 +431,245 @@ extern "C" {
  * program and must NOT be freed.
  */
 const char *loro_version(void);
+
+/**
+ * Creates an awareness instance for local `peer` with an inactivity `timeout` (in
+ * milliseconds) after which other peers' state is considered outdated. Release with
+ * [`loro_awareness_free`].
+ */
+struct LoroAwareness *loro_awareness_new(uint64_t peer, int64_t timeout);
+
+/**
+ * Frees an awareness handle. Passing null is a no-op.
+ */
+void loro_awareness_free(struct LoroAwareness *aw);
+
+/**
+ * Returns the local peer id. Returns 0 on a null handle.
+ */
+uint64_t loro_awareness_peer(const struct LoroAwareness *aw);
+
+/**
+ * Sets the local peer's state to the JSON-encoded value `(json, json_len)`.
+ */
+enum LoroStatus loro_awareness_set_local_state(struct LoroAwareness *aw,
+                                               const char *json,
+                                               uintptr_t json_len);
+
+/**
+ * Writes the local peer's state as JSON into `*out`. Returns `LORO_ERR_NOT_FOUND` if no
+ * local state has been set. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_awareness_get_local_state(const struct LoroAwareness *aw,
+                                               struct LoroBytes *out);
+
+/**
+ * Encodes the state of all known peers into `*out`. `*out` is only written on `LORO_OK`;
+ * free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_awareness_encode_all(const struct LoroAwareness *aw, struct LoroBytes *out);
+
+/**
+ * Encodes the state of the `count` peers in `peers` into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_awareness_encode(const struct LoroAwareness *aw,
+                                      const uint64_t *peers,
+                                      uintptr_t count,
+                                      struct LoroBytes *out);
+
+/**
+ * Applies encoded peer state `(data, len)` produced by another peer's `encode`/`encode_all`.
+ */
+enum LoroStatus loro_awareness_apply(struct LoroAwareness *aw, const uint8_t *data, uintptr_t len);
+
+/**
+ * Removes peers whose last update is older than the timeout.
+ */
+enum LoroStatus loro_awareness_remove_outdated(struct LoroAwareness *aw);
+
+/**
+ * Writes all peers' state as a JSON object `{"<peer>": {"state": <value>, "counter": n,
+ * "timestamp": n}, ...}` into `*out`. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_awareness_get_all_states(const struct LoroAwareness *aw,
+                                              struct LoroBytes *out);
+
+/**
+ * Creates an ephemeral store with an inactivity `timeout` in milliseconds. Release with
+ * [`loro_ephemeral_store_free`].
+ */
+struct LoroEphemeralStore *loro_ephemeral_store_new(int64_t timeout);
+
+/**
+ * Frees an ephemeral store handle. Passing null is a no-op.
+ */
+void loro_ephemeral_store_free(struct LoroEphemeralStore *store);
+
+/**
+ * Sets `key` to the JSON-encoded value `(json, json_len)`.
+ */
+enum LoroStatus loro_ephemeral_store_set(const struct LoroEphemeralStore *store,
+                                         const char *key,
+                                         uintptr_t key_len,
+                                         const char *json,
+                                         uintptr_t json_len);
+
+/**
+ * Writes the value at `key` as JSON into `*out`. Returns `LORO_ERR_NOT_FOUND` if `key` is
+ * absent (or expired). `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_store_get(const struct LoroEphemeralStore *store,
+                                         const char *key,
+                                         uintptr_t key_len,
+                                         struct LoroBytes *out);
+
+/**
+ * Deletes `key` from the store.
+ */
+enum LoroStatus loro_ephemeral_store_delete(const struct LoroEphemeralStore *store,
+                                            const char *key,
+                                            uintptr_t key_len);
+
+/**
+ * Encodes the latest value of `key` into `*out`. `*out` is only written on `LORO_OK`; free
+ * it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_store_encode(const struct LoroEphemeralStore *store,
+                                            const char *key,
+                                            uintptr_t key_len,
+                                            struct LoroBytes *out);
+
+/**
+ * Encodes all non-expired entries into `*out`. `*out` is only written on `LORO_OK`; free it
+ * with `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_store_encode_all(const struct LoroEphemeralStore *store,
+                                                struct LoroBytes *out);
+
+/**
+ * Applies encoded ephemeral data `(data, len)` from another peer. Returns
+ * `LORO_ERR_DECODE` on malformed input.
+ */
+enum LoroStatus loro_ephemeral_store_apply(const struct LoroEphemeralStore *store,
+                                           const uint8_t *data,
+                                           uintptr_t len);
+
+/**
+ * Removes entries whose last update is older than the timeout (emitting a `Timeout` event
+ * to subscribers if any are removed).
+ */
+enum LoroStatus loro_ephemeral_store_remove_outdated(const struct LoroEphemeralStore *store);
+
+/**
+ * Writes the store's keys as a JSON array of strings into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_store_keys(const struct LoroEphemeralStore *store,
+                                          struct LoroBytes *out);
+
+/**
+ * Writes all entries as a JSON object `{"<key>": <value>, ...}` into `*out`. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_store_get_all_states(const struct LoroEphemeralStore *store,
+                                                    struct LoroBytes *out);
+
+/**
+ * Subscribes to change events (added/updated/removed keys). Returns a `LoroSubscription*`
+ * (free with `loro_subscription_free` to unsubscribe), or null on error.
+ */
+struct LoroSubscription *loro_ephemeral_store_subscribe(const struct LoroEphemeralStore *store,
+                                                        struct LoroEphemeralSubscriber callback);
+
+/**
+ * Subscribes to local updates: the callback receives the encoded bytes to broadcast each
+ * time local ephemeral state changes, returning `true` to stay subscribed (`false`
+ * auto-unsubscribes). Returns a `LoroSubscription*`, or null on error.
+ */
+struct LoroSubscription *loro_ephemeral_store_subscribe_local_updates(const struct LoroEphemeralStore *store,
+                                                                      struct LoroLocalUpdateCallback callback);
+
+/**
+ * Returns how the event was triggered. Returns `LORO_EPHEMERAL_LOCAL` on a null handle.
+ */
+enum LoroEphemeralEventTrigger loro_ephemeral_event_by(const struct LoroEphemeralStoreEvent *ev);
+
+/**
+ * Writes the event's added keys as a JSON array of strings into `*out`. Free with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_event_added(const struct LoroEphemeralStoreEvent *ev,
+                                           struct LoroBytes *out);
+
+/**
+ * Writes the event's updated keys as a JSON array of strings into `*out`. Free with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_event_updated(const struct LoroEphemeralStoreEvent *ev,
+                                             struct LoroBytes *out);
+
+/**
+ * Writes the event's removed keys as a JSON array of strings into `*out`. Free with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_ephemeral_event_removed(const struct LoroEphemeralStoreEvent *ev,
+                                             struct LoroBytes *out);
+
+/**
+ * Sets the commit message `(msg, msg_len)` to attach to the next commit. The message is
+ * persisted and replicates to peers.
+ */
+enum LoroStatus loro_doc_set_next_commit_message(const struct LoroDoc *doc,
+                                                 const char *msg,
+                                                 uintptr_t msg_len);
+
+/**
+ * Sets the timestamp (seconds since the Unix epoch) for the next commit.
+ */
+enum LoroStatus loro_doc_set_next_commit_timestamp(const struct LoroDoc *doc, int64_t timestamp);
+
+/**
+ * Returns a callback-scoped pointer to the change's metadata. Do NOT free or store it; read
+ * it with the `loro_change_meta_*` accessors.
+ */
+const struct LoroChangeMeta *loro_pre_commit_payload_change_meta(const struct LoroPreCommitPayload *payload);
+
+/**
+ * Writes the commit's origin string (UTF-8, possibly empty) into `*out`. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_pre_commit_payload_origin(const struct LoroPreCommitPayload *payload,
+                                               struct LoroBytes *out);
+
+/**
+ * Rewrites the message for the commit being processed to `(msg, msg_len)`.
+ */
+enum LoroStatus loro_pre_commit_payload_set_message(const struct LoroPreCommitPayload *payload,
+                                                    const char *msg,
+                                                    uintptr_t msg_len);
+
+/**
+ * Rewrites the timestamp (seconds since the Unix epoch) for the commit being processed.
+ */
+enum LoroStatus loro_pre_commit_payload_set_timestamp(const struct LoroPreCommitPayload *payload,
+                                                      int64_t timestamp);
+
+/**
+ * Subscribes to pre-commit events. Returns a `LoroSubscription*` (free with
+ * `loro_subscription_free` to unsubscribe), or null on a null doc.
+ */
+struct LoroSubscription *loro_doc_subscribe_pre_commit(const struct LoroDoc *doc,
+                                                       struct LoroPreCommitCallback callback);
+
+/**
+ * Subscribes to the first commit from each peer. Returns a `LoroSubscription*` (free with
+ * `loro_subscription_free` to unsubscribe), or null on a null doc.
+ */
+struct LoroSubscription *loro_doc_subscribe_first_commit_from_peer(const struct LoroDoc *doc,
+                                                                   struct LoroFirstCommitFromPeerCallback callback);
 
 /**
  * Creates a new *detached* container of the given kind. Attach it by passing it to a
@@ -1058,10 +1497,465 @@ enum LoroStatus loro_container_diff_to_json(const struct LoroContainerDiff *cd,
                                             struct LoroBytes *out);
 
 /**
+ * Creates the default (smallest) fractional index. Release with
+ * [`loro_fractional_index_free`].
+ */
+struct LoroFractionalIndex *loro_fractional_index_default(void);
+
+/**
+ * Frees a fractional index handle. Passing null is a no-op.
+ */
+void loro_fractional_index_free(struct LoroFractionalIndex *fi);
+
+/**
+ * Builds a fractional index strictly between `lower` and `upper`. Either bound may be null
+ * to mean "unbounded" (so a null/null pair yields the default index, a non-null `lower`
+ * with null `upper` yields one after `lower`, etc.). Returns null if no index exists
+ * between the two (e.g. they are equal). Release with [`loro_fractional_index_free`].
+ */
+struct LoroFractionalIndex *loro_fractional_index_between(const struct LoroFractionalIndex *lower,
+                                                          const struct LoroFractionalIndex *upper);
+
+/**
+ * Builds a fractional index from raw bytes (as produced by
+ * [`loro_fractional_index_to_bytes`]). Release with [`loro_fractional_index_free`].
+ */
+struct LoroFractionalIndex *loro_fractional_index_from_bytes(const uint8_t *data, uintptr_t len);
+
+/**
+ * Builds a fractional index from a hex string `(str, str_len)` (as produced by
+ * [`loro_fractional_index_to_string`]). Release with [`loro_fractional_index_free`].
+ */
+struct LoroFractionalIndex *loro_fractional_index_from_string(const char *str, uintptr_t str_len);
+
+/**
+ * Writes the raw bytes of the fractional index into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_fractional_index_to_bytes(const struct LoroFractionalIndex *fi,
+                                               struct LoroBytes *out);
+
+/**
+ * Writes the hex-string form of the fractional index into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_fractional_index_to_string(const struct LoroFractionalIndex *fi,
+                                                struct LoroBytes *out);
+
+/**
+ * Compares two fractional indices, writing `-1` (a < b), `0` (equal), or `1` (a > b) into
+ * `*out`. `*out` is only written on `LORO_OK`.
+ */
+enum LoroStatus loro_fractional_index_compare(const struct LoroFractionalIndex *a,
+                                              const struct LoroFractionalIndex *b,
+                                              int32_t *out);
+
+/**
+ * Runs the JSONPath expression `(path, path_len)` against the document. Returns a results
+ * collection, or null on an invalid path / evaluation error (see `loro_last_error_message`).
+ * Release with [`loro_jsonpath_results_free`].
+ */
+struct LoroJsonPathResults *loro_doc_jsonpath(const struct LoroDoc *doc,
+                                              const char *path,
+                                              uintptr_t path_len);
+
+/**
+ * Frees a results collection. Passing null is a no-op.
+ */
+void loro_jsonpath_results_free(struct LoroJsonPathResults *results);
+
+/**
+ * Returns the number of results. Returns 0 on a null handle.
+ */
+uintptr_t loro_jsonpath_results_len(const struct LoroJsonPathResults *results);
+
+/**
+ * Writes whether the result at `index` is a container (vs. a plain value) into `*out`.
+ * Returns `LORO_ERR_NOT_FOUND` if `index` is out of range; `*out` is only written on
+ * `LORO_OK`.
+ */
+enum LoroStatus loro_jsonpath_results_is_container(const struct LoroJsonPathResults *results,
+                                                   uintptr_t index,
+                                                   bool *out);
+
+/**
+ * Writes the result at `index` as JSON into `*out` (a container is rendered as its deep
+ * value). Returns `LORO_ERR_NOT_FOUND` if `index` is out of range. `*out` is only written
+ * on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_jsonpath_results_get_value_json(const struct LoroJsonPathResults *results,
+                                                     uintptr_t index,
+                                                     struct LoroBytes *out);
+
+/**
+ * Recovers the result at `index` as a type-erased `LoroContainer*`, or null if `index` is
+ * out of range or the result is a plain value (check with
+ * [`loro_jsonpath_results_is_container`] first). The returned handle is independent; free it
+ * with `loro_container_free`.
+ */
+struct LoroContainer *loro_jsonpath_results_get_container(const struct LoroJsonPathResults *results,
+                                                          uintptr_t index);
+
+/**
+ * Subscribes to updates that might affect the JSONPath `(path, path_len)`. The callback is a
+ * lightweight notification (no result payload, may fire false positives). Returns a
+ * `LoroSubscription*` (free with `loro_subscription_free` to unsubscribe), or null on an
+ * invalid path.
+ */
+struct LoroSubscription *loro_doc_subscribe_jsonpath(const struct LoroDoc *doc,
+                                                     const char *path,
+                                                     uintptr_t path_len,
+                                                     struct LoroJsonPathSubscriber callback);
+
+/**
+ * Creates an undo manager bound to `doc`'s current peer. Release with
+ * [`loro_undo_manager_free`].
+ */
+struct LoroUndoManager *loro_undo_manager_new(const struct LoroDoc *doc);
+
+/**
+ * Frees an undo manager handle (running any listeners' `free_user_data`). Passing null is a
+ * no-op.
+ */
+void loro_undo_manager_free(struct LoroUndoManager *um);
+
+/**
+ * Undoes the last recorded change. Writes whether an undo actually happened into `*applied`
+ * (may be null).
+ */
+enum LoroStatus loro_undo_manager_undo(struct LoroUndoManager *um, bool *applied);
+
+/**
+ * Redoes the last undone change. Writes whether a redo actually happened into `*applied`
+ * (may be null).
+ */
+enum LoroStatus loro_undo_manager_redo(struct LoroUndoManager *um, bool *applied);
+
+/**
+ * Returns whether there is anything to undo. Returns `false` on a null handle.
+ */
+bool loro_undo_manager_can_undo(const struct LoroUndoManager *um);
+
+/**
+ * Returns whether there is anything to redo. Returns `false` on a null handle.
+ */
+bool loro_undo_manager_can_redo(const struct LoroUndoManager *um);
+
+/**
+ * Returns the number of items currently on the undo stack. Returns 0 on a null handle.
+ */
+uintptr_t loro_undo_manager_undo_count(const struct LoroUndoManager *um);
+
+/**
+ * Returns the number of items currently on the redo stack. Returns 0 on a null handle.
+ */
+uintptr_t loro_undo_manager_redo_count(const struct LoroUndoManager *um);
+
+/**
+ * Records a checkpoint so subsequent edits become a new, separately-undoable item.
+ */
+enum LoroStatus loro_undo_manager_record_new_checkpoint(struct LoroUndoManager *um);
+
+/**
+ * Sets the merge interval in milliseconds: consecutive local edits closer together than
+ * this are merged into one undo item (default 0 = no merge).
+ */
+enum LoroStatus loro_undo_manager_set_merge_interval(struct LoroUndoManager *um,
+                                                     int64_t interval_ms);
+
+/**
+ * Sets the maximum number of undo steps to retain (default 100).
+ */
+enum LoroStatus loro_undo_manager_set_max_undo_steps(struct LoroUndoManager *um, uintptr_t steps);
+
+/**
+ * Adds an origin prefix to exclude from undo recording: local commits whose origin starts
+ * with `(prefix, prefix_len)` are not pushed onto the undo stack.
+ */
+enum LoroStatus loro_undo_manager_add_exclude_origin_prefix(struct LoroUndoManager *um,
+                                                            const char *prefix,
+                                                            uintptr_t prefix_len);
+
+/**
+ * Clears both the undo and redo stacks.
+ */
+enum LoroStatus loro_undo_manager_clear(const struct LoroUndoManager *um);
+
+/**
+ * Starts a group: subsequent edits merge into a single undo item until
+ * [`loro_undo_manager_group_end`].
+ */
+enum LoroStatus loro_undo_manager_group_start(struct LoroUndoManager *um);
+
+/**
+ * Ends the current group started with [`loro_undo_manager_group_start`].
+ */
+enum LoroStatus loro_undo_manager_group_end(struct LoroUndoManager *um);
+
+/**
+ * Installs (or replaces) the on_push listener. The previous listener's `free_user_data`
+ * runs when it is replaced.
+ */
+enum LoroStatus loro_undo_manager_set_on_push(struct LoroUndoManager *um,
+                                              struct LoroUndoOnPush callback);
+
+/**
+ * Installs (or replaces) the on_pop listener. The previous listener's `free_user_data`
+ * runs when it is replaced.
+ */
+enum LoroStatus loro_undo_manager_set_on_pop(struct LoroUndoManager *um,
+                                             struct LoroUndoOnPop callback);
+
+/**
+ * Sets the undo item's metadata value to the JSON-encoded value `(json, json_len)`. Call
+ * this from an on_push listener. Returns `LORO_ERR_INVALID_ARG` on a null handle.
+ */
+enum LoroStatus loro_undo_meta_set_value_json(struct LoroUndoMeta *meta,
+                                              const char *json,
+                                              uintptr_t json_len);
+
+/**
+ * Writes the undo item's metadata value as JSON into `*out`. Call this from an on_pop
+ * listener. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_undo_meta_get_value_json(const struct LoroUndoMeta *meta,
+                                              struct LoroBytes *out);
+
+/**
  * Frees a [`LoroBytes`] previously returned by this library. Passing an
  * all-zero/empty buffer is a no-op. Must be called at most once per buffer.
  */
 void loro_bytes_free(struct LoroBytes bytes);
+
+/**
+ * Creates a new, empty version vector. Release with [`loro_version_vector_free`].
+ */
+struct LoroVersionVector *loro_version_vector_new(void);
+
+/**
+ * Frees a version vector handle. Passing null is a no-op.
+ */
+void loro_version_vector_free(struct LoroVersionVector *vv);
+
+/**
+ * Encodes the version vector into `*out`. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_version_vector_encode(const struct LoroVersionVector *vv,
+                                           struct LoroBytes *out);
+
+/**
+ * Decodes a version vector previously produced by [`loro_version_vector_encode`]. Returns
+ * null on a decode error. Release with [`loro_version_vector_free`].
+ */
+struct LoroVersionVector *loro_version_vector_decode(const uint8_t *data, uintptr_t len);
+
+/**
+ * Writes the last (largest) counter seen for `peer` into `*out`. Returns
+ * `LORO_ERR_NOT_FOUND` if the vector has no entry for `peer`.
+ */
+enum LoroStatus loro_version_vector_get_last(const struct LoroVersionVector *vv,
+                                             uint64_t peer,
+                                             int32_t *out);
+
+/**
+ * Records `id` as the last op seen from its peer (extends the vector to include it).
+ */
+enum LoroStatus loro_version_vector_set_last(struct LoroVersionVector *vv, struct LoroId id);
+
+/**
+ * Returns whether this vector includes `id` (i.e. it has seen that op). Returns `false` on
+ * a null handle.
+ */
+bool loro_version_vector_includes_id(const struct LoroVersionVector *vv, struct LoroId id);
+
+/**
+ * Returns whether this vector includes everything in `other`. Returns `false` on a null
+ * handle.
+ */
+bool loro_version_vector_includes_vv(const struct LoroVersionVector *vv,
+                                     const struct LoroVersionVector *other);
+
+/**
+ * Compares two version vectors in the causal partial order, writing `-1` (a < b), `0`
+ * (equal), or `1` (a > b) into `*out`. Returns `LORO_ERR_NOT_FOUND` if the two are
+ * concurrent (incomparable); `*out` is only written on `LORO_OK`.
+ */
+enum LoroStatus loro_version_vector_compare(const struct LoroVersionVector *a,
+                                            const struct LoroVersionVector *b,
+                                            int32_t *out);
+
+/**
+ * Returns the frontiers corresponding to this version vector, or null on error. Release the
+ * returned handle with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_version_vector_to_frontiers(const struct LoroVersionVector *vv);
+
+/**
+ * Writes the vector as a JSON object `{"<peer>": <counter>, ...}` into `*out`. `*out` is
+ * only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_version_vector_to_json(const struct LoroVersionVector *vv,
+                                            struct LoroBytes *out);
+
+/**
+ * Creates a new, empty frontiers. Release with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_frontiers_new(void);
+
+/**
+ * Frees a frontiers handle. Passing null is a no-op.
+ */
+void loro_frontiers_free(struct LoroFrontiers *frontiers);
+
+/**
+ * Builds a frontiers from the `count` ids in `ids`. Release with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_frontiers_from_ids(const struct LoroId *ids, uintptr_t count);
+
+/**
+ * Encodes the frontiers into `*out`. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_frontiers_encode(const struct LoroFrontiers *frontiers, struct LoroBytes *out);
+
+/**
+ * Decodes a frontiers previously produced by [`loro_frontiers_encode`]. Returns null on a
+ * decode error. Release with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_frontiers_decode(const uint8_t *data, uintptr_t len);
+
+/**
+ * Returns the number of ids in the frontiers. Returns 0 on a null handle.
+ */
+uintptr_t loro_frontiers_len(const struct LoroFrontiers *frontiers);
+
+/**
+ * Returns whether the frontiers is empty (also returns `true` on a null handle).
+ */
+bool loro_frontiers_is_empty(const struct LoroFrontiers *frontiers);
+
+/**
+ * Returns whether the frontiers contains `id`. Returns `false` on a null handle.
+ */
+bool loro_frontiers_contains(const struct LoroFrontiers *frontiers, struct LoroId id);
+
+/**
+ * Writes the id at `index` into `*out`. Returns `LORO_ERR_NOT_FOUND` if `index` is out of
+ * range; `*out` is only written on `LORO_OK`.
+ */
+enum LoroStatus loro_frontiers_get(const struct LoroFrontiers *frontiers,
+                                   uintptr_t index,
+                                   struct LoroId *out);
+
+/**
+ * Adds `id` to the frontiers.
+ */
+enum LoroStatus loro_frontiers_push(struct LoroFrontiers *frontiers, struct LoroId id);
+
+/**
+ * Returns the document's oplog version vector (everything in its history). Release with
+ * [`loro_version_vector_free`].
+ */
+struct LoroVersionVector *loro_doc_oplog_vv(const struct LoroDoc *doc);
+
+/**
+ * Returns the document's current state version vector. Release with
+ * [`loro_version_vector_free`].
+ */
+struct LoroVersionVector *loro_doc_state_vv(const struct LoroDoc *doc);
+
+/**
+ * Returns the document's oplog frontiers. Release with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_doc_oplog_frontiers(const struct LoroDoc *doc);
+
+/**
+ * Returns the document's current state frontiers. Release with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_doc_state_frontiers(const struct LoroDoc *doc);
+
+/**
+ * Converts `frontiers` to a version vector against this document, or null if the frontiers
+ * are not contained in the document's history. Release with [`loro_version_vector_free`].
+ */
+struct LoroVersionVector *loro_doc_frontiers_to_vv(const struct LoroDoc *doc,
+                                                   const struct LoroFrontiers *frontiers);
+
+/**
+ * Converts a version vector to frontiers against this document. Release with
+ * [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_doc_vv_to_frontiers(const struct LoroDoc *doc,
+                                               const struct LoroVersionVector *vv);
+
+/**
+ * Time-travels the document state to `frontiers` (detaching it from the latest version).
+ */
+enum LoroStatus loro_doc_checkout(struct LoroDoc *doc, const struct LoroFrontiers *frontiers);
+
+/**
+ * Re-attaches the document state to the latest version after a [`loro_doc_checkout`].
+ */
+enum LoroStatus loro_doc_checkout_to_latest(struct LoroDoc *doc);
+
+/**
+ * Returns whether the document is detached (checked out to a non-latest version). Returns
+ * `false` on a null handle.
+ */
+bool loro_doc_is_detached(const struct LoroDoc *doc);
+
+/**
+ * Exports only the updates `from` the given version vector up to the latest, into `*out`
+ * (the delta needed to bring a peer at `from` up to date). `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_export_updates_from(const struct LoroDoc *doc,
+                                             const struct LoroVersionVector *from,
+                                             struct LoroBytes *out);
+
+/**
+ * Returns the change's first-op id. Returns `{0, 0}` on a null handle.
+ */
+struct LoroId loro_change_meta_id(const struct LoroChangeMeta *cm);
+
+/**
+ * Returns the change's Lamport timestamp. Returns 0 on a null handle.
+ */
+uint32_t loro_change_meta_lamport(const struct LoroChangeMeta *cm);
+
+/**
+ * Returns the change's wall-clock timestamp (seconds since the Unix epoch; 0 if unset).
+ * Returns 0 on a null handle.
+ */
+int64_t loro_change_meta_timestamp(const struct LoroChangeMeta *cm);
+
+/**
+ * Returns the number of ops in the change. Returns 0 on a null handle.
+ */
+uintptr_t loro_change_meta_len(const struct LoroChangeMeta *cm);
+
+/**
+ * Writes the change's commit message (UTF-8, possibly empty) into `*out`. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_change_meta_message(const struct LoroChangeMeta *cm, struct LoroBytes *out);
+
+/**
+ * Returns an owned copy of the change's dependency frontiers, or null on a null handle.
+ * Release with [`loro_frontiers_free`].
+ */
+struct LoroFrontiers *loro_change_meta_deps(const struct LoroChangeMeta *cm);
+
+/**
+ * Traverses the ancestors of the changes containing `ids` (including those changes
+ * themselves), in causal order from latest to oldest, calling `traveler.invoke` for each.
+ * Returns `LORO_ERR_NOT_FOUND` if an id is missing from the document history.
+ */
+enum LoroStatus loro_doc_travel_change_ancestors(const struct LoroDoc *doc,
+                                                 const struct LoroId *ids,
+                                                 uintptr_t count,
+                                                 struct LoroChangeAncestorsTraveler traveler);
 
 #ifdef __cplusplus
 }  // extern "C"

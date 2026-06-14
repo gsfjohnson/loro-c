@@ -92,6 +92,15 @@ pub struct LoroLocalUpdateCallback {
 /// (unsubscribes) or [`loro_subscription_detach`] (keep firing until the doc drops).
 pub struct LoroSubscription(loro::Subscription);
 
+impl LoroSubscription {
+    /// Boxes a `loro::Subscription` into an owned `*mut LoroSubscription`. Shared by the
+    /// other modules (awareness / ephemeral / jsonpath / commit) so every subscription
+    /// kind frees through the same [`loro_subscription_free`] / [`loro_subscription_detach`].
+    pub(crate) fn into_raw(sub: loro::Subscription) -> *mut LoroSubscription {
+        Box::into_raw(Box::new(LoroSubscription(sub)))
+    }
+}
+
 /// Opaque, **callback-scoped** view of a diff event. Only valid for the duration of the
 /// subscriber callback; never store it or use it afterwards.
 ///

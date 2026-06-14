@@ -237,6 +237,65 @@ static void test_subscribe(void) {
     loro_doc_free(doc);
 }
 
+/* M4: a slice of the advanced surface from plain C — version-vector delta sync and a
+ * fractional index between two others. */
+static void test_advanced_c(void) {
+    LoroDoc* a = loro_doc_new();
+    LoroText* ta = loro_doc_get_text(a, "t", 1);
+    CHECK(loro_text_insert(ta, 0, "hi", 2) == LORO_OK);
+    CHECK(loro_doc_commit(a) == LORO_OK);
+
+    /* Delta from an empty doc's vv brings a fresh doc fully up to date. */
+    LoroDoc* b = loro_doc_new();
+    LoroVersionVector* b_vv = loro_doc_state_vv(b);
+    CHECK(b_vv != NULL);
+    LoroBytes delta = {0};
+    CHECK(loro_doc_export_updates_from(a, b_vv, &delta) == LORO_OK);
+    CHECK(delta.len > 0);
+    CHECK(loro_doc_import(b, delta.data, delta.len) == LORO_OK);
+    loro_bytes_free(delta);
+
+    LoroText* tb = loro_doc_get_text(b, "t", 1);
+    LoroBytes str = {0};
+    CHECK(loro_text_to_string(tb, &str) == LORO_OK);
+    CHECK(bytes_eq(&str, "hi"));
+    loro_bytes_free(str);
+
+    /* a includes everything b has. */
+    LoroVersionVector* a_vv = loro_doc_oplog_vv(a);
+    LoroVersionVector* b_oplog = loro_doc_oplog_vv(b);
+    CHECK(loro_version_vector_includes_vv(a_vv, b_oplog));
+
+    /* version-vector encode/decode round trip. */
+    LoroBytes enc = {0};
+    CHECK(loro_version_vector_encode(a_vv, &enc) == LORO_OK);
+    LoroVersionVector* dec = loro_version_vector_decode(enc.data, enc.len);
+    CHECK(dec != NULL);
+    int32_t ord = 99;
+    CHECK(loro_version_vector_compare(a_vv, dec, &ord) == LORO_OK);
+    CHECK(ord == 0);
+    loro_bytes_free(enc);
+
+    loro_version_vector_free(dec);
+    loro_version_vector_free(b_oplog);
+    loro_version_vector_free(a_vv);
+    loro_version_vector_free(b_vv);
+    loro_text_free(tb);
+    loro_doc_free(b);
+    loro_text_free(ta);
+    loro_doc_free(a);
+
+    /* Fractional index: default < between(default, NULL). */
+    LoroFractionalIndex* lo = loro_fractional_index_default();
+    LoroFractionalIndex* hi = loro_fractional_index_between(lo, NULL);
+    CHECK(hi != NULL);
+    int32_t c = 0;
+    CHECK(loro_fractional_index_compare(hi, lo, &c) == LORO_OK);
+    CHECK(c > 0);
+    loro_fractional_index_free(hi);
+    loro_fractional_index_free(lo);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -244,6 +303,7 @@ int main(void) {
     test_error_path();
     test_containers();
     test_subscribe();
+    test_advanced_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

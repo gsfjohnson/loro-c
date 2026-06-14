@@ -853,6 +853,710 @@ extern "C" inline void loro_hpp_local_update_free(void* ud) {
 
 }  // namespace detail
 
+// ===========================================================================
+// M4: versions / frontiers / fractional index / change metadata
+// ===========================================================================
+
+/// A single operation id `(peer, counter)`. Alias of the C ABI struct.
+using Id = ::LoroId;
+/// A half-open op-counter span `[start, end)`. Alias of the C ABI struct.
+using CounterSpan = ::LoroCounterSpan;
+/// Whether an undo item is on the undo or redo stack. Alias of the C ABI enum.
+using UndoOrRedo = ::LoroUndoOrRedo;
+/// How an ephemeral-store event was triggered. Alias of the C ABI enum.
+using EphemeralEventTrigger = ::LoroEphemeralEventTrigger;
+
+class VersionVector;
+
+/// RAII wrapper around a `LoroFrontiers*` (a document version expressed as a set of op ids).
+/// Move-only.
+class Frontiers {
+public:
+    explicit Frontiers(LoroFrontiers* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// An empty frontiers.
+    static Frontiers create() { return Frontiers(loro_frontiers_new()); }
+
+    /// Builds a frontiers from a list of ids.
+    static Frontiers from_ids(const std::vector<Id>& ids) {
+        return Frontiers(loro_frontiers_from_ids(ids.data(), ids.size()));
+    }
+
+    /// Decodes a frontiers previously produced by encode().
+    static Frontiers decode(const std::uint8_t* data, std::size_t len) {
+        LoroFrontiers* f = loro_frontiers_decode(data, len);
+        if (!f) throw Error(LORO_ERR_DECODE, detail::last_error_message());
+        return Frontiers(f);
+    }
+    static Frontiers decode(const std::vector<std::uint8_t>& data) {
+        return decode(data.data(), data.size());
+    }
+
+    LoroFrontiers* raw() const noexcept { return handle_.get(); }
+
+    std::vector<std::uint8_t> encode() const {
+        detail::Bytes b;
+        detail::check(loro_frontiers_encode(handle_.get(), b.out()));
+        return b.to_vector();
+    }
+
+    std::size_t size() const { return loro_frontiers_len(handle_.get()); }
+    bool empty() const { return loro_frontiers_is_empty(handle_.get()); }
+    bool contains(Id id) const { return loro_frontiers_contains(handle_.get(), id); }
+    void push(Id id) { detail::check(loro_frontiers_push(handle_.get(), id)); }
+
+    /// All ids in the frontiers.
+    std::vector<Id> to_vec() const {
+        const std::size_t n = size();
+        std::vector<Id> out;
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            Id id{};
+            detail::check(loro_frontiers_get(handle_.get(), i, &id));
+            out.push_back(id);
+        }
+        return out;
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroFrontiers* p) const noexcept { loro_frontiers_free(p); }
+    };
+    std::unique_ptr<LoroFrontiers, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroVersionVector*` (a `peer -> counter` view of seen history).
+/// Move-only.
+class VersionVector {
+public:
+    explicit VersionVector(LoroVersionVector* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// An empty version vector.
+    static VersionVector create() { return VersionVector(loro_version_vector_new()); }
+
+    /// Decodes a version vector previously produced by encode().
+    static VersionVector decode(const std::uint8_t* data, std::size_t len) {
+        LoroVersionVector* v = loro_version_vector_decode(data, len);
+        if (!v) throw Error(LORO_ERR_DECODE, detail::last_error_message());
+        return VersionVector(v);
+    }
+    static VersionVector decode(const std::vector<std::uint8_t>& data) {
+        return decode(data.data(), data.size());
+    }
+
+    LoroVersionVector* raw() const noexcept { return handle_.get(); }
+
+    std::vector<std::uint8_t> encode() const {
+        detail::Bytes b;
+        detail::check(loro_version_vector_encode(handle_.get(), b.out()));
+        return b.to_vector();
+    }
+
+    /// The last counter seen for `peer`, or std::nullopt if the vector has no entry for it.
+    std::optional<std::int32_t> get_last(std::uint64_t peer) const {
+        std::int32_t out = 0;
+        if (!detail::check_found(loro_version_vector_get_last(handle_.get(), peer, &out)))
+            return std::nullopt;
+        return out;
+    }
+
+    /// Records `id` as the last op seen from its peer.
+    void set_last(Id id) { detail::check(loro_version_vector_set_last(handle_.get(), id)); }
+
+    /// Whether this vector has seen op `id`.
+    bool includes(Id id) const { return loro_version_vector_includes_id(handle_.get(), id); }
+    /// Whether this vector includes everything in `other`.
+    bool includes(const VersionVector& other) const {
+        return loro_version_vector_includes_vv(handle_.get(), other.raw());
+    }
+
+    /// Causal comparison: -1 (this < other), 0 (equal), 1 (this > other), or std::nullopt if
+    /// the two are concurrent (incomparable).
+    std::optional<int> compare(const VersionVector& other) const {
+        std::int32_t out = 0;
+        if (!detail::check_found(
+                loro_version_vector_compare(handle_.get(), other.raw(), &out)))
+            return std::nullopt;
+        return out;
+    }
+
+    /// The frontiers corresponding to this version vector.
+    Frontiers to_frontiers() const {
+        LoroFrontiers* f = loro_version_vector_to_frontiers(handle_.get());
+        if (!f) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Frontiers(f);
+    }
+
+    /// The vector as a JSON object string `{"<peer>": <counter>, ...}`.
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_version_vector_to_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroVersionVector* p) const noexcept { loro_version_vector_free(p); }
+    };
+    std::unique_ptr<LoroVersionVector, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroFractionalIndex*` (a comparable position key). Move-only.
+class FractionalIndex {
+public:
+    explicit FractionalIndex(LoroFractionalIndex* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// The default (smallest) index.
+    static FractionalIndex create() {
+        return FractionalIndex(loro_fractional_index_default());
+    }
+
+    /// An index strictly between `lower` and `upper` (either may be null for "unbounded"),
+    /// or std::nullopt if none exists.
+    static std::optional<FractionalIndex> between(const FractionalIndex* lower,
+                                                  const FractionalIndex* upper) {
+        LoroFractionalIndex* fi = loro_fractional_index_between(
+            lower ? lower->raw() : nullptr, upper ? upper->raw() : nullptr);
+        if (!fi) return std::nullopt;
+        return FractionalIndex(fi);
+    }
+
+    static FractionalIndex from_bytes(const std::uint8_t* data, std::size_t len) {
+        return FractionalIndex(loro_fractional_index_from_bytes(data, len));
+    }
+    static FractionalIndex from_bytes(const std::vector<std::uint8_t>& data) {
+        return from_bytes(data.data(), data.size());
+    }
+    static FractionalIndex from_string(std::string_view hex) {
+        return FractionalIndex(loro_fractional_index_from_string(hex.data(), hex.size()));
+    }
+
+    LoroFractionalIndex* raw() const noexcept { return handle_.get(); }
+
+    std::vector<std::uint8_t> to_bytes() const {
+        detail::Bytes b;
+        detail::check(loro_fractional_index_to_bytes(handle_.get(), b.out()));
+        return b.to_vector();
+    }
+    std::string to_string() const {
+        detail::Bytes b;
+        detail::check(loro_fractional_index_to_string(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// -1 (this < other), 0 (equal), or 1 (this > other).
+    int compare(const FractionalIndex& other) const {
+        std::int32_t out = 0;
+        detail::check(loro_fractional_index_compare(handle_.get(), other.raw(), &out));
+        return out;
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroFractionalIndex* p) const noexcept {
+            loro_fractional_index_free(p);
+        }
+    };
+    std::unique_ptr<LoroFractionalIndex, Deleter> handle_;
+};
+
+/// Non-owning, **callback-scoped** view of one change's metadata (passed to a change-ancestor
+/// traveler or a pre-commit hook). Valid only for the duration of the callback.
+class ChangeMeta {
+public:
+    explicit ChangeMeta(const LoroChangeMeta* raw) noexcept : raw_(raw) {}
+
+    const LoroChangeMeta* raw() const noexcept { return raw_; }
+
+    /// The change's first-op id.
+    Id id() const { return loro_change_meta_id(raw_); }
+    /// The change's Lamport timestamp.
+    std::uint32_t lamport() const { return loro_change_meta_lamport(raw_); }
+    /// The change's wall-clock timestamp (seconds since the Unix epoch; 0 if unset).
+    std::int64_t timestamp() const { return loro_change_meta_timestamp(raw_); }
+    /// The number of ops in the change.
+    std::size_t size() const { return loro_change_meta_len(raw_); }
+    /// The change's commit message (possibly empty).
+    std::string message() const {
+        detail::Bytes b;
+        detail::check(loro_change_meta_message(raw_, b.out()));
+        return b.to_string();
+    }
+    /// An owned copy of the change's dependency frontiers.
+    Frontiers deps() const {
+        LoroFrontiers* f = loro_change_meta_deps(raw_);
+        if (!f) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Frontiers(f);
+    }
+
+private:
+    const LoroChangeMeta* raw_;
+};
+
+// ===========================================================================
+// M4: awareness / ephemeral store
+// ===========================================================================
+
+/// RAII wrapper around a `LoroAwareness*` (legacy per-peer presence state). Move-only.
+/// Prefer EphemeralStore for new code.
+class Awareness {
+public:
+    explicit Awareness(LoroAwareness* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// Creates an awareness for local `peer` with an inactivity `timeout` (milliseconds).
+    Awareness(std::uint64_t peer, std::int64_t timeout)
+        : handle_(loro_awareness_new(peer, timeout)) {
+        if (!handle_) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroAwareness* raw() const noexcept { return handle_.get(); }
+
+    std::uint64_t peer() const { return loro_awareness_peer(handle_.get()); }
+
+    /// Sets the local peer's state from a JSON value string.
+    void set_local_state(std::string_view json) {
+        detail::check(loro_awareness_set_local_state(handle_.get(), json.data(), json.size()));
+    }
+
+    /// The local peer's state as a JSON string, or std::nullopt if unset.
+    std::optional<std::string> get_local_state() const {
+        detail::Bytes b;
+        if (!detail::check_found(loro_awareness_get_local_state(handle_.get(), b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+
+    std::vector<std::uint8_t> encode_all() const {
+        detail::Bytes b;
+        detail::check(loro_awareness_encode_all(handle_.get(), b.out()));
+        return b.to_vector();
+    }
+
+    std::vector<std::uint8_t> encode(const std::vector<std::uint64_t>& peers) const {
+        detail::Bytes b;
+        detail::check(loro_awareness_encode(handle_.get(), peers.data(), peers.size(), b.out()));
+        return b.to_vector();
+    }
+
+    void apply(const std::uint8_t* data, std::size_t len) {
+        detail::check(loro_awareness_apply(handle_.get(), data, len));
+    }
+    void apply(const std::vector<std::uint8_t>& data) { apply(data.data(), data.size()); }
+
+    void remove_outdated() { detail::check(loro_awareness_remove_outdated(handle_.get())); }
+
+    /// All peers' state as a JSON object string.
+    std::string get_all_states() const {
+        detail::Bytes b;
+        detail::check(loro_awareness_get_all_states(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroAwareness* p) const noexcept { loro_awareness_free(p); }
+    };
+    std::unique_ptr<LoroAwareness, Deleter> handle_;
+};
+
+/// Non-owning, **callback-scoped** view of an ephemeral-store change event. Valid only for
+/// the duration of the subscriber callback.
+class EphemeralStoreEvent {
+public:
+    explicit EphemeralStoreEvent(const LoroEphemeralStoreEvent* raw) noexcept : raw_(raw) {}
+
+    const LoroEphemeralStoreEvent* raw() const noexcept { return raw_; }
+
+    /// How the event was triggered.
+    EphemeralEventTrigger by() const { return loro_ephemeral_event_by(raw_); }
+    /// The added keys, as a JSON array string.
+    std::string added() const {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_event_added(raw_, b.out()));
+        return b.to_string();
+    }
+    /// The updated keys, as a JSON array string.
+    std::string updated() const {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_event_updated(raw_, b.out()));
+        return b.to_string();
+    }
+    /// The removed keys, as a JSON array string.
+    std::string removed() const {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_event_removed(raw_, b.out()));
+        return b.to_string();
+    }
+
+private:
+    const LoroEphemeralStoreEvent* raw_;
+};
+
+/// An ephemeral-store subscriber: invoked with a callback-scoped event on each change.
+using EphemeralSubscriberFn = std::function<void(const EphemeralStoreEvent&)>;
+
+// ===========================================================================
+// M4: undo manager metadata view
+// ===========================================================================
+
+/// Callback-scoped view of an undo item's metadata. In an on_push listener it is writable
+/// (set_value); in an on_pop listener it is read-only (value).
+class UndoMeta {
+public:
+    explicit UndoMeta(LoroUndoMeta* raw) noexcept : mut_(raw), const_(raw) {}
+    explicit UndoMeta(const LoroUndoMeta* raw) noexcept : mut_(nullptr), const_(raw) {}
+
+    /// Attaches a JSON metadata value to the item (on_push only).
+    void set_value(std::string_view json) {
+        detail::check(loro_undo_meta_set_value_json(mut_, json.data(), json.size()));
+    }
+    /// The item's metadata value as a JSON string.
+    std::string value() const {
+        detail::Bytes b;
+        detail::check(loro_undo_meta_get_value_json(const_, b.out()));
+        return b.to_string();
+    }
+
+private:
+    LoroUndoMeta* mut_;
+    const LoroUndoMeta* const_;
+};
+
+/// on_push listener: (stack kind, change span, originating event-or-null, writable meta).
+using UndoOnPushFn = std::function<void(UndoOrRedo, CounterSpan, const DiffEvent*, UndoMeta&)>;
+/// on_pop listener: (stack kind, change span, read-only meta).
+using UndoOnPopFn = std::function<void(UndoOrRedo, CounterSpan, const UndoMeta&)>;
+
+// ===========================================================================
+// M4: jsonpath results
+// ===========================================================================
+
+/// RAII wrapper around a `LoroJsonPathResults*` collection. Move-only.
+class JsonPathResults {
+public:
+    explicit JsonPathResults(LoroJsonPathResults* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroJsonPathResults* raw() const noexcept { return handle_.get(); }
+
+    std::size_t size() const { return loro_jsonpath_results_len(handle_.get()); }
+
+    /// Whether the result at `index` is a container (vs. a plain value).
+    bool is_container(std::size_t index) const {
+        bool out = false;
+        detail::check(loro_jsonpath_results_is_container(handle_.get(), index, &out));
+        return out;
+    }
+
+    /// The result at `index` as JSON (a container renders as its deep value).
+    std::string value_json(std::size_t index) const {
+        detail::Bytes b;
+        detail::check(loro_jsonpath_results_get_value_json(handle_.get(), index, b.out()));
+        return b.to_string();
+    }
+
+    /// The result at `index` as a container, or std::nullopt if it is a plain value.
+    std::optional<Container> container(std::size_t index) const {
+        LoroContainer* c = loro_jsonpath_results_get_container(handle_.get(), index);
+        if (!c) return std::nullopt;
+        return Container(c);
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroJsonPathResults* p) const noexcept {
+            loro_jsonpath_results_free(p);
+        }
+    };
+    std::unique_ptr<LoroJsonPathResults, Deleter> handle_;
+};
+
+// ===========================================================================
+// M4: commit hooks
+// ===========================================================================
+
+/// Non-owning, **callback-scoped** view of a pre-commit payload. Valid only for the duration
+/// of the pre-commit callback.
+class PreCommitPayload {
+public:
+    explicit PreCommitPayload(const LoroPreCommitPayload* raw) noexcept : raw_(raw) {}
+
+    const LoroPreCommitPayload* raw() const noexcept { return raw_; }
+
+    /// The change's metadata (callback-scoped).
+    ChangeMeta change_meta() const {
+        return ChangeMeta(loro_pre_commit_payload_change_meta(raw_));
+    }
+    /// The commit's origin string (possibly empty).
+    std::string origin() const {
+        detail::Bytes b;
+        detail::check(loro_pre_commit_payload_origin(raw_, b.out()));
+        return b.to_string();
+    }
+    /// Rewrites the message for the commit being processed.
+    void set_message(std::string_view msg) const {
+        detail::check(loro_pre_commit_payload_set_message(raw_, msg.data(), msg.size()));
+    }
+    /// Rewrites the timestamp (seconds since the Unix epoch) for the commit.
+    void set_timestamp(std::int64_t timestamp) const {
+        detail::check(loro_pre_commit_payload_set_timestamp(raw_, timestamp));
+    }
+
+private:
+    const LoroPreCommitPayload* raw_;
+};
+
+/// A pre-commit hook: returns true to stay subscribed, false to auto-unsubscribe.
+using PreCommitFn = std::function<bool(const PreCommitPayload&)>;
+/// A first-commit-from-peer hook (receives the peer id): returns true to stay subscribed.
+using FirstCommitFromPeerFn = std::function<bool(std::uint64_t)>;
+/// A change-ancestor traveler: returns true to continue, false to stop the traversal.
+using ChangeAncestorsFn = std::function<bool(const ChangeMeta&)>;
+/// A JSONPath notification: a payload-free signal that the path's matches may have changed.
+using JsonPathNotifyFn = std::function<void()>;
+
+namespace detail {
+
+// `extern "C"` trampolines bridging the C callback triples to the stored std::functions.
+extern "C" inline void loro_hpp_ephemeral_invoke(const LoroEphemeralStoreEvent* ev, void* ud) {
+    EphemeralStoreEvent e(ev);
+    (*static_cast<EphemeralSubscriberFn*>(ud))(e);
+}
+extern "C" inline void loro_hpp_ephemeral_free(void* ud) {
+    delete static_cast<EphemeralSubscriberFn*>(ud);
+}
+
+extern "C" inline void loro_hpp_undo_on_push(LoroUndoOrRedo kind, LoroCounterSpan span,
+                                             const LoroDiffEvent* ev, LoroUndoMeta* meta,
+                                             void* ud) {
+    UndoMeta m(meta);
+    if (ev) {
+        DiffEvent d(ev);
+        (*static_cast<UndoOnPushFn*>(ud))(kind, span, &d, m);
+    } else {
+        (*static_cast<UndoOnPushFn*>(ud))(kind, span, nullptr, m);
+    }
+}
+extern "C" inline void loro_hpp_undo_on_push_free(void* ud) {
+    delete static_cast<UndoOnPushFn*>(ud);
+}
+extern "C" inline void loro_hpp_undo_on_pop(LoroUndoOrRedo kind, LoroCounterSpan span,
+                                            const LoroUndoMeta* meta, void* ud) {
+    UndoMeta m(meta);
+    (*static_cast<UndoOnPopFn*>(ud))(kind, span, m);
+}
+extern "C" inline void loro_hpp_undo_on_pop_free(void* ud) {
+    delete static_cast<UndoOnPopFn*>(ud);
+}
+
+extern "C" inline bool loro_hpp_pre_commit_invoke(const LoroPreCommitPayload* p, void* ud) {
+    PreCommitPayload payload(p);
+    return (*static_cast<PreCommitFn*>(ud))(payload);
+}
+extern "C" inline void loro_hpp_pre_commit_free(void* ud) {
+    delete static_cast<PreCommitFn*>(ud);
+}
+extern "C" inline bool loro_hpp_first_commit_invoke(std::uint64_t peer, void* ud) {
+    return (*static_cast<FirstCommitFromPeerFn*>(ud))(peer);
+}
+extern "C" inline void loro_hpp_first_commit_free(void* ud) {
+    delete static_cast<FirstCommitFromPeerFn*>(ud);
+}
+
+extern "C" inline bool loro_hpp_travel_invoke(const LoroChangeMeta* m, void* ud) {
+    ChangeMeta cm(m);
+    return (*static_cast<ChangeAncestorsFn*>(ud))(cm);
+}
+extern "C" inline void loro_hpp_travel_free(void* ud) {
+    delete static_cast<ChangeAncestorsFn*>(ud);
+}
+
+extern "C" inline void loro_hpp_jsonpath_invoke(void* ud) {
+    (*static_cast<JsonPathNotifyFn*>(ud))();
+}
+extern "C" inline void loro_hpp_jsonpath_free(void* ud) {
+    delete static_cast<JsonPathNotifyFn*>(ud);
+}
+
+}  // namespace detail
+
+/// RAII wrapper around a `LoroEphemeralStore*` (keyed last-write-wins presence state).
+/// Move-only.
+class EphemeralStore {
+public:
+    explicit EphemeralStore(LoroEphemeralStore* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// Creates an ephemeral store with an inactivity `timeout` (milliseconds).
+    explicit EphemeralStore(std::int64_t timeout)
+        : handle_(loro_ephemeral_store_new(timeout)) {
+        if (!handle_) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroEphemeralStore* raw() const noexcept { return handle_.get(); }
+
+    /// Sets `key` to the JSON value string `json`.
+    void set(std::string_view key, std::string_view json) {
+        detail::check(loro_ephemeral_store_set(handle_.get(), key.data(), key.size(),
+                                               json.data(), json.size()));
+    }
+    /// The value at `key` as a JSON string, or std::nullopt if absent/expired.
+    std::optional<std::string> get(std::string_view key) const {
+        detail::Bytes b;
+        if (!detail::check_found(
+                loro_ephemeral_store_get(handle_.get(), key.data(), key.size(), b.out())))
+            return std::nullopt;
+        return b.to_string();
+    }
+    /// Deletes `key`.
+    void remove(std::string_view key) {
+        detail::check(loro_ephemeral_store_delete(handle_.get(), key.data(), key.size()));
+    }
+
+    std::vector<std::uint8_t> encode(std::string_view key) const {
+        detail::Bytes b;
+        detail::check(
+            loro_ephemeral_store_encode(handle_.get(), key.data(), key.size(), b.out()));
+        return b.to_vector();
+    }
+    std::vector<std::uint8_t> encode_all() const {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_store_encode_all(handle_.get(), b.out()));
+        return b.to_vector();
+    }
+    void apply(const std::uint8_t* data, std::size_t len) {
+        detail::check(loro_ephemeral_store_apply(handle_.get(), data, len));
+    }
+    void apply(const std::vector<std::uint8_t>& data) { apply(data.data(), data.size()); }
+
+    void remove_outdated() {
+        detail::check(loro_ephemeral_store_remove_outdated(handle_.get()));
+    }
+    /// The store's keys as a JSON array string.
+    std::string keys() const {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_store_keys(handle_.get(), b.out()));
+        return b.to_string();
+    }
+    /// All entries as a JSON object string.
+    std::string get_all_states() const {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_store_get_all_states(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// Subscribes to change events. Destroy the returned Subscription to unsubscribe.
+    Subscription subscribe(EphemeralSubscriberFn cb) {
+        auto* fn = new EphemeralSubscriberFn(std::move(cb));
+        LoroEphemeralSubscriber c{detail::loro_hpp_ephemeral_invoke, fn,
+                                  detail::loro_hpp_ephemeral_free};
+        LoroSubscription* s = loro_ephemeral_store_subscribe(handle_.get(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+    /// Subscribes to local updates (encoded bytes to broadcast). The callback returns true to
+    /// stay subscribed (false auto-unsubscribes). Destroy the Subscription to unsubscribe.
+    Subscription subscribe_local_updates(LocalUpdateFn cb) {
+        auto* fn = new LocalUpdateFn(std::move(cb));
+        LoroLocalUpdateCallback c{detail::loro_hpp_local_update_invoke, fn,
+                                  detail::loro_hpp_local_update_free};
+        LoroSubscription* s = loro_ephemeral_store_subscribe_local_updates(handle_.get(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroEphemeralStore* p) const noexcept {
+            loro_ephemeral_store_free(p);
+        }
+    };
+    std::unique_ptr<LoroEphemeralStore, Deleter> handle_;
+};
+
+/// RAII wrapper around a `LoroUndoManager*` (local undo/redo). Move-only. Create one with
+/// Doc::undo_manager().
+class UndoManager {
+public:
+    explicit UndoManager(LoroUndoManager* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroUndoManager* raw() const noexcept { return handle_.get(); }
+
+    /// Undoes the last recorded change; returns whether an undo actually happened.
+    bool undo() {
+        bool applied = false;
+        detail::check(loro_undo_manager_undo(handle_.get(), &applied));
+        return applied;
+    }
+    /// Redoes the last undone change; returns whether a redo actually happened.
+    bool redo() {
+        bool applied = false;
+        detail::check(loro_undo_manager_redo(handle_.get(), &applied));
+        return applied;
+    }
+
+    bool can_undo() const { return loro_undo_manager_can_undo(handle_.get()); }
+    bool can_redo() const { return loro_undo_manager_can_redo(handle_.get()); }
+    std::size_t undo_count() const { return loro_undo_manager_undo_count(handle_.get()); }
+    std::size_t redo_count() const { return loro_undo_manager_redo_count(handle_.get()); }
+
+    void record_new_checkpoint() {
+        detail::check(loro_undo_manager_record_new_checkpoint(handle_.get()));
+    }
+    void set_merge_interval(std::int64_t interval_ms) {
+        detail::check(loro_undo_manager_set_merge_interval(handle_.get(), interval_ms));
+    }
+    void set_max_undo_steps(std::size_t steps) {
+        detail::check(loro_undo_manager_set_max_undo_steps(handle_.get(), steps));
+    }
+    void add_exclude_origin_prefix(std::string_view prefix) {
+        detail::check(loro_undo_manager_add_exclude_origin_prefix(handle_.get(), prefix.data(),
+                                                                  prefix.size()));
+    }
+    void clear() { detail::check(loro_undo_manager_clear(handle_.get())); }
+    void group_start() { detail::check(loro_undo_manager_group_start(handle_.get())); }
+    void group_end() { detail::check(loro_undo_manager_group_end(handle_.get())); }
+
+    /// Installs (or replaces) the on_push listener. The previous listener (and its captured
+    /// state) is released when replaced or when the manager is destroyed.
+    void set_on_push(UndoOnPushFn cb) {
+        auto* fn = new UndoOnPushFn(std::move(cb));
+        LoroUndoOnPush c{detail::loro_hpp_undo_on_push, fn, detail::loro_hpp_undo_on_push_free};
+        detail::check(loro_undo_manager_set_on_push(handle_.get(), c));
+    }
+    /// Installs (or replaces) the on_pop listener.
+    void set_on_pop(UndoOnPopFn cb) {
+        auto* fn = new UndoOnPopFn(std::move(cb));
+        LoroUndoOnPop c{detail::loro_hpp_undo_on_pop, fn, detail::loro_hpp_undo_on_pop_free};
+        detail::check(loro_undo_manager_set_on_pop(handle_.get(), c));
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroUndoManager* p) const noexcept { loro_undo_manager_free(p); }
+    };
+    std::unique_ptr<LoroUndoManager, Deleter> handle_;
+};
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -980,6 +1684,141 @@ public:
         LoroLocalUpdateCallback c{detail::loro_hpp_local_update_invoke, fn,
                                   detail::loro_hpp_local_update_free};
         LoroSubscription* s = loro_doc_subscribe_local_update(handle_.get(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+    // ---- M4: versions & time travel ----
+
+    /// The oplog version vector (everything in the document's history).
+    VersionVector oplog_vv() const {
+        LoroVersionVector* v = loro_doc_oplog_vv(handle_.get());
+        if (!v) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return VersionVector(v);
+    }
+    /// The current state version vector.
+    VersionVector state_vv() const {
+        LoroVersionVector* v = loro_doc_state_vv(handle_.get());
+        if (!v) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return VersionVector(v);
+    }
+    /// The oplog frontiers.
+    Frontiers oplog_frontiers() const {
+        LoroFrontiers* f = loro_doc_oplog_frontiers(handle_.get());
+        if (!f) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Frontiers(f);
+    }
+    /// The current state frontiers.
+    Frontiers state_frontiers() const {
+        LoroFrontiers* f = loro_doc_state_frontiers(handle_.get());
+        if (!f) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Frontiers(f);
+    }
+    /// Converts frontiers to a version vector against this document. Throws if the frontiers
+    /// are not contained in the document's history.
+    VersionVector frontiers_to_vv(const Frontiers& f) const {
+        LoroVersionVector* v = loro_doc_frontiers_to_vv(handle_.get(), f.raw());
+        if (!v) throw Error(LORO_ERR_NOT_FOUND, detail::last_error_message());
+        return VersionVector(v);
+    }
+    /// Converts a version vector to frontiers against this document.
+    Frontiers vv_to_frontiers(const VersionVector& vv) const {
+        LoroFrontiers* f = loro_doc_vv_to_frontiers(handle_.get(), vv.raw());
+        if (!f) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Frontiers(f);
+    }
+    /// Time-travels the document state to `frontiers` (detaching from the latest version).
+    void checkout(const Frontiers& frontiers) {
+        detail::check(loro_doc_checkout(handle_.get(), frontiers.raw()));
+    }
+    /// Re-attaches the document state to the latest version.
+    void checkout_to_latest() { detail::check(loro_doc_checkout_to_latest(handle_.get())); }
+    /// Whether the document is detached (checked out to a non-latest version).
+    bool is_detached() const { return loro_doc_is_detached(handle_.get()); }
+
+    /// Exports only the updates after `from` (the delta to bring a peer at `from` up to date).
+    std::vector<std::uint8_t> export_updates_from(const VersionVector& from) const {
+        detail::Bytes b;
+        detail::check(loro_doc_export_updates_from(handle_.get(), from.raw(), b.out()));
+        return b.to_vector();
+    }
+
+    /// Traverses the ancestor changes of `ids` (latest to oldest). The callback returns true
+    /// to continue or false to stop early.
+    void travel_change_ancestors(const std::vector<Id>& ids, ChangeAncestorsFn cb) {
+        auto* fn = new ChangeAncestorsFn(std::move(cb));
+        LoroChangeAncestorsTraveler t{detail::loro_hpp_travel_invoke, fn,
+                                      detail::loro_hpp_travel_free};
+        detail::check(
+            loro_doc_travel_change_ancestors(handle_.get(), ids.data(), ids.size(), t));
+    }
+
+    // ---- M4: undo manager ----
+
+    /// Creates an undo manager bound to this document's current peer.
+    UndoManager undo_manager() {
+        return UndoManager(loro_undo_manager_new(handle_.get()));
+    }
+
+    // ---- M4: jsonpath ----
+
+    /// Runs a JSONPath query against the whole document.
+    JsonPathResults jsonpath(std::string_view path) const {
+        LoroJsonPathResults* r = loro_doc_jsonpath(handle_.get(), path.data(), path.size());
+        if (!r) throw Error(LORO_ERR_INVALID_ARG, detail::last_error_message());
+        return JsonPathResults(r);
+    }
+
+    /// Subscribes to updates that might affect a JSONPath query (lightweight notification, may
+    /// fire false positives). Destroy the returned Subscription to unsubscribe.
+    Subscription subscribe_jsonpath(std::string_view path, JsonPathNotifyFn cb) {
+        auto* fn = new JsonPathNotifyFn(std::move(cb));
+        LoroJsonPathSubscriber c{detail::loro_hpp_jsonpath_invoke, fn,
+                                 detail::loro_hpp_jsonpath_free};
+        LoroSubscription* s =
+            loro_doc_subscribe_jsonpath(handle_.get(), path.data(), path.size(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+    // ---- M4: commit hooks ----
+
+    /// Sets the commit message for the next commit (persisted, replicates to peers).
+    void set_next_commit_message(std::string_view msg) {
+        detail::check(loro_doc_set_next_commit_message(handle_.get(), msg.data(), msg.size()));
+    }
+    /// Sets the timestamp (seconds since the Unix epoch) for the next commit.
+    void set_next_commit_timestamp(std::int64_t timestamp) {
+        detail::check(loro_doc_set_next_commit_timestamp(handle_.get(), timestamp));
+    }
+
+    /// Subscribes to pre-commit events. The callback returns true to stay subscribed (false
+    /// auto-unsubscribes). Destroy the returned Subscription to unsubscribe.
+    Subscription subscribe_pre_commit(PreCommitFn cb) {
+        auto* fn = new PreCommitFn(std::move(cb));
+        LoroPreCommitCallback c{detail::loro_hpp_pre_commit_invoke, fn,
+                                detail::loro_hpp_pre_commit_free};
+        LoroSubscription* s = loro_doc_subscribe_pre_commit(handle_.get(), c);
+        if (!s) {
+            delete fn;
+            throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        }
+        return Subscription(s);
+    }
+
+    /// Subscribes to the first commit from each peer. The callback returns true to stay
+    /// subscribed (false auto-unsubscribes). Destroy the returned Subscription to unsubscribe.
+    Subscription subscribe_first_commit_from_peer(FirstCommitFromPeerFn cb) {
+        auto* fn = new FirstCommitFromPeerFn(std::move(cb));
+        LoroFirstCommitFromPeerCallback c{detail::loro_hpp_first_commit_invoke, fn,
+                                          detail::loro_hpp_first_commit_free};
+        LoroSubscription* s = loro_doc_subscribe_first_commit_from_peer(handle_.get(), c);
         if (!s) {
             delete fn;
             throw Error(LORO_ERR_OTHER, detail::last_error_message());

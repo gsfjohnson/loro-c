@@ -13,12 +13,20 @@
 #[macro_use]
 mod macros;
 
+pub mod awareness;
 pub mod callbacks;
+pub mod commit;
 pub mod container;
 pub mod doc;
 pub mod error;
 pub mod event;
+pub mod fractional_index;
+// The `loro` dependency unconditionally enables its `jsonpath` feature (see Cargo.toml),
+// so this module is always available.
+pub mod jsonpath;
+pub mod undo;
 pub mod value;
+pub mod version;
 
 use std::os::raw::c_char;
 

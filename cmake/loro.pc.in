@@ -1,0 +1,15 @@
+# prefix is derived from this file's own location (<prefix>/<libdir>/pkgconfig/loro.pc) so the
+# package stays relocatable regardless of the prefix passed to `cmake --install`. ${pcfiledir}
+# is expanded by pkg-config, not CMake (configure_file runs with @ONLY).
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: loro
+Description: C/C++ ABI wrapper around the Loro CRDT library
+URL: https://github.com/loro-dev/loro
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lloro_c_api
+Libs.private: @LORO_PC_PRIVATE_LIBS@

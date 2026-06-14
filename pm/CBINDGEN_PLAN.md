@@ -237,6 +237,8 @@ This verifies the committed header matches the Rust source without ever committi
 | **M4 — advanced** | `Awareness`, `EphemeralStore`, `UndoManager`, `FractionalIndex`, `VersionVector`/`Frontiers`/`ChangeAncestors`, `JsonPath`, `PreCommitCallback`, `FirstCommitFromPeerCallback`. | week 4–5 |
 | **M5 — polish** | CMake `install()` + `loroConfig.cmake` + `pkg-config`, `.so` versioning, GitHub Actions matrix (Linux/macOS/Windows × debug/release), examples, README. | week 6 |
 
+**M5 status — static-install-first (landed).** The install/export package (`find_package(loro)` → `loro::loro`), `loroConfig.cmake` + version file, `pkg-config` (`loro.pc`), the CI matrix (build/test × 3 OSes × Debug/Release, plus an install-consumer smoke test and a cbindgen header-drift guard), the third example (`subscribe_events`), `LICENSE`, and this README are done. The install ships a **static archive**. The **`cdylib` shared library + `SOVERSION`/SONAME versioning is the one deferred item**: it is Corrosion-only, Linux/macOS-only, needs a SONAME baked via rustc link-args plus a hand-built symlink chain, and is verifiable only in CI (not on the MSYS2/CLANG64 dev box) — so it was split out to keep the locally-verifiable static install clean.
+
 ## Critical files (to be created)
 
 - [CMakeLists.txt](CMakeLists.txt) — top-level Corrosion wiring
@@ -268,6 +270,6 @@ CI (M5) runs the full CTest suite on Ubuntu 22.04, macOS-latest, and Windows Ser
 
 - **`loro` 1.x stability.** Pinning `=1.13.1` is exact; any minor bump may break the wrapper. Acceptable — matches `loro-ffi`'s own pinning practice.
 - **Callback thread-safety.** Loro can fire subscribers from any thread that holds the doc. The user-supplied C callback must be reentrant. Documented in `loro.hpp` comments.
-- **`cdylib` symbol versioning on Linux.** Deferred to M5 (linker version script + `SONAME`).
+- **`cdylib` symbol versioning on Linux.** Still pending after the static-install M5 pass (see *M5 status* above): Corrosion-only, Linux/macOS-only, requires a SONAME baked via a rustc link-arg + a hand-built symlink chain, CI-only verification. The static `find_package`/`pkg-config` install landed without it.
 - **Memory ownership of `LoroValue`.** JSON-bytes design avoids ambiguity; revisit only if profiling shows JSON serialization is hot.
 - **Container handle lifetime — RESOLVED.** Verified against `loro-internal` v1.13.1: attached handlers hold a strong `Arc` chain to `DocState` (no `Weak`), so handles are strong co-owners. Handles are plain `Box<handler>`, free in any order, no use-after-free from free ordering (see *Container handle lifetime* under Key design decisions). Residual note, not a risk: a leaked container handle keeps the whole doc alive, so the leak-checking tests in M1 must cover freeing the doc *before* its child handles. Re-verify if the `loro` pin is ever bumped past 1.13.1.

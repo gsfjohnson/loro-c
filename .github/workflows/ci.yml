@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Build + test + install-consumer smoke test on the full OS x config matrix, via the
+  # default Corrosion build path. (GitHub's Windows runner has MSVC + a working link.exe,
+  # so the dev-box MSYS2/gnullvm workaround is not needed here.)
+  build-test:
+    name: ${{ matrix.os }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-2022]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+
+      # CMAKE_BUILD_TYPE drives single-config generators (Make/Ninja on Linux/macOS);
+      # --config drives the multi-config Visual Studio generator on Windows. Passing both
+      # is the standard cross-generator pattern — each ignores the one it doesn't use.
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_TESTING=ON
+          -DLORO_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }}
+
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
+
+      - name: Install
+        run: cmake --install build --config ${{ matrix.build_type }} --prefix "${{ runner.temp }}/loro-install"
+
+      # The only real test of transitive static linkage: build a downstream project against
+      # the install tree via find_package(loro), then run it. Catches a missing system lib
+      # in the per-platform lists (loroConfig.cmake / loro.pc).
+      - name: Consumer find_package smoke test
+        run: >
+          cmake -S tests/consumer -B build-consumer
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_PREFIX_PATH="${{ runner.temp }}/loro-install" &&
+          cmake --build build-consumer --config ${{ matrix.build_type }} &&
+          ctest --test-dir build-consumer -C ${{ matrix.build_type }} --output-on-failure
+
+      # pkg-config is the other supported discovery path; validate it on Linux.
+      - name: Consumer pkg-config smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export PKG_CONFIG_PATH="${{ runner.temp }}/loro-install/lib/pkgconfig:${{ runner.temp }}/loro-install/lib64/pkgconfig"
+          pkg-config --exists loro
+          echo "cflags: $(pkg-config --cflags loro)"
+          echo "libs:   $(pkg-config --libs --static loro)"
+          c++ -std=c++20 tests/consumer/main.cpp $(pkg-config --cflags loro) \
+            $(pkg-config --libs --static loro) -o consumer_pc
+          ./consumer_pc
+
+  # Guarantee the committed C header matches the Rust source: regenerate with the pinned
+  # cbindgen CLI and fail on any diff (Cargo build scripts must never mutate the source tree,
+  # so the header is committed and verified here instead).
+  header-drift:
+    name: cbindgen header drift
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cbindgen (pinned)
+        run: cargo install --locked cbindgen@0.29.4
+
+      # Mirror the CMake `regenerate-header` target: run from the crate dir so cbindgen's
+      # `cargo metadata` resolves the `loro-c-api` package.
+      - name: Regenerate header
+        run: cbindgen --config cbindgen.toml --crate loro-c-api --output ../include/loro/loro.h
+        working-directory: loro-c-api
+
+      - name: Fail if the committed header is stale
+        run: git diff --exit-code -- include/loro/loro.h

@@ -1,0 +1,40 @@
+@PACKAGE_INIT@
+
+# loroConfig.cmake — package config for find_package(loro).
+#
+# Provides the imported target `loro::loro` (header-only C++ RAII layer) linked against the
+# Loro Rust static archive (`loro_c_api-static`) plus the platform system libraries that
+# archive needs. Generated from cmake/loroConfig.cmake.in by configure_package_config_file.
+
+# 1) Recreate the Rust static archive as the imported target `loro_c_api-static`.
+#    Corrosion builds ship a generated snippet; the manual (non-Corrosion) build ships a
+#    hand-written equivalent. Exactly one of these exists in an install tree.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/loro-corrosionCorrosion.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/loro-corrosionCorrosion.cmake")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/loro-manual-targets.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/loro-manual-targets.cmake")
+endif()
+
+# 2) Attach the transitive system libraries the static archive needs. Neither snippet
+#    propagates these. The list is resolved at the library's build time (see CMakeLists.txt)
+#    and baked in here — consumer-side WIN32/APPLE detection is unreliable on MSYS2/gnullvm.
+if(TARGET loro_c_api-static)
+    set(_loro_sys @LORO_SYSTEM_LIBS@)
+    if(_loro_sys)
+        set_property(TARGET loro_c_api-static APPEND
+                     PROPERTY INTERFACE_LINK_LIBRARIES ${_loro_sys})
+    endif()
+    unset(_loro_sys)
+endif()
+
+# 3) The public interface target loro::loro (headers + cxx_std_20).
+include("${CMAKE_CURRENT_LIST_DIR}/loro-targets.cmake")
+
+# 4) Wire the Rust archive into loro::loro here rather than in the exported target, so the
+#    export set does not have to contain the imported `loro_c_api-static` (see CMakeLists.txt).
+if(TARGET loro::loro AND TARGET loro_c_api-static)
+    set_property(TARGET loro::loro APPEND
+                 PROPERTY INTERFACE_LINK_LIBRARIES loro_c_api-static)
+endif()
+
+check_required_components(loro)

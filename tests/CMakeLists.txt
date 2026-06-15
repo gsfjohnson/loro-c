@@ -18,6 +18,11 @@ add_executable(loro_test_cursor test_cursor.cpp)
 target_link_libraries(loro_test_cursor PRIVATE loro::loro)
 add_test(NAME test_cursor COMMAND loro_test_cursor)
 
+# G3 sync surface: JSON-update interchange, export modes, import_batch/with, shallow snapshots.
+add_executable(loro_test_sync test_sync.cpp)
+target_link_libraries(loro_test_sync PRIVATE loro::loro)
+add_test(NAME test_sync COMMAND loro_test_sync)
+
 # M2 containers.
 add_executable(loro_test_map_list test_map_list.cpp)
 target_link_libraries(loro_test_map_list PRIVATE loro::loro)
@@ -57,6 +62,7 @@ if(TARGET loro_cargo_build)
     add_dependencies(loro_test_text loro_cargo_build)
     add_dependencies(loro_test_richtext loro_cargo_build)
     add_dependencies(loro_test_cursor loro_cargo_build)
+    add_dependencies(loro_test_sync loro_cargo_build)
     add_dependencies(loro_test_map_list loro_cargo_build)
     add_dependencies(loro_test_movable_list loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)

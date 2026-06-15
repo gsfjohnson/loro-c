@@ -1983,6 +1983,112 @@ public:
         return b.to_vector();
     }
 
+    // ---- G3: JSON-update sync + export modes ----
+
+    /// Imports JSON-format updates (loro's update schema) into this document. Use to interop
+    /// with peers that exchange the human-readable JSON format rather than the binary one.
+    void import_json_updates(std::string_view json) {
+        detail::check(loro_doc_import_json_updates(handle_.get(), json.data(), json.size()));
+    }
+
+    /// Exports the ops in the range `(from, to]` as a JSON string. Pass an empty `from`
+    /// (VersionVector::create()) to export the full history.
+    std::string export_json_updates(const VersionVector& from, const VersionVector& to) const {
+        detail::Bytes b;
+        detail::check(
+            loro_doc_export_json_updates(handle_.get(), from.raw(), to.raw(), b.out()));
+        return b.to_string();
+    }
+
+    /// Like export_json_updates but without peer-id compression (full peer ids in the JSON).
+    std::string export_json_updates_without_peer_compression(const VersionVector& from,
+                                                             const VersionVector& to) const {
+        detail::Bytes b;
+        detail::check(loro_doc_export_json_updates_without_peer_compression(
+            handle_.get(), from.raw(), to.raw(), b.out()));
+        return b.to_string();
+    }
+
+    /// Exports the changes within a single id span as a JSON array string. Deterministic output
+    /// (suitable for hashing); may include pending uncommitted changes.
+    std::string export_json_in_id_span(const LoroIdSpan& span) const {
+        detail::Bytes b;
+        detail::check(loro_doc_export_json_in_id_span(handle_.get(), span, b.out()));
+        return b.to_string();
+    }
+    std::string export_json_in_id_span(std::uint64_t peer, std::int32_t counter_start,
+                                       std::int32_t counter_end) const {
+        return export_json_in_id_span(LoroIdSpan{peer, counter_start, counter_end});
+    }
+
+    /// Exports a shallow snapshot whose retained history starts at `frontiers` (older ops
+    /// trimmed).
+    std::vector<std::uint8_t> export_shallow_snapshot(const Frontiers& frontiers) const {
+        detail::Bytes b;
+        detail::check(
+            loro_doc_export_shallow_snapshot(handle_.get(), frontiers.raw(), b.out()));
+        return b.to_vector();
+    }
+
+    /// Exports a snapshot at `frontiers` (full history up to that version plus the state there).
+    std::vector<std::uint8_t> export_snapshot_at(const Frontiers& frontiers) const {
+        detail::Bytes b;
+        detail::check(loro_doc_export_snapshot_at(handle_.get(), frontiers.raw(), b.out()));
+        return b.to_vector();
+    }
+
+    /// Exports a state-only snapshot (state plus a minimal set of history). Pass `nullptr` to
+    /// use the latest version.
+    std::vector<std::uint8_t> export_state_only(const Frontiers* frontiers = nullptr) const {
+        detail::Bytes b;
+        detail::check(loro_doc_export_state_only(
+            handle_.get(), frontiers ? frontiers->raw() : nullptr, b.out()));
+        return b.to_vector();
+    }
+
+    /// Exports only the ops in the given id spans.
+    std::vector<std::uint8_t> export_updates_in_range(
+        const std::vector<LoroIdSpan>& spans) const {
+        detail::Bytes b;
+        detail::check(loro_doc_export_updates_in_range(handle_.get(), spans.data(),
+                                                       spans.size(), b.out()));
+        return b.to_vector();
+    }
+
+    /// Imports a batch of snapshot/update blobs at once; loro applies them in dependency order
+    /// regardless of the order given.
+    void import_batch(const std::vector<std::vector<std::uint8_t>>& blobs) {
+        std::vector<const std::uint8_t*> ptrs(blobs.size());
+        std::vector<std::size_t> lens(blobs.size());
+        for (std::size_t i = 0; i < blobs.size(); ++i) {
+            ptrs[i] = blobs[i].data();
+            lens[i] = blobs[i].size();
+        }
+        detail::check(
+            loro_doc_import_batch(handle_.get(), ptrs.data(), lens.data(), blobs.size()));
+    }
+
+    /// Imports a blob while attaching `origin` to the resulting change event (for telemetry /
+    /// event filtering).
+    void import_with(const std::uint8_t* data, std::size_t len, std::string_view origin) {
+        detail::check(
+            loro_doc_import_with(handle_.get(), data, len, origin.data(), origin.size()));
+    }
+    void import_with(const std::vector<std::uint8_t>& data, std::string_view origin) {
+        import_with(data.data(), data.size(), origin);
+    }
+
+    /// Whether the document is shallow (history trimmed; only retains ops since
+    /// shallow_since_vv()).
+    bool is_shallow() const { return loro_doc_is_shallow(handle_.get()); }
+
+    /// The start version of a shallow document's retained history (empty when not shallow).
+    VersionVector shallow_since_vv() const {
+        LoroVersionVector* v = loro_doc_shallow_since_vv(handle_.get());
+        if (!v) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return VersionVector(v);
+    }
+
     /// Traverses the ancestor changes of `ids` (latest to oldest). The callback returns true
     /// to continue or false to stop early.
     void travel_change_ancestors(const std::vector<Id>& ids, ChangeAncestorsFn cb) {

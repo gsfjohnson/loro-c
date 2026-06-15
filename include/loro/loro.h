@@ -425,6 +425,25 @@ typedef struct LoroPosQueryResult {
 } LoroPosQueryResult;
 
 /**
+ * A half-open span of one peer's ops, `[counter_start, counter_end)`. Mirrors `loro::IdSpan`
+ * (a `peer` plus a `loro::CounterSpan`). Passed by value to the id-span export functions.
+ */
+typedef struct LoroIdSpan {
+    /**
+     * The peer whose ops this span covers.
+     */
+    uint64_t peer;
+    /**
+     * First op counter in the span (inclusive).
+     */
+    int32_t counter_start;
+    /**
+     * One past the last op counter in the span (exclusive).
+     */
+    int32_t counter_end;
+} LoroIdSpan;
+
+/**
  * A C subscriber callback for [`loro_doc_subscribe`] / [`loro_doc_subscribe_root`].
  *
  * `invoke` is called with a callback-scoped `const LoroDiffEvent*` and the opaque
@@ -1684,6 +1703,93 @@ enum LoroStatus loro_doc_import(struct LoroDoc *doc, const uint8_t *data, uintpt
 enum LoroStatus loro_doc_get_deep_value_json(const struct LoroDoc *doc, struct LoroBytes *out);
 
 /**
+ * Imports JSON-format updates `(json, len)` (as produced by [`loro_doc_export_json_updates`]
+ * or another peer) into the document. `json` must be valid UTF-8 JSON in loro's update schema.
+ */
+enum LoroStatus loro_doc_import_json_updates(struct LoroDoc *doc, const char *json, uintptr_t len);
+
+/**
+ * Exports the ops in the range `(start_vv, end_vv]` as JSON bytes into `*out`. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`. Use an empty version vector for
+ * `start_vv` to export the full history.
+ */
+enum LoroStatus loro_doc_export_json_updates(const struct LoroDoc *doc,
+                                             const struct LoroVersionVector *start_vv,
+                                             const struct LoroVersionVector *end_vv,
+                                             struct LoroBytes *out);
+
+/**
+ * Like [`loro_doc_export_json_updates`] but without peer-id compression, so the JSON carries
+ * full peer ids — easier for application code to read and process at the cost of size.
+ */
+enum LoroStatus loro_doc_export_json_updates_without_peer_compression(const struct LoroDoc *doc,
+                                                                      const struct LoroVersionVector *start_vv,
+                                                                      const struct LoroVersionVector *end_vv,
+                                                                      struct LoroBytes *out);
+
+/**
+ * Exports the changes within the single id span `span` as a JSON array of changes into `*out`.
+ * Deterministic output (suitable for hashing); can include pending uncommitted changes. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_export_json_in_id_span(const struct LoroDoc *doc,
+                                                struct LoroIdSpan span,
+                                                struct LoroBytes *out);
+
+/**
+ * Exports a shallow snapshot whose retained history starts at `frontiers` (older ops are
+ * trimmed) into `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_export_shallow_snapshot(const struct LoroDoc *doc,
+                                                 const struct LoroFrontiers *frontiers,
+                                                 struct LoroBytes *out);
+
+/**
+ * Exports a snapshot at the given `frontiers` — full history up to that version plus the state
+ * there — into `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_export_snapshot_at(const struct LoroDoc *doc,
+                                            const struct LoroFrontiers *frontiers,
+                                            struct LoroBytes *out);
+
+/**
+ * Exports a state-only snapshot (the state at `frontiers` with a minimal set of history) into
+ * `*out`. Pass a null `frontiers` to use the latest version. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_export_state_only(const struct LoroDoc *doc,
+                                           const struct LoroFrontiers *frontiers,
+                                           struct LoroBytes *out);
+
+/**
+ * Exports only the ops in the given `count` id `spans` into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_export_updates_in_range(const struct LoroDoc *doc,
+                                                 const struct LoroIdSpan *spans,
+                                                 uintptr_t count,
+                                                 struct LoroBytes *out);
+
+/**
+ * Imports a batch of snapshot/update blobs at once. `datas[i]` / `lens[i]` describe the `i`th
+ * blob, for `count` blobs; loro applies them in dependency order regardless of array order.
+ */
+enum LoroStatus loro_doc_import_batch(struct LoroDoc *doc,
+                                      const uint8_t *const *datas,
+                                      const uintptr_t *lens,
+                                      uintptr_t count);
+
+/**
+ * Imports a snapshot or updates blob `(data, len)` while attaching `(origin, origin_len)` as
+ * the origin string on the resulting change event (handy for telemetry / event filtering).
+ */
+enum LoroStatus loro_doc_import_with(struct LoroDoc *doc,
+                                     const uint8_t *data,
+                                     uintptr_t len,
+                                     const char *origin,
+                                     uintptr_t origin_len);
+
+/**
  * Returns a pointer to the current thread's last-error message as a nul-terminated C
  * string, or `NULL` if no error has been recorded on this thread.
  *
@@ -2217,6 +2323,19 @@ struct LoroFrontiers *loro_doc_oplog_frontiers(const struct LoroDoc *doc);
  * Returns the document's current state frontiers. Release with [`loro_frontiers_free`].
  */
 struct LoroFrontiers *loro_doc_state_frontiers(const struct LoroDoc *doc);
+
+/**
+ * Reports whether the document is shallow (its history was trimmed by a shallow snapshot, so
+ * it only retains ops since [`loro_doc_shallow_since_vv`]). Returns `false` on a null handle.
+ */
+bool loro_doc_is_shallow(const struct LoroDoc *doc);
+
+/**
+ * Returns the start version of a shallow document's retained history — the ops *before* this
+ * version are not present. Empty when the document is not shallow. Release with
+ * [`loro_version_vector_free`].
+ */
+struct LoroVersionVector *loro_doc_shallow_since_vv(const struct LoroDoc *doc);
 
 /**
  * Converts `frontiers` to a version vector against this document, or null if the frontiers

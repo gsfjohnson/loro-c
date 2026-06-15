@@ -426,6 +426,131 @@ static void test_cursor_c(void) {
     loro_doc_free(d2);
 }
 
+/* G3: JSON-update sync + export modes from plain C — round-trip JSON updates between two docs,
+ * an id-span JSON export, import_batch of two blobs, and shallow-snapshot introspection. */
+static void test_json_sync_c(void) {
+    LoroDoc* a = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(a, 1) == LORO_OK);
+    LoroText* ta = loro_doc_get_text(a, "t", 1);
+    CHECK(loro_text_insert(ta, 0, "hello", 5) == LORO_OK);
+    CHECK(loro_doc_commit(a) == LORO_OK);
+
+    /* export_json_updates(empty .. oplog_vv) -> JSON carrying the schema and the text. */
+    LoroVersionVector* empty = loro_version_vector_new();
+    LoroVersionVector* a_vv = loro_doc_oplog_vv(a);
+    LoroBytes json = {0};
+    CHECK(loro_doc_export_json_updates(a, empty, a_vv, &json) == LORO_OK);
+    CHECK(json.len > 0);
+    CHECK(bytes_contains(&json, "schema_version"));
+    CHECK(bytes_contains(&json, "hello"));
+
+    /* import_json_updates into a fresh doc reproduces the text. */
+    LoroDoc* b = loro_doc_new();
+    CHECK(loro_doc_import_json_updates(b, (const char*)json.data, json.len) == LORO_OK);
+    LoroText* tb = loro_doc_get_text(b, "t", 1);
+    LoroBytes sb = {0};
+    CHECK(loro_text_to_string(tb, &sb) == LORO_OK);
+    CHECK(bytes_eq(&sb, "hello"));
+    loro_bytes_free(sb);
+    loro_bytes_free(json);
+
+    /* export_json_in_id_span over peer 1's [0,5) returns a non-empty JSON array. */
+    LoroIdSpan span = {1, 0, 5};
+    LoroBytes span_json = {0};
+    CHECK(loro_doc_export_json_in_id_span(a, span, &span_json) == LORO_OK);
+    CHECK(span_json.len > 0);
+    CHECK(bytes_contains(&span_json, "hello"));
+    loro_bytes_free(span_json);
+
+    loro_version_vector_free(empty);
+    loro_version_vector_free(a_vv);
+    loro_text_free(tb);
+    loro_text_free(ta);
+    loro_doc_free(b);
+    loro_doc_free(a);
+
+    /* import_batch: two independent docs' updates merged into a third in one call. */
+    LoroDoc* p = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(p, 11) == LORO_OK);
+    LoroText* tp = loro_doc_get_text(p, "p", 1);
+    CHECK(loro_text_insert(tp, 0, "P", 1) == LORO_OK);
+    CHECK(loro_doc_commit(p) == LORO_OK);
+    LoroBytes up = {0};
+    CHECK(loro_doc_export_updates(p, &up) == LORO_OK);
+
+    LoroDoc* q = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(q, 22) == LORO_OK);
+    LoroText* tq = loro_doc_get_text(q, "q", 1);
+    CHECK(loro_text_insert(tq, 0, "Q", 1) == LORO_OK);
+    CHECK(loro_doc_commit(q) == LORO_OK);
+    LoroBytes uq = {0};
+    CHECK(loro_doc_export_updates(q, &uq) == LORO_OK);
+
+    LoroDoc* r = loro_doc_new();
+    const uint8_t* datas[2] = {up.data, uq.data};
+    size_t lens[2] = {up.len, uq.len};
+    CHECK(loro_doc_import_batch(r, datas, lens, 2) == LORO_OK);
+    LoroText* rp = loro_doc_get_text(r, "p", 1);
+    LoroText* rq = loro_doc_get_text(r, "q", 1);
+    LoroBytes rps = {0};
+    LoroBytes rqs = {0};
+    CHECK(loro_text_to_string(rp, &rps) == LORO_OK);
+    CHECK(bytes_eq(&rps, "P"));
+    CHECK(loro_text_to_string(rq, &rqs) == LORO_OK);
+    CHECK(bytes_eq(&rqs, "Q"));
+    loro_bytes_free(rps);
+    loro_bytes_free(rqs);
+    loro_bytes_free(up);
+    loro_bytes_free(uq);
+    loro_text_free(rp);
+    loro_text_free(rq);
+    loro_text_free(tp);
+    loro_text_free(tq);
+    loro_doc_free(r);
+    loro_doc_free(p);
+    loro_doc_free(q);
+
+    /* Shallow snapshot: export from the frontiers after the first of two commits, import into a
+     * fresh doc, and confirm the result is shallow with a non-empty shallow_since_vv. */
+    LoroDoc* c = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(c, 7) == LORO_OK);
+    LoroText* tc = loro_doc_get_text(c, "t", 1);
+    CHECK(loro_text_insert(tc, 0, "AAA", 3) == LORO_OK);
+    CHECK(loro_doc_commit(c) == LORO_OK);
+    LoroFrontiers* mid = loro_doc_state_frontiers(c);
+    CHECK(loro_text_insert(tc, 3, "BBB", 3) == LORO_OK);
+    CHECK(loro_doc_commit(c) == LORO_OK);
+
+    LoroBytes shallow = {0};
+    CHECK(loro_doc_export_shallow_snapshot(c, mid, &shallow) == LORO_OK);
+    CHECK(shallow.len > 0);
+    loro_frontiers_free(mid);
+
+    LoroDoc* d = loro_doc_new();
+    CHECK(loro_doc_import(d, shallow.data, shallow.len) == LORO_OK);
+    loro_bytes_free(shallow);
+    CHECK(loro_doc_is_shallow(d) == true);
+    CHECK(loro_doc_is_shallow(c) == false);
+    LoroVersionVector* since = loro_doc_shallow_since_vv(d);
+    CHECK(since != NULL);
+    LoroBytes since_json = {0};
+    CHECK(loro_version_vector_to_json(since, &since_json) == LORO_OK);
+    CHECK(since_json.len > 2); /* not the empty "{}" */
+    loro_bytes_free(since_json);
+    /* the retained state is still "AAABBB". */
+    LoroText* td = loro_doc_get_text(d, "t", 1);
+    LoroBytes ds = {0};
+    CHECK(loro_text_to_string(td, &ds) == LORO_OK);
+    CHECK(bytes_eq(&ds, "AAABBB"));
+    loro_bytes_free(ds);
+
+    loro_version_vector_free(since);
+    loro_text_free(td);
+    loro_text_free(tc);
+    loro_doc_free(d);
+    loro_doc_free(c);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -436,6 +561,7 @@ int main(void) {
     test_advanced_c();
     test_richtext_c();
     test_cursor_c();
+    test_json_sync_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

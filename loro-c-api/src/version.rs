@@ -14,7 +14,7 @@
 use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::value::LoroBytes;
-use loro::{ChangeMeta, ExportMode, Frontiers, VersionVector, ID};
+use loro::{ChangeMeta, ExportMode, Frontiers, IdSpan, VersionVector, ID};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::ops::ControlFlow;
 use std::os::raw::c_void;
@@ -37,6 +37,25 @@ impl LoroId {
             peer: id.peer,
             counter: id.counter,
         }
+    }
+}
+
+/// A half-open span of one peer's ops, `[counter_start, counter_end)`. Mirrors `loro::IdSpan`
+/// (a `peer` plus a `loro::CounterSpan`). Passed by value to the id-span export functions.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoroIdSpan {
+    /// The peer whose ops this span covers.
+    pub peer: u64,
+    /// First op counter in the span (inclusive).
+    pub counter_start: i32,
+    /// One past the last op counter in the span (exclusive).
+    pub counter_end: i32,
+}
+
+impl LoroIdSpan {
+    pub(crate) fn to_loro(self) -> IdSpan {
+        IdSpan::new(self.peer, self.counter_start, self.counter_end)
     }
 }
 
@@ -466,6 +485,27 @@ pub extern "C" fn loro_doc_state_frontiers(doc: *const LoroDoc) -> *mut LoroFron
     ffi_guard!(std::ptr::null_mut(), {
         let doc = deref_or!(doc, std::ptr::null_mut());
         Box::into_raw(Box::new(LoroFrontiers(doc.inner().state_frontiers())))
+    })
+}
+
+/// Reports whether the document is shallow (its history was trimmed by a shallow snapshot, so
+/// it only retains ops since [`loro_doc_shallow_since_vv`]). Returns `false` on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_is_shallow(doc: *const LoroDoc) -> bool {
+    ffi_guard!(false, {
+        let doc = deref_or!(doc, false);
+        doc.inner().is_shallow()
+    })
+}
+
+/// Returns the start version of a shallow document's retained history — the ops *before* this
+/// version are not present. Empty when the document is not shallow. Release with
+/// [`loro_version_vector_free`].
+#[no_mangle]
+pub extern "C" fn loro_doc_shallow_since_vv(doc: *const LoroDoc) -> *mut LoroVersionVector {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        Box::into_raw(Box::new(LoroVersionVector(doc.inner().shallow_since_vv().to_vv())))
     })
 }
 

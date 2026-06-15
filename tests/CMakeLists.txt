@@ -23,6 +23,11 @@ add_executable(loro_test_sync test_sync.cpp)
 target_link_libraries(loro_test_sync PRIVATE loro::loro)
 add_test(NAME test_sync COMMAND loro_test_sync)
 
+# G4 diff/patch: diff between versions, apply a diff across docs, revert_to, nested-container diff.
+add_executable(loro_test_diff test_diff.cpp)
+target_link_libraries(loro_test_diff PRIVATE loro::loro)
+add_test(NAME test_diff COMMAND loro_test_diff)
+
 # M2 containers.
 add_executable(loro_test_map_list test_map_list.cpp)
 target_link_libraries(loro_test_map_list PRIVATE loro::loro)
@@ -63,6 +68,7 @@ if(TARGET loro_cargo_build)
     add_dependencies(loro_test_richtext loro_cargo_build)
     add_dependencies(loro_test_cursor loro_cargo_build)
     add_dependencies(loro_test_sync loro_cargo_build)
+    add_dependencies(loro_test_diff loro_cargo_build)
     add_dependencies(loro_test_map_list loro_cargo_build)
     add_dependencies(loro_test_movable_list loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)

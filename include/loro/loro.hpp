@@ -1777,6 +1777,31 @@ private:
     std::unique_ptr<LoroStyleConfigMap, Deleter> handle_;
 };
 
+/// RAII wrapper around a `LoroDiffBatch*` — a collection of per-container diffs produced by
+/// Doc::diff and replayed with Doc::apply_diff. Move-only. Unlike a JSON dump, it losslessly
+/// carries live nested containers; use to_json() only for inspection.
+class DiffBatch {
+public:
+    explicit DiffBatch(LoroDiffBatch* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroDiffBatch* raw() const noexcept { return handle_.get(); }
+
+    /// Renders the batch as a JSON string (an object keyed by container-id), for inspection.
+    std::string to_json() const {
+        detail::Bytes b;
+        detail::check(loro_diff_batch_to_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroDiffBatch* p) const noexcept { loro_diff_batch_free(p); }
+    };
+    std::unique_ptr<LoroDiffBatch, Deleter> handle_;
+};
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -1975,6 +2000,24 @@ public:
     void checkout_to_latest() { detail::check(loro_doc_checkout_to_latest(handle_.get())); }
     /// Whether the document is detached (checked out to a non-latest version).
     bool is_detached() const { return loro_doc_is_detached(handle_.get()); }
+
+    /// Computes the diff that turns the state at `from` into the state at `to`. The returned
+    /// batch can be replayed onto another document with apply_diff(). Throws LORO_ERR_NOT_FOUND
+    /// if either frontiers references a version this document does not contain.
+    DiffBatch diff(const Frontiers& from, const Frontiers& to) const {
+        LoroDiffBatch* raw = nullptr;
+        detail::check(loro_doc_diff(handle_.get(), from.raw(), to.raw(), &raw));
+        return DiffBatch(raw);
+    }
+    /// Applies `batch` to this document, mutating its state. The batch is not consumed.
+    void apply_diff(const DiffBatch& batch) {
+        detail::check(loro_doc_apply_diff(handle_.get(), batch.raw()));
+    }
+    /// Reverts this document's state back to `frontiers`, recording the inverse as new ops (so,
+    /// unlike checkout(), the document stays attached and the rewind is part of history).
+    void revert_to(const Frontiers& frontiers) {
+        detail::check(loro_doc_revert_to(handle_.get(), frontiers.raw()));
+    }
 
     /// Exports only the updates after `from` (the delta to bring a peer at `from` up to date).
     std::vector<std::uint8_t> export_updates_from(const VersionVector& from) const {

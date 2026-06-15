@@ -18,6 +18,7 @@ pub mod callbacks;
 pub mod commit;
 pub mod container;
 pub mod cursor;
+pub mod diff;
 pub mod doc;
 pub mod error;
 pub mod event;

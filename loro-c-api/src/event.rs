@@ -26,7 +26,7 @@ use crate::callbacks::CCallback;
 use crate::doc::LoroDoc;
 use crate::error::{set_last_error, LoroStatus};
 use crate::value::{str_from_raw, LoroBytes};
-use loro::event::{ContainerDiff, Diff, DiffEvent, ListDiffItem};
+use loro::event::{ContainerDiff, Diff, DiffBatch, DiffEvent, ListDiffItem};
 use loro::{
     ContainerID, EventTriggerKind, FractionalIndex, Index, LoroValue, TextDelta, TreeExternalDiff,
     TreeID, TreeParentId, ValueOrContainer,
@@ -488,8 +488,9 @@ pub extern "C" fn loro_container_diff_to_json(
 // JSON serialization helpers (private)
 // ---------------------------------------------------------------------------
 
-/// Serializes `value` into `*out`, mapping a serde failure to `LORO_ERR_ENCODE`.
-fn write_json(out: *mut LoroBytes, value: &JsonValue) -> LoroStatus {
+/// Serializes `value` into `*out`, mapping a serde failure to `LORO_ERR_ENCODE`. Shared with
+/// the diff/patch module ([`crate::diff`]).
+pub(crate) fn write_json(out: *mut LoroBytes, value: &JsonValue) -> LoroStatus {
     match serde_json::to_vec(value) {
         Ok(bytes) => {
             unsafe { out.write(LoroBytes::from_vec(bytes)) };
@@ -510,7 +511,18 @@ fn index_to_json(index: &Index) -> JsonValue {
     }
 }
 
-fn diff_to_json(diff: &Diff) -> JsonValue {
+/// Serializes a whole [`DiffBatch`] as a JSON object keyed by container-id string, each value
+/// being that container's diff payload (see [`diff_to_json`]). Shared with the diff/patch module
+/// ([`crate::diff`]).
+pub(crate) fn diff_batch_to_json(batch: &DiffBatch) -> JsonValue {
+    let mut obj = JsonMap::new();
+    for (cid, diff) in batch.iter() {
+        obj.insert(cid.to_string(), diff_to_json(diff));
+    }
+    JsonValue::Object(obj)
+}
+
+pub(crate) fn diff_to_json(diff: &Diff) -> JsonValue {
     match diff {
         Diff::Text(deltas) => JsonValue::Array(deltas.iter().map(text_delta_to_json).collect()),
         Diff::List(items) => JsonValue::Array(items.iter().map(list_item_to_json).collect()),

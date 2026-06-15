@@ -551,6 +551,69 @@ static void test_json_sync_c(void) {
     loro_doc_free(c);
 }
 
+/* G4: diff between two versions, apply a diff onto another doc, and revert. */
+static void test_diff_c(void) {
+    LoroDoc* a = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(a, 1) == LORO_OK);
+    LoroText* ta = loro_doc_get_text(a, "t", 1);
+    CHECK(loro_text_insert(ta, 0, "hello", 5) == LORO_OK);
+    CHECK(loro_doc_commit(a) == LORO_OK);
+    LoroFrontiers* f0 = loro_doc_state_frontiers(a);
+    CHECK(f0 != NULL);
+
+    CHECK(loro_text_insert(ta, 5, " world", 6) == LORO_OK);
+    CHECK(loro_doc_commit(a) == LORO_OK);
+    LoroFrontiers* f1 = loro_doc_state_frontiers(a);
+    CHECK(f1 != NULL);
+
+    /* diff(F0, F1) describes inserting " world"; the JSON view reflects that. */
+    LoroDiffBatch* batch = NULL;
+    CHECK(loro_doc_diff(a, f0, f1, &batch) == LORO_OK);
+    CHECK(batch != NULL);
+    LoroBytes dj = {0};
+    CHECK(loro_diff_batch_to_json(batch, &dj) == LORO_OK);
+    CHECK(bytes_contains(&dj, "insert"));
+    CHECK(bytes_contains(&dj, "world"));
+    loro_bytes_free(dj);
+
+    /* Apply the batch onto a clone frozen at F0: it reaches A's F1 state. */
+    LoroBytes snap0 = {0};
+    CHECK(loro_doc_export_snapshot_at(a, f0, &snap0) == LORO_OK);
+    LoroDoc* b = loro_doc_new();
+    CHECK(loro_doc_import(b, snap0.data, snap0.len) == LORO_OK);
+    loro_bytes_free(snap0);
+    LoroText* tb = loro_doc_get_text(b, "t", 1);
+    LoroBytes bs0 = {0};
+    CHECK(loro_text_to_string(tb, &bs0) == LORO_OK);
+    CHECK(bytes_eq(&bs0, "hello"));
+    loro_bytes_free(bs0);
+    CHECK(loro_doc_apply_diff(b, batch) == LORO_OK);
+    LoroBytes bs1 = {0};
+    CHECK(loro_text_to_string(tb, &bs1) == LORO_OK);
+    CHECK(bytes_eq(&bs1, "hello world"));
+    loro_bytes_free(bs1);
+
+    /* Batch is not consumed by apply_diff; the caller still frees it. */
+    loro_diff_batch_free(batch);
+
+    /* revert_to rewinds A to the F0 content (recording the inverse as new ops). */
+    CHECK(loro_doc_revert_to(a, f0) == LORO_OK);
+    LoroBytes as = {0};
+    CHECK(loro_text_to_string(ta, &as) == LORO_OK);
+    CHECK(bytes_eq(&as, "hello"));
+    loro_bytes_free(as);
+
+    /* Error path: a null out-param is rejected. */
+    CHECK(loro_doc_diff(a, f0, f1, NULL) == LORO_ERR_INVALID_ARG);
+
+    loro_frontiers_free(f0);
+    loro_frontiers_free(f1);
+    loro_text_free(tb);
+    loro_text_free(ta);
+    loro_doc_free(b);
+    loro_doc_free(a);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -562,6 +625,7 @@ int main(void) {
     test_richtext_c();
     test_cursor_c();
     test_json_sync_c();
+    test_diff_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

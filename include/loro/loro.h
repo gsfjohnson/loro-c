@@ -225,6 +225,12 @@ typedef struct LoroCounter LoroCounter;
 typedef struct LoroCursor LoroCursor;
 
 /**
+ * Opaque handle to a [`loro::event::DiffBatch`] — a collection of per-container diffs produced
+ * by [`loro_doc_diff`]. Free with [`loro_diff_batch_free`].
+ */
+typedef struct LoroDiffBatch LoroDiffBatch;
+
+/**
  * Opaque, **callback-scoped** view of a diff event. Only valid for the duration of the
  * subscriber callback; never store it or use it afterwards.
  *
@@ -1597,6 +1603,45 @@ struct LoroCursor *loro_movable_list_get_cursor(const struct LoroMovableList *li
 enum LoroStatus loro_doc_get_cursor_pos(const struct LoroDoc *doc,
                                         const struct LoroCursor *cursor,
                                         struct LoroPosQueryResult *out);
+
+/**
+ * Frees a diff-batch handle. Passing null is a no-op.
+ */
+void loro_diff_batch_free(struct LoroDiffBatch *batch);
+
+/**
+ * Computes the diff that turns the state at frontiers `from` into the state at frontiers `to`,
+ * writing a new `LoroDiffBatch*` into `*out`. `*out` is only written on `LORO_OK`; release it
+ * with [`loro_diff_batch_free`]. Returns `LORO_ERR_NOT_FOUND` if either frontiers references a
+ * version the document does not contain.
+ */
+enum LoroStatus loro_doc_diff(const struct LoroDoc *doc,
+                              const struct LoroFrontiers *from,
+                              const struct LoroFrontiers *to,
+                              struct LoroDiffBatch **out);
+
+/**
+ * Applies `batch` to `doc`, mutating its state (and recording the change as new ops). The batch
+ * is **not** consumed — it is cloned internally, so the caller still owns it and must release it
+ * with [`loro_diff_batch_free`].
+ */
+enum LoroStatus loro_doc_apply_diff(struct LoroDoc *doc, const struct LoroDiffBatch *batch);
+
+/**
+ * Reverts `doc`'s state back to `frontiers`. Unlike [`loro_doc_checkout`], this does not detach
+ * the document: it records the inverse operations as a new change, so the rewind is itself part
+ * of history. Returns `LORO_ERR_NOT_FOUND` if `frontiers` references an unknown version.
+ */
+enum LoroStatus loro_doc_revert_to(struct LoroDoc *doc, const struct LoroFrontiers *frontiers);
+
+/**
+ * Renders `batch` as JSON into `*out` for inspection/debugging. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`. The result is a JSON object keyed by container-id
+ * string (e.g. `"cid:root-text:Text"`), each mapping to that container's per-kind diff payload
+ * using the same schema as [`loro_container_diff_to_json`]. Inserted values are rendered as
+ * their deep value; a live container handle is not surfaced.
+ */
+enum LoroStatus loro_diff_batch_to_json(const struct LoroDiffBatch *batch, struct LoroBytes *out);
 
 /**
  * Creates a new, empty document. Never returns null except on allocation failure /

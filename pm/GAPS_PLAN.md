@@ -180,29 +180,40 @@ shallow snapshot then import into a fresh doc preserves current state but drops 
 
 ---
 
-## G4 — Diff / patch API
+## G4 — Diff / patch API ✅ *(landed)*
 
-Programmatic diffing and time-travel beyond read-only events.
+Programmatic diffing and time-travel beyond read-only events. Shipped in
+[diff.rs](loro-c-api/src/diff.rs).
 
-**Rust — [doc.rs](loro-c-api/src/doc.rs):**
-- `loro_doc_diff(doc, from_frontiers, to_frontiers, out)` → `LoroBytes` JSON `DiffBatch`
-  (reuse the diff→JSON marshalling already built for events in
-  [event.rs](loro-c-api/src/event.rs)).
-- `loro_doc_apply_diff(doc, diff_json, len)` → status (parse JSON → `DiffBatch`).
+**Design change from the original sketch.** The plan first specced diffs as JSON in *both*
+directions (`apply_diff(doc, diff_json, len)` parsing JSON → `DiffBatch`). That is not viable:
+the pinned `loro` 1.13.1 `DiffBatch`/`Diff`/`ListDiffItem`/`MapDelta`/`TreeDiff` do **not** derive
+serde `Deserialize`, and a diff can carry a *live* nested container (`ValueOrContainer::Container`)
+that JSON flattens to a plain value and can't faithfully reconstruct — so a JSON-parsed
+`apply_diff` would be lossy and require ~4 hand-written deserializers. G4 instead represents a
+diff as an **opaque `LoroDiffBatch` handle** (mirroring upstream `loro-ffi`'s `DiffBatch` object),
+which is lossless; JSON is kept for read-only inspection only.
+
+**Rust — [diff.rs](loro-c-api/src/diff.rs):**
+- `loro_doc_diff(doc, from, to, out: LoroDiffBatch**)` → status; writes a new opaque
+  `LoroDiffBatch*` (`LORO_ERR_NOT_FOUND` if a frontiers is unknown).
+- `loro_doc_apply_diff(doc, batch)` → status (batch cloned, not consumed).
+- `loro_diff_batch_to_json(batch, out)` → `LoroBytes` JSON object keyed by container-id, for
+  inspection — reuses the existing event diff codec (`diff_to_json`/`write_json` in
+  [event.rs](loro-c-api/src/event.rs), now `pub(crate)`, plus a new `diff_batch_to_json`).
 - `loro_doc_revert_to(doc, frontiers)` → status.
+- `loro_diff_batch_free(batch)`.
 
-**Design note:** the event module already serializes `Diff`/`TextDelta`/`ListDiffItem`/
-`MapDelta`/`TreeDiff` to JSON for subscribers. Factor that into a shared
-`diff_to_json` / `diff_from_json` in [event.rs](loro-c-api/src/event.rs) so G4's
-`apply_diff` and G1's `apply_delta` share one codec rather than duplicating it.
+**C++ wrapper:** `loro::DiffBatch` RAII type with `to_json()`; `Doc::diff(a,b)`,
+`Doc::apply_diff(batch)`, `Doc::revert_to(frontiers)`.
 
-**C++ wrapper:** `Doc::diff(a,b)`, `Doc::apply_diff(diff)`, `Doc::revert_to(frontiers)`.
+**Tests:** [tests/test_diff.cpp](tests/test_diff.cpp) + `test_diff_c()` in
+[tests/test_c_only.c](tests/test_c_only.c): edit doc, capture frontiers F0; edit more; `diff(F0,
+now)` then `apply_diff` onto a clone of the F0 state reproduces `now`; a diff that *creates a
+nested container* round-trips losslessly (the case JSON couldn't); `revert_to(F0)` returns content
+to the F0 snapshot.
 
-**Tests:** edit doc, capture frontiers F0; edit more; `diff(F0, now)` then `apply_diff` onto a
-clone of the F0 state reproduces `now`; `revert_to(F0)` returns content to the F0 snapshot.
-
-**Effort:** ~3 C functions, mostly reusing the existing diff codec. Small once G1 lands the
-shared delta codec.
+**Effort:** 5 C functions + 1 opaque handle, reusing the existing diff codec.
 
 ---
 
@@ -319,7 +330,7 @@ milestone lands.
 |---|---|---|
 | Typed container constructors: `get_or_create_{text,list,map,tree,movable_list,counter}_container`, `insert_*_container`, movable_list `set_*_container` (Map/List/MovableList) | Local API uses a generic type-discriminated path instead of one-fn-per-type | `loro_{map,list,movable_list}_insert_container(type, …)` / `_set_container` / `_get_container` (see [container/](loro-c-api/src/container/)). **Note:** `ensure_mergeable_*` is NOT covered by this — it is a distinct capability ported in G6. |
 | `LoroValueLike`, `ContainerIdLike` | UniFFI trait-adapter scaffolding with no C ABI meaning | JSON marshalling for values ([value.rs](loro-c-api/src/value.rs)); `LoroContainerId` POD for container IDs |
-| `DiffBatch` interface (`push`, `get_diff`) | UniFFI object wrapper around a diff collection | G4 marshals diffs as JSON (`diff`/`apply_diff`), per the shared codec decision |
+| `DiffBatch` builder/inspect methods (`push`, `get_diff`) | A batch is produced by `diff()` and consumed by `apply_diff()`, not hand-assembled or iterated container-by-container across the C ABI | G4 ships `DiffBatch` as an opaque `LoroDiffBatch` handle ([diff.rs](loro-c-api/src/diff.rs)): `loro_doc_diff` → handle, `loro_doc_apply_diff`, `loro_diff_batch_to_json` (read-only inspection), `loro_diff_batch_free`. **Note:** JSON `apply_diff` was dropped — the upstream diff types aren't `Deserialize` and a diff can carry a live nested container JSON would lose; the opaque handle is lossless. Promote `push`/`get_diff` to real fns only if a caller must build or walk a batch by hand. |
 | Callback interfaces (`Subscriber`, `LocalUpdateCallback`, `JsonPathSubscriber`, `Unsubscriber`, `OnPush`/`OnPop`, `PreCommitCallback`, `FirstCommitFromPeerCallback`, `ChangeAncestorsTraveler`, `LocalEphemeralListener`, `EphemeralSubscriber`) | UniFFI callback-interface types; not standalone C surface | The uniform `{invoke, user_data, free_user_data}` callback triple ([callbacks.rs](loro-c-api/src/callbacks.rs)) |
 | `LoroDoc::check_state_correctness_slow` | Debug/test-only invariant checker | _(omit; not part of the public surface)_ — confirm before final sign-off |
 | `LoroUnknown` (`id`) | Placeholder for unknown/forward-compat container types | _(omit unless a concrete need appears)_ |

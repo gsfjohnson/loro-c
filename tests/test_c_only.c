@@ -690,6 +690,48 @@ static void test_get_by_path_c(void) {
     loro_doc_free(doc);
 }
 
+/* G6.1: doc config & timestamps via the raw C surface. The Configure handle shares the
+   document's live config, so a change through it (or via the doc shortcuts) is visible
+   through a freshly fetched handle. */
+static void test_g6_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    CHECK(doc != NULL);
+
+    /* Upstream defaults: timestamps off, merge interval 1000s. */
+    LoroConfigure* cfg = loro_doc_config(doc);
+    CHECK(cfg != NULL);
+    CHECK(loro_configure_record_timestamp(cfg) == false);
+    CHECK(loro_configure_merge_interval(cfg) == 1000);
+
+    /* A change through one handle is visible through a separately fetched handle. */
+    loro_configure_set_record_timestamp(cfg, true);
+    loro_configure_set_merge_interval(cfg, 42);
+    LoroConfigure* cfg2 = loro_doc_config(doc);
+    CHECK(cfg2 != NULL);
+    CHECK(loro_configure_record_timestamp(cfg2) == true);
+    CHECK(loro_configure_merge_interval(cfg2) == 42);
+    loro_configure_free(cfg2);
+
+    /* The doc-level shortcuts agree with the Configure getters. */
+    loro_doc_set_record_timestamp(doc, false);
+    loro_doc_set_change_merge_interval(doc, 9000000000LL);
+    LoroConfigure* cfg3 = loro_doc_config(doc);
+    CHECK(cfg3 != NULL);
+    CHECK(loro_configure_record_timestamp(cfg3) == false);
+    CHECK(loro_configure_merge_interval(cfg3) == 9000000000LL);
+    loro_configure_free(cfg3);
+
+    /* Null-handle paths are no-ops / return the documented fallbacks. */
+    CHECK(loro_doc_config(NULL) == NULL);
+    CHECK(loro_configure_record_timestamp(NULL) == false);
+    CHECK(loro_configure_merge_interval(NULL) == 0);
+    loro_configure_free(NULL);
+    loro_doc_set_record_timestamp(NULL, true);
+
+    loro_configure_free(cfg);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -703,6 +745,7 @@ int main(void) {
     test_json_sync_c();
     test_diff_c();
     test_get_by_path_c();
+    test_g6_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

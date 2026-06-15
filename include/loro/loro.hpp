@@ -1893,6 +1893,41 @@ private:
     std::unique_ptr<LoroDiffBatch, Deleter> handle_;
 };
 
+/// RAII wrapper around a `LoroConfigure*` — a document's live configuration (whether commits
+/// record a wall-clock timestamp, and the change-merge interval). Obtained from `Doc::config`.
+/// Move-only. The handle shares state with the document it came from: changes made through it
+/// affect the document, and vice-versa.
+class Configure {
+public:
+    explicit Configure(LoroConfigure* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroConfigure* raw() const noexcept { return handle_.get(); }
+
+    /// Whether commits record a wall-clock timestamp.
+    bool record_timestamp() const { return loro_configure_record_timestamp(handle_.get()); }
+
+    /// Sets whether commits record a wall-clock timestamp.
+    void set_record_timestamp(bool record) {
+        loro_configure_set_record_timestamp(handle_.get(), record);
+    }
+
+    /// The change-merge interval, in seconds.
+    std::int64_t merge_interval() const { return loro_configure_merge_interval(handle_.get()); }
+
+    /// Sets the change-merge interval, in seconds.
+    void set_merge_interval(std::int64_t interval) {
+        loro_configure_set_merge_interval(handle_.get(), interval);
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroConfigure* p) const noexcept { loro_configure_free(p); }
+    };
+    std::unique_ptr<LoroConfigure, Deleter> handle_;
+};
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -1954,6 +1989,24 @@ public:
     /// Resets the default text style.
     void reset_default_text_style() {
         detail::check(loro_doc_config_default_text_style(handle_.get(), nullptr));
+    }
+
+    /// Returns a handle to this document's live configuration. Mutations through it affect
+    /// the document (and vice-versa); see Configure.
+    Configure config() const {
+        LoroConfigure* raw = loro_doc_config(handle_.get());
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Configure(raw);
+    }
+
+    /// Shortcut for `config().set_record_timestamp(record)`.
+    void set_record_timestamp(bool record) {
+        loro_doc_set_record_timestamp(handle_.get(), record);
+    }
+
+    /// Shortcut for `config().set_merge_interval(interval)` (interval in seconds).
+    void set_change_merge_interval(std::int64_t interval) {
+        loro_doc_set_change_merge_interval(handle_.get(), interval);
     }
 
     /// Commits pending operations into the oplog.

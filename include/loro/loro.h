@@ -220,6 +220,18 @@ typedef struct LoroAwareness LoroAwareness;
 typedef struct LoroChangeMeta LoroChangeMeta;
 
 /**
+ * Opaque handle to a document's [`loro::Configure`]. Obtain with [`loro_doc_config`],
+ * release with [`loro_configure_free`].
+ *
+ * `Configure` is cheap to clone and clones **share** the underlying configuration (it is
+ * backed by atomics behind `Arc`). The handle returned by [`loro_doc_config`] therefore
+ * reflects the document's live config: changes made through it affect the document, and
+ * changes made to the document (e.g. via [`loro_doc_set_record_timestamp`]) are visible
+ * through it.
+ */
+typedef struct LoroConfigure LoroConfigure;
+
+/**
  * Opaque, type-erased handle to any Loro container.
  */
 typedef struct LoroContainer LoroContainer;
@@ -1734,6 +1746,53 @@ uint64_t loro_doc_peer_id(const struct LoroDoc *doc);
  * previous peer id.
  */
 enum LoroStatus loro_doc_set_peer_id(struct LoroDoc *doc, uint64_t peer);
+
+/**
+ * Returns a handle to the document's live configuration. The handle shares state with the
+ * document (see [`LoroConfigure`]). Returns null on a null handle. Release the returned
+ * handle with [`loro_configure_free`].
+ */
+struct LoroConfigure *loro_doc_config(const struct LoroDoc *doc);
+
+/**
+ * Frees a configuration handle. Passing null is a no-op. Does not affect the document the
+ * handle was obtained from.
+ */
+void loro_configure_free(struct LoroConfigure *config);
+
+/**
+ * Returns whether commits record a wall-clock timestamp. Returns `false` on a null handle.
+ */
+bool loro_configure_record_timestamp(const struct LoroConfigure *config);
+
+/**
+ * Sets whether commits record a wall-clock timestamp. Takes effect on the shared
+ * configuration (interior mutability). No-op on a null handle.
+ */
+void loro_configure_set_record_timestamp(const struct LoroConfigure *config, bool record);
+
+/**
+ * Returns the change-merge interval in seconds. Returns 0 on a null handle.
+ */
+int64_t loro_configure_merge_interval(const struct LoroConfigure *config);
+
+/**
+ * Sets the change-merge interval in seconds. Takes effect on the shared configuration
+ * (interior mutability). No-op on a null handle.
+ */
+void loro_configure_set_merge_interval(const struct LoroConfigure *config, int64_t interval);
+
+/**
+ * Convenience shortcut for `loro_doc_config` + `loro_configure_set_record_timestamp`: sets
+ * whether commits record a wall-clock timestamp. No-op on a null handle.
+ */
+void loro_doc_set_record_timestamp(const struct LoroDoc *doc, bool record);
+
+/**
+ * Convenience shortcut for `loro_doc_config` + `loro_configure_set_merge_interval`: sets the
+ * change-merge interval in seconds. No-op on a null handle.
+ */
+void loro_doc_set_change_merge_interval(const struct LoroDoc *doc, int64_t interval);
 
 /**
  * Returns the root text container named `(id, id_len)` (UTF-8, not nul-terminated),

@@ -113,6 +113,106 @@ pub extern "C" fn loro_doc_set_peer_id(doc: *mut LoroDoc, peer: u64) -> LoroStat
     })
 }
 
+// ---- G6.1: config & timestamps ----
+
+/// Opaque handle to a document's [`loro::Configure`]. Obtain with [`loro_doc_config`],
+/// release with [`loro_configure_free`].
+///
+/// `Configure` is cheap to clone and clones **share** the underlying configuration (it is
+/// backed by atomics behind `Arc`). The handle returned by [`loro_doc_config`] therefore
+/// reflects the document's live config: changes made through it affect the document, and
+/// changes made to the document (e.g. via [`loro_doc_set_record_timestamp`]) are visible
+/// through it.
+pub struct LoroConfigure(loro::Configure);
+
+impl LoroConfigure {
+    pub(crate) fn inner(&self) -> &loro::Configure {
+        &self.0
+    }
+}
+
+/// Returns a handle to the document's live configuration. The handle shares state with the
+/// document (see [`LoroConfigure`]). Returns null on a null handle. Release the returned
+/// handle with [`loro_configure_free`].
+#[no_mangle]
+pub extern "C" fn loro_doc_config(doc: *const LoroDoc) -> *mut LoroConfigure {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        Box::into_raw(Box::new(LoroConfigure(doc.inner().config().clone())))
+    })
+}
+
+/// Frees a configuration handle. Passing null is a no-op. Does not affect the document the
+/// handle was obtained from.
+#[no_mangle]
+pub extern "C" fn loro_configure_free(config: *mut LoroConfigure) {
+    ffi_guard!((), {
+        if !config.is_null() {
+            unsafe {
+                drop(Box::from_raw(config));
+            }
+        }
+    });
+}
+
+/// Returns whether commits record a wall-clock timestamp. Returns `false` on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_configure_record_timestamp(config: *const LoroConfigure) -> bool {
+    ffi_guard!(false, {
+        let config = deref_or!(config, false);
+        config.inner().record_timestamp()
+    })
+}
+
+/// Sets whether commits record a wall-clock timestamp. Takes effect on the shared
+/// configuration (interior mutability). No-op on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_configure_set_record_timestamp(config: *const LoroConfigure, record: bool) {
+    ffi_guard!((), {
+        let config = deref_or!(config, ());
+        config.inner().set_record_timestamp(record);
+    });
+}
+
+/// Returns the change-merge interval in seconds. Returns 0 on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_configure_merge_interval(config: *const LoroConfigure) -> i64 {
+    ffi_guard!(0i64, {
+        let config = deref_or!(config, 0i64);
+        config.inner().merge_interval()
+    })
+}
+
+/// Sets the change-merge interval in seconds. Takes effect on the shared configuration
+/// (interior mutability). No-op on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_configure_set_merge_interval(config: *const LoroConfigure, interval: i64) {
+    ffi_guard!((), {
+        let config = deref_or!(config, ());
+        config.inner().set_merge_interval(interval);
+    });
+}
+
+/// Convenience shortcut for `loro_doc_config` + `loro_configure_set_record_timestamp`: sets
+/// whether commits record a wall-clock timestamp. No-op on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_set_record_timestamp(doc: *const LoroDoc, record: bool) {
+    ffi_guard!((), {
+        let doc = deref_or!(doc, ());
+        doc.inner().set_record_timestamp(record);
+    });
+}
+
+/// Convenience shortcut for `loro_doc_config` + `loro_configure_set_merge_interval`: sets the
+/// change-merge interval in seconds. No-op on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_set_change_merge_interval(doc: *const LoroDoc, interval: i64) {
+    ffi_guard!((), {
+        let doc = deref_or!(doc, ());
+        doc.inner().set_change_merge_interval(interval);
+    });
+}
+
 /// Returns the root text container named `(id, id_len)` (UTF-8, not nul-terminated),
 /// creating it if it does not yet exist. Returns null on error. Release the returned
 /// handle with `loro_text_free`.

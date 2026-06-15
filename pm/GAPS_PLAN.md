@@ -284,7 +284,7 @@ the end of this section.
 
 ### G6.1 — Doc config & timestamps — [doc.rs](loro-c-api/src/doc.rs) (8 fns)
 
-- [ ] `loro_doc_config` → `*mut LoroConfigure`; `loro_configure_free`; `_record_timestamp`,
+- [x] `loro_doc_config` → `*mut LoroConfigure`; `loro_configure_free`; `_record_timestamp`,
   `_set_record_timestamp`, `_merge_interval`, `_set_merge_interval` (setters take `*const` —
   interior mutability via `Arc<Atomic>`); doc-level shortcuts `loro_doc_set_record_timestamp(bool)`,
   `loro_doc_set_change_merge_interval(i64)`.

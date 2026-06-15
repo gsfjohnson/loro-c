@@ -33,6 +33,11 @@ add_executable(loro_test_navigate test_navigate.cpp)
 target_link_libraries(loro_test_navigate PRIVATE loro::loro)
 add_test(NAME test_navigate COMMAND loro_test_navigate)
 
+# G6.1 doc config & timestamps: Configure handle, record_timestamp / merge_interval, live sharing.
+add_executable(loro_test_g6 test_g6.cpp)
+target_link_libraries(loro_test_g6 PRIVATE loro::loro)
+add_test(NAME test_g6 COMMAND loro_test_g6)
+
 # M2 containers.
 add_executable(loro_test_map_list test_map_list.cpp)
 target_link_libraries(loro_test_map_list PRIVATE loro::loro)
@@ -75,6 +80,7 @@ if(TARGET loro_cargo_build)
     add_dependencies(loro_test_sync loro_cargo_build)
     add_dependencies(loro_test_diff loro_cargo_build)
     add_dependencies(loro_test_navigate loro_cargo_build)
+    add_dependencies(loro_test_g6 loro_cargo_build)
     add_dependencies(loro_test_map_list loro_cargo_build)
     add_dependencies(loro_test_movable_list loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)

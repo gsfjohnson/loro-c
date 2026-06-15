@@ -119,6 +119,7 @@ class MovableList;
 class Counter;
 class Tree;
 class Container;
+class Cursor;
 
 /// The kind of a type-erased loro::Container. Alias of the C ABI enum.
 using ContainerType = ::LoroContainerType;
@@ -131,6 +132,12 @@ using PosType = ::LoroPosType;
 
 /// How a text mark expands at its boundaries. Alias of the C ABI enum.
 using ExpandType = ::LoroExpandType;
+
+/// Which side of an element a cursor is anchored to. Alias of the C ABI enum.
+using Side = ::LoroSide;
+
+/// A cursor's resolved absolute position (`abs_pos`) and side. Alias of the C ABI struct.
+using PosQueryResult = ::LoroPosQueryResult;
 
 /// RAII wrapper around a `LoroText*` container handle. Move-only.
 class Text {
@@ -298,6 +305,12 @@ public:
         detail::check(loro_text_push_str(handle_.get(), s.data(), s.size()));
     }
 
+    // --- G2: cursors ---
+
+    /// A stable cursor anchored at codepoint index `pos` (on `side`), or std::nullopt if the
+    /// position cannot be anchored. Resolve it later with Doc::get_cursor_pos.
+    std::optional<Cursor> get_cursor(std::size_t pos, Side side = LORO_SIDE_MIDDLE) const;
+
 private:
     struct Deleter {
         void operator()(LoroText* p) const noexcept { loro_text_free(p); }
@@ -443,6 +456,10 @@ public:
     bool empty() const { return loro_list_is_empty(handle_.get()); }
     void clear() { detail::check(loro_list_clear(handle_.get())); }
 
+    /// A stable cursor anchored at index `pos` (on `side`), or std::nullopt if the position
+    /// cannot be anchored. Resolve it later with Doc::get_cursor_pos.
+    std::optional<Cursor> get_cursor(std::size_t pos, Side side = LORO_SIDE_MIDDLE) const;
+
 private:
     struct Deleter {
         void operator()(LoroList* p) const noexcept { loro_list_free(p); }
@@ -521,6 +538,10 @@ public:
     std::size_t size() const { return loro_movable_list_len(handle_.get()); }
     bool empty() const { return loro_movable_list_is_empty(handle_.get()); }
     void clear() { detail::check(loro_movable_list_clear(handle_.get())); }
+
+    /// A stable cursor anchored at index `pos` (on `side`), or std::nullopt if the position
+    /// cannot be anchored. Resolve it later with Doc::get_cursor_pos.
+    std::optional<Cursor> get_cursor(std::size_t pos, Side side = LORO_SIDE_MIDDLE) const;
 
 private:
     struct Deleter {
@@ -831,6 +852,62 @@ inline Container MovableList::set_container(std::size_t pos, Container&& child) 
     LoroContainer* a = loro_movable_list_set_container(handle_.get(), pos, child.release());
     if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
     return Container(a);
+}
+
+/// RAII wrapper around a `LoroCursor*` — a stable position that survives concurrent edits.
+/// Move-only. Obtain one from Text/List/MovableList::get_cursor, transport it via
+/// encode()/decode(), and resolve it back to an absolute position with Doc::get_cursor_pos.
+/// Unlike the container handles, a Cursor does not co-own the document state.
+class Cursor {
+public:
+    explicit Cursor(LoroCursor* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// Decodes a cursor previously produced by encode().
+    static Cursor decode(const std::uint8_t* data, std::size_t len) {
+        LoroCursor* c = loro_cursor_decode(data, len);
+        if (!c) throw Error(LORO_ERR_DECODE, detail::last_error_message());
+        return Cursor(c);
+    }
+    static Cursor decode(const std::vector<std::uint8_t>& data) {
+        return decode(data.data(), data.size());
+    }
+
+    LoroCursor* raw() const noexcept { return handle_.get(); }
+
+    /// Encodes the cursor into a compact, transportable byte buffer.
+    std::vector<std::uint8_t> encode() const {
+        detail::Bytes b;
+        detail::check(loro_cursor_encode(handle_.get(), b.out()));
+        return b.to_vector();
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroCursor* p) const noexcept { loro_cursor_free(p); }
+    };
+    std::unique_ptr<LoroCursor, Deleter> handle_;
+};
+
+// Out-of-line definitions of the containers' get_cursor methods (Cursor is now complete).
+
+inline std::optional<Cursor> Text::get_cursor(std::size_t pos, Side side) const {
+    LoroCursor* c = loro_text_get_cursor(handle_.get(), pos, side);
+    if (!c) return std::nullopt;
+    return Cursor(c);
+}
+
+inline std::optional<Cursor> List::get_cursor(std::size_t pos, Side side) const {
+    LoroCursor* c = loro_list_get_cursor(handle_.get(), pos, side);
+    if (!c) return std::nullopt;
+    return Cursor(c);
+}
+
+inline std::optional<Cursor> MovableList::get_cursor(std::size_t pos, Side side) const {
+    LoroCursor* c = loro_movable_list_get_cursor(handle_.get(), pos, side);
+    if (!c) return std::nullopt;
+    return Cursor(c);
 }
 
 /// How a diff event was triggered. Alias of the C ABI enum.
@@ -1914,6 +1991,17 @@ public:
                                       detail::loro_hpp_travel_free};
         detail::check(
             loro_doc_travel_change_ancestors(handle_.get(), ids.data(), ids.size(), t));
+    }
+
+    // ---- G2: cursors ----
+
+    /// Resolves `cursor` against the document's current state, returning its absolute position
+    /// and resolved side. Throws loro::Error (LORO_ERR_NOT_FOUND) if the position cannot be
+    /// located (the container was deleted, the id is unknown, or history was cleared).
+    PosQueryResult get_cursor_pos(const Cursor& cursor) const {
+        PosQueryResult out{};
+        detail::check(loro_doc_get_cursor_pos(handle_.get(), cursor.raw(), &out));
+        return out;
     }
 
     // ---- M4: undo manager ----

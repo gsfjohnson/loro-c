@@ -13,6 +13,11 @@ add_executable(loro_test_richtext test_richtext.cpp)
 target_link_libraries(loro_test_richtext PRIVATE loro::loro)
 add_test(NAME test_richtext COMMAND loro_test_richtext)
 
+# G2 cursors: stable positions, side, encode/decode, concurrent-insert shift.
+add_executable(loro_test_cursor test_cursor.cpp)
+target_link_libraries(loro_test_cursor PRIVATE loro::loro)
+add_test(NAME test_cursor COMMAND loro_test_cursor)
+
 # M2 containers.
 add_executable(loro_test_map_list test_map_list.cpp)
 target_link_libraries(loro_test_map_list PRIVATE loro::loro)
@@ -51,6 +56,7 @@ if(TARGET loro_cargo_build)
     add_dependencies(loro_test_doc loro_cargo_build)
     add_dependencies(loro_test_text loro_cargo_build)
     add_dependencies(loro_test_richtext loro_cargo_build)
+    add_dependencies(loro_test_cursor loro_cargo_build)
     add_dependencies(loro_test_map_list loro_cargo_build)
     add_dependencies(loro_test_movable_list loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)

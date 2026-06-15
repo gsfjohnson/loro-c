@@ -23,7 +23,7 @@ impl LoroMovableList {
         LoroMovableList(l)
     }
 
-    fn inner(&self) -> &loro::LoroMovableList {
+    pub(crate) fn inner(&self) -> &loro::LoroMovableList {
         &self.0
     }
 }

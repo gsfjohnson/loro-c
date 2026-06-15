@@ -22,7 +22,7 @@ impl LoroList {
         LoroList(l)
     }
 
-    fn inner(&self) -> &loro::LoroList {
+    pub(crate) fn inner(&self) -> &loro::LoroList {
         &self.0
     }
 }

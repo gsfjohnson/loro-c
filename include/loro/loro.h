@@ -106,6 +106,26 @@ typedef enum LoroPosType {
 } LoroPosType;
 
 /**
+ * Which side of an element a cursor (or resolved position) is anchored to. Mirrors
+ * `loro::cursor::Side`. Used both to create a cursor and to report where a deleted anchor
+ * resolved to. The numeric values match upstream (`Left = -1`, `Middle = 0`, `Right = 1`).
+ */
+typedef enum LoroSide {
+    /**
+     * Anchored to the left of the element.
+     */
+    LORO_SIDE_LEFT = -1,
+    /**
+     * Anchored at the element itself (the default).
+     */
+    LORO_SIDE_MIDDLE = 0,
+    /**
+     * Anchored to the right of the element.
+     */
+    LORO_SIDE_RIGHT = 1,
+} LoroSide;
+
+/**
  * How a diff event was triggered. Mirrors `loro::EventTriggerKind`.
  */
 typedef enum LoroEventTriggerKind {
@@ -198,6 +218,11 @@ typedef struct LoroContainerDiff LoroContainerDiff;
  * Opaque handle to a Loro counter container.
  */
 typedef struct LoroCounter LoroCounter;
+
+/**
+ * Opaque handle to a [`loro::cursor::Cursor`]. Free with [`loro_cursor_free`].
+ */
+typedef struct LoroCursor LoroCursor;
 
 /**
  * Opaque, **callback-scoped** view of a diff event. Only valid for the duration of the
@@ -383,6 +408,21 @@ typedef struct LoroTreeID {
     uint64_t peer;
     int32_t counter;
 } LoroTreeID;
+
+/**
+ * The resolved absolute position of a cursor against a document. Plain-old-data, written
+ * into the caller's `out` by [`loro_doc_get_cursor_pos`].
+ */
+typedef struct LoroPosQueryResult {
+    /**
+     * Which side of `abs_pos` the cursor resolved to.
+     */
+    enum LoroSide side;
+    /**
+     * The current absolute position (for text, a Unicode codepoint index).
+     */
+    uintptr_t abs_pos;
+} LoroPosQueryResult;
 
 /**
  * A C subscriber callback for [`loro_doc_subscribe`] / [`loro_doc_subscribe_root`].
@@ -1485,6 +1525,59 @@ bool loro_tree_is_empty(const struct LoroTree *tree);
  * free it with `loro_bytes_free`.
  */
 enum LoroStatus loro_tree_to_json(const struct LoroTree *tree, struct LoroBytes *out);
+
+/**
+ * Frees a cursor handle. Passing null is a no-op.
+ */
+void loro_cursor_free(struct LoroCursor *cursor);
+
+/**
+ * Encodes the cursor into a compact, transportable byte buffer written into `*out`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Round-trips through
+ * [`loro_cursor_decode`].
+ */
+enum LoroStatus loro_cursor_encode(const struct LoroCursor *cursor, struct LoroBytes *out);
+
+/**
+ * Decodes a cursor previously produced by [`loro_cursor_encode`]. Returns null on a decode
+ * error. Release the returned handle with [`loro_cursor_free`].
+ */
+struct LoroCursor *loro_cursor_decode(const uint8_t *data, uintptr_t len);
+
+/**
+ * Returns a cursor anchored at codepoint index `pos` (on `side`) of the text container, or
+ * null if the position cannot be anchored (e.g. an empty container with `pos` out of range).
+ * Release the returned handle with [`loro_cursor_free`].
+ */
+struct LoroCursor *loro_text_get_cursor(const struct LoroText *text,
+                                        uintptr_t pos,
+                                        enum LoroSide side);
+
+/**
+ * Returns a cursor anchored at index `pos` (on `side`) of the list container, or null if the
+ * position cannot be anchored. Release the returned handle with [`loro_cursor_free`].
+ */
+struct LoroCursor *loro_list_get_cursor(const struct LoroList *list,
+                                        uintptr_t pos,
+                                        enum LoroSide side);
+
+/**
+ * Returns a cursor anchored at index `pos` (on `side`) of the movable-list container, or null
+ * if the position cannot be anchored. Release the returned handle with [`loro_cursor_free`].
+ */
+struct LoroCursor *loro_movable_list_get_cursor(const struct LoroMovableList *list,
+                                                uintptr_t pos,
+                                                enum LoroSide side);
+
+/**
+ * Resolves `cursor` against the current state of `doc`, writing the absolute position and
+ * resolved side into `*out`. `*out` is only written on `LORO_OK`. Returns
+ * `LORO_ERR_NOT_FOUND` if the relative position cannot be located (the container was deleted,
+ * the id is unknown, or the relevant history was cleared).
+ */
+enum LoroStatus loro_doc_get_cursor_pos(const struct LoroDoc *doc,
+                                        const struct LoroCursor *cursor,
+                                        struct LoroPosQueryResult *out);
 
 /**
  * Creates a new, empty document. Never returns null except on allocation failure /

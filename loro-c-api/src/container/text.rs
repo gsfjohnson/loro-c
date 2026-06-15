@@ -18,7 +18,7 @@ impl LoroText {
         LoroText(t)
     }
 
-    fn inner(&self) -> &loro::LoroText {
+    pub(crate) fn inner(&self) -> &loro::LoroText {
         &self.0
     }
 }

@@ -365,6 +365,67 @@ static void test_richtext_c(void) {
     loro_doc_free(d2);
 }
 
+/* G2: cursors from plain C — create on text, resolve to an absolute position, watch it shift
+ * after a front insert, encode/decode round-trip, and the configured Side survives deletion. */
+static void test_cursor_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    LoroText* t = loro_doc_get_text(doc, "t", 1);
+    CHECK(loro_text_insert(t, 0, "Hello world", 11) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    /* Cursor anchored at codepoint 3 (default-ish: explicit Middle). */
+    LoroCursor* cur = loro_text_get_cursor(t, 3, LORO_SIDE_MIDDLE);
+    CHECK(cur != NULL);
+
+    LoroPosQueryResult r = {0};
+    CHECK(loro_doc_get_cursor_pos(doc, cur, &r) == LORO_OK);
+    CHECK(r.abs_pos == 3);
+
+    /* Insert before the cursor: the absolute position shifts right by 3. */
+    CHECK(loro_text_insert(t, 0, "XYZ", 3) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(loro_doc_get_cursor_pos(doc, cur, &r) == LORO_OK);
+    CHECK(r.abs_pos == 6);
+
+    /* encode -> decode reproduces an equivalent cursor. */
+    LoroBytes enc = {0};
+    CHECK(loro_cursor_encode(cur, &enc) == LORO_OK);
+    CHECK(enc.len > 0);
+    LoroCursor* decoded = loro_cursor_decode(enc.data, enc.len);
+    CHECK(decoded != NULL);
+    loro_bytes_free(enc);
+    LoroPosQueryResult r2 = {0};
+    CHECK(loro_doc_get_cursor_pos(doc, decoded, &r2) == LORO_OK);
+    CHECK(r2.abs_pos == 6);
+
+    loro_cursor_free(decoded);
+    loro_cursor_free(cur);
+    loro_text_free(t);
+    loro_doc_free(doc);
+
+    /* Configured Side (Left) is reported and survives deletion of the anchor. */
+    LoroDoc* d2 = loro_doc_new();
+    LoroText* t2 = loro_doc_get_text(d2, "t", 1);
+    CHECK(loro_text_insert(t2, 0, "Hello", 5) == LORO_OK);
+    CHECK(loro_doc_commit(d2) == LORO_OK);
+    LoroCursor* lc = loro_text_get_cursor(t2, 2, LORO_SIDE_LEFT);
+    CHECK(lc != NULL);
+    LoroPosQueryResult lr = {0};
+    CHECK(loro_doc_get_cursor_pos(d2, lc, &lr) == LORO_OK);
+    CHECK(lr.abs_pos == 2);
+    CHECK(lr.side == LORO_SIDE_LEFT);
+
+    CHECK(loro_text_delete(t2, 2, 1) == LORO_OK); /* delete the anchored char */
+    CHECK(loro_doc_commit(d2) == LORO_OK);
+    CHECK(loro_doc_get_cursor_pos(d2, lc, &lr) == LORO_OK);
+    CHECK(lr.abs_pos == 2);
+    CHECK(lr.side == LORO_SIDE_LEFT);
+
+    loro_cursor_free(lc);
+    loro_text_free(t2);
+    loro_doc_free(d2);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -374,6 +435,7 @@ int main(void) {
     test_subscribe();
     test_advanced_c();
     test_richtext_c();
+    test_cursor_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

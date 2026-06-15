@@ -324,6 +324,7 @@ milestone lands.
 | `LoroDoc::check_state_correctness_slow` | Debug/test-only invariant checker | _(omit; not part of the public surface)_ — confirm before final sign-off |
 | `LoroUnknown` (`id`) | Placeholder for unknown/forward-compat container types | _(omit unless a concrete need appears)_ |
 | `FractionalIndex` constructors-only interface | No methods beyond construction | Existing `loro_fractional_index_*` constructors ([fractional_index.rs](loro-c-api/src/fractional_index.rs)) |
+| `PosQueryResult.update` (the refreshed `Cursor?` returned by `get_cursor_pos`) | A caller-side optimization hint (swap in the refreshed cursor to avoid future history replay); not required to read a position. G2's `LoroPosQueryResult` POD carries only the `current` `AbsolutePosition` (`abs_pos` + `side`), per the plan. | `loro_doc_get_cursor_pos` ([cursor.rs](loro-c-api/src/cursor.rs)); recreate a cursor with `loro_*_get_cursor` when a refresh is wanted. Promote to a real field/out-param if a caller needs the perf optimization. |
 
 If any row above turns out to have an actual caller need (e.g. `ensure_mergeable_*`, or
 `VersionRange` range-algebra), promote it out of this table into the relevant milestone rather

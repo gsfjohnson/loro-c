@@ -1294,6 +1294,48 @@ private:
     const LoroChangeMeta* raw_;
 };
 
+/// Owned metadata for one change, returned by `Doc::get_change`. Unlike `ChangeMeta` (a
+/// callback-scoped view), this owns its handle and may be held for any lifetime.
+class ChangeMetaOwned {
+public:
+    explicit ChangeMetaOwned(LoroChangeMetaOwned* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroChangeMetaOwned* raw() const noexcept { return handle_.get(); }
+
+    /// The change's first-op id.
+    Id id() const { return loro_change_meta_id(as_ref()); }
+    /// The change's Lamport timestamp.
+    std::uint32_t lamport() const { return loro_change_meta_lamport(as_ref()); }
+    /// The change's wall-clock timestamp (seconds since the Unix epoch; 0 if unset).
+    std::int64_t timestamp() const { return loro_change_meta_timestamp(as_ref()); }
+    /// The number of ops in the change.
+    std::size_t size() const { return loro_change_meta_len(as_ref()); }
+    /// The change's commit message (possibly empty).
+    std::string message() const {
+        detail::Bytes b;
+        detail::check(loro_change_meta_message(as_ref(), b.out()));
+        return b.to_string();
+    }
+    /// An owned copy of the change's dependency frontiers.
+    Frontiers deps() const {
+        LoroFrontiers* f = loro_change_meta_deps(as_ref());
+        if (!f) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+        return Frontiers(f);
+    }
+
+private:
+    const LoroChangeMeta* as_ref() const {
+        return loro_change_meta_owned_as_ref(handle_.get());
+    }
+
+    struct Deleter {
+        void operator()(LoroChangeMetaOwned* p) const noexcept { loro_change_meta_owned_free(p); }
+    };
+    std::unique_ptr<LoroChangeMetaOwned, Deleter> handle_;
+};
+
 // ===========================================================================
 // M4: awareness / ephemeral store
 // ===========================================================================
@@ -2007,6 +2049,130 @@ public:
     /// Shortcut for `config().set_merge_interval(interval)` (interval in seconds).
     void set_change_merge_interval(std::int64_t interval) {
         loro_doc_set_change_merge_interval(handle_.get(), interval);
+    }
+
+    // ---- G6.2: history & introspection ----
+
+    /// The total number of operations in the document's OpLog.
+    std::size_t len_ops() const { return loro_doc_len_ops(handle_.get()); }
+
+    /// The total number of changes in the document's OpLog.
+    std::size_t len_changes() const { return loro_doc_len_changes(handle_.get()); }
+
+    /// The number of operations in the pending (uncommitted) transaction.
+    std::size_t pending_txn_len() const { return loro_doc_get_pending_txn_len(handle_.get()); }
+
+    /// Whether the history cache (used to speed up checkout) is currently built.
+    bool has_history_cache() const { return loro_doc_has_history_cache(handle_.get()); }
+
+    /// Frees the history cache (rebuilt automatically on demand).
+    void free_history_cache() { detail::check(loro_doc_free_history_cache(handle_.get())); }
+
+    /// Frees the cached diff calculator (rebuilt automatically on demand).
+    void free_diff_calculator() { detail::check(loro_doc_free_diff_calculator(handle_.get())); }
+
+    /// Encodes all ops and the history cache into the kv store, freeing parsed-op memory.
+    void compact_change_store() { detail::check(loro_doc_compact_change_store(handle_.get())); }
+
+    /// Sets whether empty root containers are hidden from deep values and snapshots.
+    void set_hide_empty_root_containers(bool hide) {
+        detail::check(loro_doc_set_hide_empty_root_containers(handle_.get(), hide));
+    }
+
+    /// Whether the document contains the container with id `cid` (a container-id string).
+    bool has_container(std::string_view cid) const {
+        return loro_doc_has_container(handle_.get(), cid.data(), cid.size());
+    }
+
+    /// Deletes all content from the root container `cid` and hides it. Only affects root
+    /// containers (those without a parent).
+    void delete_root_container(std::string_view cid) {
+        detail::check(loro_doc_delete_root_container(handle_.get(), cid.data(), cid.size()));
+    }
+
+    /// The path from the document root to container `cid`, as a JSON array of
+    /// `{"cid":…,"index":…}` steps. Throws LORO_ERR_NOT_FOUND if `cid` does not resolve.
+    std::string get_path_to_container(std::string_view cid) const {
+        detail::Bytes b;
+        detail::check(
+            loro_doc_get_path_to_container(handle_.get(), cid.data(), cid.size(), b.out()));
+        return b.to_string();
+    }
+
+    /// The container ids modified in the change range `[id, id+len)`, as a sorted JSON array of
+    /// container-id strings. Implicitly commits the current transaction.
+    std::string get_changed_containers_in(Id id, std::size_t len) const {
+        detail::Bytes b;
+        detail::check(loro_doc_get_changed_containers_in(handle_.get(), id, len, b.out()));
+        return b.to_string();
+    }
+
+    /// Compares `frontiers` with the document's current version: -1 (doc behind / `frontiers`
+    /// not fully contained), 0 (equal), or 1 (doc ahead).
+    int cmp_with_frontiers(const Frontiers& frontiers) const {
+        std::int32_t out = 0;
+        detail::check(loro_doc_cmp_with_frontiers(handle_.get(), frontiers.raw(), &out));
+        return out;
+    }
+
+    /// A minimized equivalent of `frontiers` (the smallest set marking the same version), or
+    /// std::nullopt if a frontier id is not in this document's history.
+    std::optional<Frontiers> minimize_frontiers(const Frontiers& frontiers) const {
+        LoroFrontiers* f = loro_doc_minimize_frontiers(handle_.get(), frontiers.raw());
+        if (!f) return std::nullopt;
+        return Frontiers(f);
+    }
+
+    /// A fork of the document containing only history up to `frontiers`, or std::nullopt on
+    /// error (e.g. an unknown frontier).
+    std::optional<Doc> fork_at(const Frontiers& frontiers) const {
+        LoroDoc* d = loro_doc_fork_at(handle_.get(), frontiers.raw());
+        if (!d) return std::nullopt;
+        return Doc(d);
+    }
+
+    /// Looks up an existing text container by container-id string (std::nullopt if absent).
+    std::optional<Text> try_get_text(std::string_view cid) const {
+        LoroText* t = loro_doc_try_get_text(handle_.get(), cid.data(), cid.size());
+        if (!t) return std::nullopt;
+        return Text(t);
+    }
+    /// Looks up an existing map container by container-id string (std::nullopt if absent).
+    std::optional<Map> try_get_map(std::string_view cid) const {
+        LoroMap* m = loro_doc_try_get_map(handle_.get(), cid.data(), cid.size());
+        if (!m) return std::nullopt;
+        return Map(m);
+    }
+    /// Looks up an existing list container by container-id string (std::nullopt if absent).
+    std::optional<List> try_get_list(std::string_view cid) const {
+        LoroList* l = loro_doc_try_get_list(handle_.get(), cid.data(), cid.size());
+        if (!l) return std::nullopt;
+        return List(l);
+    }
+    /// Looks up an existing movable-list container by container-id string (std::nullopt if absent).
+    std::optional<MovableList> try_get_movable_list(std::string_view cid) const {
+        LoroMovableList* l = loro_doc_try_get_movable_list(handle_.get(), cid.data(), cid.size());
+        if (!l) return std::nullopt;
+        return MovableList(l);
+    }
+    /// Looks up an existing tree container by container-id string (std::nullopt if absent).
+    std::optional<Tree> try_get_tree(std::string_view cid) const {
+        LoroTree* t = loro_doc_try_get_tree(handle_.get(), cid.data(), cid.size());
+        if (!t) return std::nullopt;
+        return Tree(t);
+    }
+    /// Looks up an existing counter container by container-id string (std::nullopt if absent).
+    std::optional<Counter> try_get_counter(std::string_view cid) const {
+        LoroCounter* c = loro_doc_try_get_counter(handle_.get(), cid.data(), cid.size());
+        if (!c) return std::nullopt;
+        return Counter(c);
+    }
+
+    /// The change containing operation `id`, or std::nullopt if no change contains it.
+    std::optional<ChangeMetaOwned> get_change(Id id) const {
+        LoroChangeMetaOwned* m = nullptr;
+        if (loro_doc_get_change(handle_.get(), id, &m) != LORO_OK) return std::nullopt;
+        return ChangeMetaOwned(m);
     }
 
     /// Commits pending operations into the oplog.

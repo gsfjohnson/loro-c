@@ -7,6 +7,7 @@
 #include <loro/loro.hpp>
 
 #include <cstdio>
+#include <string>
 
 static int failures = 0;
 
@@ -61,10 +62,148 @@ static void test_doc_shortcuts() {
     CHECK(doc.config().merge_interval() == 9000000000LL);
 }
 
+// ---- G6.2: doc history & introspection ----
+
+// Op/change counts grow with edits; the pending transaction empties on commit.
+static void test_history_counts() {
+    loro::Doc doc;
+    CHECK(doc.len_ops() == 0);
+    CHECK(doc.len_changes() == 0);
+
+    loro::Text t = doc.get_text("t");
+    t.insert(0, "hello");
+    // The edit sits in the pending (uncommitted) transaction.
+    CHECK(doc.pending_txn_len() > 0);
+
+    doc.commit();
+    CHECK(doc.pending_txn_len() == 0);
+    CHECK(doc.len_ops() >= 1);
+    CHECK(doc.len_changes() == 1);
+}
+
+// has_container / get_path_to_container / try_get_* over real and bogus container ids.
+static void test_container_introspection() {
+    loro::Doc doc;
+    loro::Map root = doc.get_map("root");
+    loro::Container child = root.insert_container("child", loro::Container::text());
+    std::string root_cid = root.id();
+    std::string child_cid = child.id();
+    doc.commit();
+
+    CHECK(doc.has_container(root_cid));
+    CHECK(doc.has_container(child_cid));
+    CHECK(doc.has_container("cid:99@99:Text") == false);
+
+    // The nested container's path runs through the parent map under key "child".
+    std::string child_path = doc.get_path_to_container(child_cid);
+    CHECK(child_path.find("child") != std::string::npos);
+    CHECK(child_path.find(root_cid) != std::string::npos);
+
+    // A bogus container has no path: NOT_FOUND surfaces as a thrown Error.
+    bool threw = false;
+    try {
+        doc.get_path_to_container("cid:99@99:Text");
+    } catch (const loro::Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // try_get returns a live handle for an existing container, nullopt otherwise.
+    CHECK(doc.try_get_map(root_cid).has_value());
+    CHECK(doc.try_get_text(child_cid).has_value());
+    CHECK(!doc.try_get_text("cid:99@99:Text").has_value());
+    // Writing through a try_get handle reaches the document.
+    auto live = doc.try_get_text(child_cid);
+    live->insert(0, "hi");
+    doc.commit();
+    CHECK(doc.try_get_text(child_cid)->to_string() == "hi");
+}
+
+// get_changed_containers_in lists the container touched by a change range.
+static void test_changed_containers() {
+    loro::Doc doc;
+    doc.set_peer_id(5);
+    loro::Text t = doc.get_text("t");
+    std::string t_cid = t.id();
+    t.insert(0, "hi");
+    doc.commit();
+
+    std::string changed = doc.get_changed_containers_in(loro::Id{5, 0}, 2);
+    CHECK(changed.find(t_cid) != std::string::npos);
+}
+
+// cmp_with_frontiers ordering, minimize_frontiers, and fork_at reproducing an old state.
+static void test_frontiers_and_fork() {
+    loro::Doc doc;
+    doc.set_peer_id(1);
+    loro::Text t = doc.get_text("t");
+    t.insert(0, "AB");
+    doc.commit();
+    loro::Frontiers f0 = doc.state_frontiers();
+    std::string state_at_f0 = doc.to_json();
+
+    t.insert(2, "CD");
+    doc.commit();
+
+    // The doc is now ahead of F0, and equal to its own current frontiers.
+    CHECK(doc.cmp_with_frontiers(f0) == 1);
+    CHECK(doc.cmp_with_frontiers(doc.state_frontiers()) == 0);
+
+    // minimize_frontiers of a known-good version yields a handle.
+    CHECK(doc.minimize_frontiers(doc.state_frontiers()).has_value());
+
+    // fork_at(F0) reproduces the F0 state and drops the later edit.
+    auto forked = doc.fork_at(f0);
+    CHECK(forked.has_value());
+    CHECK(forked->get_text("t").to_string() == "AB");
+    CHECK(forked->to_json() == state_at_f0);
+}
+
+// get_change resolves a change by its first-op id; bogus ids yield nullopt.
+static void test_get_change() {
+    loro::Doc doc;
+    doc.set_peer_id(7);
+    loro::Text t = doc.get_text("t");
+    t.insert(0, "hello");
+    doc.commit();
+
+    auto change = doc.get_change(loro::Id{7, 0});
+    CHECK(change.has_value());
+    CHECK(change->id().peer == 7);
+    CHECK(change->id().counter == 0);
+    CHECK(change->size() >= 1);
+
+    CHECK(!doc.get_change(loro::Id{7, 99999}).has_value());
+    CHECK(!doc.get_change(loro::Id{999, 0}).has_value());
+}
+
+// Hiding empty root containers drops them from the deep value; cache controls are callable.
+static void test_cache_and_hide_controls() {
+    loro::Doc doc;
+    doc.get_map("m"); // empty root container
+    CHECK(doc.to_json().find("\"m\"") != std::string::npos);
+    doc.set_hide_empty_root_containers(true);
+    CHECK(doc.to_json().find("\"m\"") == std::string::npos);
+
+    doc.get_text("t").insert(0, "x");
+    doc.commit();
+    // These free/compact internal caches; they must succeed without error.
+    doc.free_history_cache();
+    doc.free_diff_calculator();
+    doc.compact_change_store();
+    (void)doc.has_history_cache();
+}
+
 int main() {
     test_config_defaults();
     test_config_handle_shares_live_state();
     test_doc_shortcuts();
+    test_history_counts();
+    test_container_introspection();
+    test_changed_containers();
+    test_frontiers_and_fork();
+    test_get_change();
+    test_cache_and_hide_controls();
 
     if (failures == 0) {
         std::puts("test_g6: OK");

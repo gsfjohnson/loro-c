@@ -730,6 +730,104 @@ static void test_g6_c(void) {
 
     loro_configure_free(cfg);
     loro_doc_free(doc);
+
+    /* --- G6.2: doc history & introspection --- */
+    LoroDoc* d = loro_doc_new();
+    CHECK(d != NULL);
+    CHECK(loro_doc_set_peer_id(d, 5) == LORO_OK);
+
+    CHECK(loro_doc_len_ops(d) == 0);
+    CHECK(loro_doc_len_changes(d) == 0);
+
+    LoroText* t = loro_doc_get_text(d, "t", 1);
+    CHECK(loro_text_insert(t, 0, "hi", 2) == LORO_OK);
+    CHECK(loro_doc_get_pending_txn_len(d) > 0);
+    loro_doc_commit(d);
+    CHECK(loro_doc_get_pending_txn_len(d) == 0);
+    CHECK(loro_doc_len_ops(d) >= 1);
+    CHECK(loro_doc_len_changes(d) == 1);
+
+    /* has_container / try_get over the text's own cid, plus a bogus one. */
+    LoroBytes tid = {0};
+    CHECK(loro_text_id(t, &tid) == LORO_OK);
+    CHECK(loro_doc_has_container(d, (const char*)tid.data, tid.len) == true);
+    CHECK(loro_doc_has_container(d, "cid:99@99:Text", 14) == false);
+
+    LoroText* got = loro_doc_try_get_text(d, (const char*)tid.data, tid.len);
+    CHECK(got != NULL);
+    loro_text_free(got);
+    CHECK(loro_doc_try_get_text(d, "cid:99@99:Text", 14) == NULL);
+
+    /* get_changed_containers_in lists the edited container's cid. */
+    LoroId first = {5, 0};
+    LoroBytes changed = {0};
+    CHECK(loro_doc_get_changed_containers_in(d, first, 2, &changed) == LORO_OK);
+    {
+        char cidbuf[128];
+        size_t n = tid.len < sizeof(cidbuf) - 1 ? tid.len : sizeof(cidbuf) - 1;
+        memcpy(cidbuf, tid.data, n);
+        cidbuf[n] = '\0';
+        CHECK(bytes_contains(&changed, cidbuf) == 1);
+    }
+    loro_bytes_free(changed);
+    loro_bytes_free(tid);
+
+    /* get_change resolves the first change; bogus ids -> NOT_FOUND. */
+    LoroChangeMetaOwned* meta = NULL;
+    CHECK(loro_doc_get_change(d, first, &meta) == LORO_OK);
+    CHECK(meta != NULL);
+    {
+        const LoroChangeMeta* ref = loro_change_meta_owned_as_ref(meta);
+        LoroId mid = loro_change_meta_id(ref);
+        CHECK(mid.peer == 5);
+        CHECK(mid.counter == 0);
+        CHECK(loro_change_meta_len(ref) >= 1);
+    }
+    loro_change_meta_owned_free(meta);
+
+    LoroId bogus = {5, 99999};
+    LoroChangeMetaOwned* nometa = NULL;
+    CHECK(loro_doc_get_change(d, bogus, &nometa) == LORO_ERR_NOT_FOUND);
+    CHECK(nometa == NULL);
+
+    /* cmp_with_frontiers (equal to own version), minimize_frontiers, fork_at. */
+    LoroFrontiers* f_now = loro_doc_state_frontiers(d);
+    CHECK(f_now != NULL);
+    int32_t ord = 7;
+    CHECK(loro_doc_cmp_with_frontiers(d, f_now, &ord) == LORO_OK);
+    CHECK(ord == 0);
+    LoroFrontiers* fmin = loro_doc_minimize_frontiers(d, f_now);
+    CHECK(fmin != NULL);
+    loro_frontiers_free(fmin);
+
+    LoroDoc* forked = loro_doc_fork_at(d, f_now);
+    CHECK(forked != NULL);
+    {
+        LoroText* ft = loro_doc_get_text(forked, "t", 1);
+        LoroBytes fs = {0};
+        CHECK(loro_text_to_string(ft, &fs) == LORO_OK);
+        CHECK(bytes_eq(&fs, "hi"));
+        loro_bytes_free(fs);
+        loro_text_free(ft);
+    }
+    loro_doc_free(forked);
+    loro_frontiers_free(f_now);
+
+    /* Cache controls + hide-empty-root all succeed. */
+    CHECK(loro_doc_free_history_cache(d) == LORO_OK);
+    CHECK(loro_doc_free_diff_calculator(d) == LORO_OK);
+    CHECK(loro_doc_compact_change_store(d) == LORO_OK);
+    CHECK(loro_doc_set_hide_empty_root_containers(d, true) == LORO_OK);
+
+    /* Null-handle fallbacks for the new surface. */
+    CHECK(loro_doc_len_ops(NULL) == 0);
+    CHECK(loro_doc_has_history_cache(NULL) == false);
+    CHECK(loro_doc_has_container(NULL, "x", 1) == false);
+    CHECK(loro_doc_try_get_text(NULL, "x", 1) == NULL);
+    loro_change_meta_owned_free(NULL);
+
+    loro_text_free(t);
+    loro_doc_free(d);
 }
 
 int main(void) {

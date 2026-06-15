@@ -291,17 +291,18 @@ the end of this section.
 
 ### G6.2 — Doc history & introspection — [doc.rs](loro-c-api/src/doc.rs) + [version.rs](loro-c-api/src/version.rs) (~24 fns)
 
-- [ ] Scalars: `loro_doc_len_ops`, `_len_changes`, `_get_pending_txn_len`,
+- [x] Scalars: `loro_doc_len_ops`, `_len_changes`, `_get_pending_txn_len`,
   `_has_history_cache`(bool). Void→OK: `_free_history_cache`, `_free_diff_calculator`,
   `_compact_change_store`, `_set_hide_empty_root_containers(bool)`.
-- [ ] By container-id string: `_has_container`(bool), `_delete_root_container`.
-- [ ] JSON out: `_get_path_to_container` (`[{cid,index}]`, reuse the `index_to_json` shape in
+- [x] By container-id string: `_has_container`(bool), `_delete_root_container`.
+- [x] JSON out: `_get_path_to_container` (`[{cid,index}]`, reuse the `index_to_json` shape in
   [event.rs](loro-c-api/src/event.rs)); `_get_changed_containers_in(LoroId,len)` (sorted
   `["cid:…"]` for deterministic output).
-- [ ] Out-param: `_cmp_with_frontiers` (`*i32`, −1/0/1). Handle returns: `_minimize_frontiers`
+- [x] Out-param: `_cmp_with_frontiers` (`*i32`, −1/0/1; `cmp_with_frontiers` returns `Ordering`,
+  not `Option`, so it never fails → always `LORO_OK`). Handle returns: `_minimize_frontiers`
   → `*mut LoroFrontiers` (null on Err), `_fork_at` → `*mut LoroDoc` (null on Err),
   `_try_get_{text,map,list,movable_list,tree,counter}` (nullable typed ptr, parse id string).
-- [ ] `_get_change(LoroId, out: **LoroChangeMetaOwned)` → `LoroStatus` (`NOT_FOUND` on `None`) +
+- [x] `_get_change(LoroId, out: **LoroChangeMetaOwned)` → `LoroStatus` (`NOT_FOUND` on `None`) +
   the `LoroChangeMetaOwned` type, its `_free`, and `_as_ref` accessor reuse.
 
 ### G6.3 — Doc method tail & commit options — [doc.rs](loro-c-api/src/doc.rs) + [commit.rs](loro-c-api/src/commit.rs) (9 fns)

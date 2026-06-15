@@ -291,6 +291,10 @@ impl LoroFrontiers {
     pub(crate) fn inner(&self) -> &Frontiers {
         &self.0
     }
+
+    pub(crate) fn from_inner(f: Frontiers) -> LoroFrontiers {
+        LoroFrontiers(f)
+    }
 }
 
 /// Creates a new, empty frontiers. Release with [`loro_frontiers_free`].
@@ -704,6 +708,42 @@ pub extern "C" fn loro_change_meta_deps(cm: *const LoroChangeMeta) -> *mut LoroF
             None => std::ptr::null_mut(),
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// LoroChangeMetaOwned (owned; returned by loro_doc_get_change)
+// ---------------------------------------------------------------------------
+
+/// Opaque, **owned** metadata for one change, returned by [`crate::doc::loro_doc_get_change`].
+/// Distinct from the callback-scoped [`LoroChangeMeta`]: it owns its `loro::ChangeMeta` and may
+/// be held for any lifetime. Free with [`loro_change_meta_owned_free`]; read it by passing
+/// [`loro_change_meta_owned_as_ref`] to the existing `loro_change_meta_*` accessors.
+#[allow(dead_code)] // field read only via the pointer cast in `loro_change_meta_owned_as_ref`
+pub struct LoroChangeMetaOwned(pub(crate) ChangeMeta);
+
+/// Frees an owned change-metadata handle. Passing null is a no-op.
+#[no_mangle]
+pub extern "C" fn loro_change_meta_owned_free(meta: *mut LoroChangeMetaOwned) {
+    ffi_guard!((), {
+        if !meta.is_null() {
+            unsafe {
+                drop(Box::from_raw(meta));
+            }
+        }
+    });
+}
+
+/// Reinterprets an owned handle as a callback-style `*const LoroChangeMeta` so the existing
+/// `loro_change_meta_id` / `_lamport` / `_timestamp` / `_len` / `_message` / `_deps` accessors
+/// apply. The returned pointer borrows `meta` and is valid only while `meta` is alive. Returns
+/// null when `meta` is null.
+#[no_mangle]
+pub extern "C" fn loro_change_meta_owned_as_ref(
+    meta: *const LoroChangeMetaOwned,
+) -> *const LoroChangeMeta {
+    // Both newtypes wrap `loro::ChangeMeta` as their sole field (offset 0), so this cast
+    // mirrors the reinterpretation in `change_meta_ref`.
+    meta as *const LoroChangeMeta
 }
 
 /// A traveler callback for [`loro_doc_travel_change_ancestors`].

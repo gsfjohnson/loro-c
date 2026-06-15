@@ -220,6 +220,14 @@ typedef struct LoroAwareness LoroAwareness;
 typedef struct LoroChangeMeta LoroChangeMeta;
 
 /**
+ * Opaque, **owned** metadata for one change, returned by [`crate::doc::loro_doc_get_change`].
+ * Distinct from the callback-scoped [`LoroChangeMeta`]: it owns its `loro::ChangeMeta` and may
+ * be held for any lifetime. Free with [`loro_change_meta_owned_free`]; read it by passing
+ * [`loro_change_meta_owned_as_ref`] to the existing `loro_change_meta_*` accessors.
+ */
+typedef struct LoroChangeMetaOwned LoroChangeMetaOwned;
+
+/**
  * Opaque handle to a document's [`loro::Configure`]. Obtain with [`loro_doc_config`],
  * release with [`loro_configure_free`].
  *
@@ -488,6 +496,14 @@ typedef struct LoroIdSpan {
 } LoroIdSpan;
 
 /**
+ * A single operation id: the creating peer and that peer's op counter. Mirrors `loro::ID`.
+ */
+typedef struct LoroId {
+    uint64_t peer;
+    int32_t counter;
+} LoroId;
+
+/**
  * A C subscriber callback for [`loro_doc_subscribe`] / [`loro_doc_subscribe_root`].
  *
  * `invoke` is called with a callback-scoped `const LoroDiffEvent*` and the opaque
@@ -588,14 +604,6 @@ typedef struct LoroPathComponent {
      */
     struct LoroTreeID node;
 } LoroPathComponent;
-
-/**
- * A single operation id: the creating peer and that peer's op counter. Mirrors `loro::ID`.
- */
-typedef struct LoroId {
-    uint64_t peer;
-    int32_t counter;
-} LoroId;
 
 /**
  * A traveler callback for [`loro_doc_travel_change_ancestors`].
@@ -1948,6 +1956,163 @@ enum LoroStatus loro_doc_import_with(struct LoroDoc *doc,
                                      uintptr_t origin_len);
 
 /**
+ * Returns the total number of operations in the document's OpLog. Returns 0 on a null handle.
+ */
+uintptr_t loro_doc_len_ops(const struct LoroDoc *doc);
+
+/**
+ * Returns the total number of changes in the document's OpLog. Returns 0 on a null handle.
+ */
+uintptr_t loro_doc_len_changes(const struct LoroDoc *doc);
+
+/**
+ * Returns the number of operations in the pending (uncommitted) transaction. Returns 0 on a
+ * null handle.
+ */
+uintptr_t loro_doc_get_pending_txn_len(const struct LoroDoc *doc);
+
+/**
+ * Returns whether the history cache (used to make checkout faster) is currently built.
+ * Returns `false` on a null handle.
+ */
+bool loro_doc_has_history_cache(const struct LoroDoc *doc);
+
+/**
+ * Frees the history cache used for faster checkout. It is rebuilt automatically on demand.
+ */
+enum LoroStatus loro_doc_free_history_cache(const struct LoroDoc *doc);
+
+/**
+ * Frees the cached diff calculator used for checkout. It is rebuilt automatically on demand.
+ */
+enum LoroStatus loro_doc_free_diff_calculator(const struct LoroDoc *doc);
+
+/**
+ * Encodes all ops and the history cache into the document's kv store, freeing the memory used
+ * by parsed ops.
+ */
+enum LoroStatus loro_doc_compact_change_store(const struct LoroDoc *doc);
+
+/**
+ * Sets whether empty root containers are hidden from `get_deep_value` results and snapshots.
+ */
+enum LoroStatus loro_doc_set_hide_empty_root_containers(const struct LoroDoc *doc, bool hide);
+
+/**
+ * Returns whether the document contains the given container (by its history or current state).
+ * `cid` is a container-id string. Returns `false` on a null handle or unparseable id.
+ */
+bool loro_doc_has_container(const struct LoroDoc *doc, const char *cid, uintptr_t cid_len);
+
+/**
+ * Deletes all content from a root container and hides it from the document. Only affects root
+ * containers (those without a parent). `cid` is a container-id string.
+ */
+enum LoroStatus loro_doc_delete_root_container(const struct LoroDoc *doc,
+                                               const char *cid,
+                                               uintptr_t cid_len);
+
+/**
+ * Writes the path from the document root to the given container into `*out` as a JSON array of
+ * `{"cid": string, "index": {...}}` steps. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`. Returns `LORO_ERR_NOT_FOUND` if the container does not resolve.
+ */
+enum LoroStatus loro_doc_get_path_to_container(const struct LoroDoc *doc,
+                                               const char *cid,
+                                               uintptr_t cid_len,
+                                               struct LoroBytes *out);
+
+/**
+ * Writes the container ids modified in the change range `[id, id+len)` into `*out` as a sorted
+ * JSON array of container-id strings (sorted for deterministic output). This implicitly commits
+ * the current transaction. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_get_changed_containers_in(const struct LoroDoc *doc,
+                                                   struct LoroId id,
+                                                   uintptr_t len,
+                                                   struct LoroBytes *out);
+
+/**
+ * Compares `frontiers` with the document's current OpLog version, writing `-1` (the doc is
+ * behind / `frontiers` is not fully contained), `0` (equal), or `1` (the doc is ahead) into
+ * `*out`. `*out` is only written on `LORO_OK`.
+ */
+enum LoroStatus loro_doc_cmp_with_frontiers(const struct LoroDoc *doc,
+                                            const struct LoroFrontiers *frontiers,
+                                            int32_t *out);
+
+/**
+ * Returns a minimized equivalent of `frontiers` (the smallest set marking the same version), as
+ * a new owned [`LoroFrontiers`]. Returns null if a frontier id is not included in this
+ * document's history. Release with `loro_frontiers_free`.
+ */
+struct LoroFrontiers *loro_doc_minimize_frontiers(const struct LoroDoc *doc,
+                                                  const struct LoroFrontiers *frontiers);
+
+/**
+ * Forks the document at `frontiers`: the new document contains only the history up to that
+ * version. Returns a new owned [`LoroDoc`], or null on error (e.g. an unknown frontier).
+ * Release with `loro_doc_free`.
+ */
+struct LoroDoc *loro_doc_fork_at(const struct LoroDoc *doc, const struct LoroFrontiers *frontiers);
+
+/**
+ * Looks up an existing text container by container-id string, returning a live handle or null
+ * if it does not exist (or `cid` is unparseable). Release with `loro_text_free`.
+ */
+struct LoroText *loro_doc_try_get_text(const struct LoroDoc *doc,
+                                       const char *cid,
+                                       uintptr_t cid_len);
+
+/**
+ * Looks up an existing map container by container-id string, returning a live handle or null
+ * if it does not exist (or `cid` is unparseable). Release with `loro_map_free`.
+ */
+struct LoroMap *loro_doc_try_get_map(const struct LoroDoc *doc, const char *cid, uintptr_t cid_len);
+
+/**
+ * Looks up an existing list container by container-id string, returning a live handle or null
+ * if it does not exist (or `cid` is unparseable). Release with `loro_list_free`.
+ */
+struct LoroList *loro_doc_try_get_list(const struct LoroDoc *doc,
+                                       const char *cid,
+                                       uintptr_t cid_len);
+
+/**
+ * Looks up an existing movable-list container by container-id string, returning a live handle
+ * or null if it does not exist (or `cid` is unparseable). Release with `loro_movable_list_free`.
+ */
+struct LoroMovableList *loro_doc_try_get_movable_list(const struct LoroDoc *doc,
+                                                      const char *cid,
+                                                      uintptr_t cid_len);
+
+/**
+ * Looks up an existing tree container by container-id string, returning a live handle or null
+ * if it does not exist (or `cid` is unparseable). Release with `loro_tree_free`.
+ */
+struct LoroTree *loro_doc_try_get_tree(const struct LoroDoc *doc,
+                                       const char *cid,
+                                       uintptr_t cid_len);
+
+/**
+ * Looks up an existing counter container by container-id string, returning a live handle or
+ * null if it does not exist (or `cid` is unparseable). Release with `loro_counter_free`.
+ */
+struct LoroCounter *loro_doc_try_get_counter(const struct LoroDoc *doc,
+                                             const char *cid,
+                                             uintptr_t cid_len);
+
+/**
+ * Looks up the change containing operation `id` and, on success, writes a new owned
+ * [`LoroChangeMetaOwned`] handle into `*out`. Read it via `loro_change_meta_owned_as_ref` +
+ * the `loro_change_meta_*` accessors; release it with `loro_change_meta_owned_free`. Returns
+ * `LORO_ERR_NOT_FOUND` if no change contains `id`. `*out` is only written on `LORO_OK`.
+ */
+enum LoroStatus loro_doc_get_change(const struct LoroDoc *doc,
+                                    struct LoroId id,
+                                    struct LoroChangeMetaOwned **out);
+
+/**
  * Returns a pointer to the current thread's last-error message as a nul-terminated C
  * string, or `NULL` if no error has been recorded on this thread.
  *
@@ -2618,6 +2783,19 @@ enum LoroStatus loro_change_meta_message(const struct LoroChangeMeta *cm, struct
  * Release with [`loro_frontiers_free`].
  */
 struct LoroFrontiers *loro_change_meta_deps(const struct LoroChangeMeta *cm);
+
+/**
+ * Frees an owned change-metadata handle. Passing null is a no-op.
+ */
+void loro_change_meta_owned_free(struct LoroChangeMetaOwned *meta);
+
+/**
+ * Reinterprets an owned handle as a callback-style `*const LoroChangeMeta` so the existing
+ * `loro_change_meta_id` / `_lamport` / `_timestamp` / `_len` / `_message` / `_deps` accessors
+ * apply. The returned pointer borrows `meta` and is valid only while `meta` is alive. Returns
+ * null when `meta` is null.
+ */
+const struct LoroChangeMeta *loro_change_meta_owned_as_ref(const struct LoroChangeMetaOwned *meta);
 
 /**
  * Traverses the ancestors of the changes containing `ids` (including those changes

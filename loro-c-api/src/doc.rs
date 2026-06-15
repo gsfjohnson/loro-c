@@ -10,8 +10,9 @@ use crate::container::text::LoroText;
 use crate::container::tree::LoroTree;
 use crate::error::{record_encode_error, record_loro_error, set_last_error, LoroStatus};
 use crate::value::LoroBytes;
-use crate::version::{LoroFrontiers, LoroIdSpan, LoroVersionVector};
-use loro::ExportMode;
+use crate::version::{LoroChangeMetaOwned, LoroFrontiers, LoroId, LoroIdSpan, LoroVersionVector};
+use loro::{ContainerID, ExportMode};
+use std::cmp::Ordering;
 use std::os::raw::c_char;
 
 /// Opaque handle to a Loro document. Create with [`loro_doc_new`], release with
@@ -678,6 +679,447 @@ pub extern "C" fn loro_doc_import_with(
         match doc.inner().import_with(bytes, origin) {
             Ok(_) => LoroStatus::LORO_OK,
             Err(e) => record_loro_error(&e),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.2 — Doc history & introspection
+// ---------------------------------------------------------------------------
+
+/// Parses a container-id string (e.g. `"cid:0@1:Text"`) into a [`ContainerID`], recording an
+/// error and returning `None` on a null / invalid-UTF-8 pointer or an unparseable id.
+fn cid_from_raw(cid: *const c_char, cid_len: usize) -> Option<ContainerID> {
+    let s = str_from_raw(cid, cid_len)?;
+    match ContainerID::try_from(s) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            set_last_error(format!("invalid container id: {s}"));
+            None
+        }
+    }
+}
+
+/// Returns the total number of operations in the document's OpLog. Returns 0 on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_len_ops(doc: *const LoroDoc) -> usize {
+    ffi_guard!(0usize, {
+        let doc = deref_or!(doc, 0usize);
+        doc.inner().len_ops()
+    })
+}
+
+/// Returns the total number of changes in the document's OpLog. Returns 0 on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_len_changes(doc: *const LoroDoc) -> usize {
+    ffi_guard!(0usize, {
+        let doc = deref_or!(doc, 0usize);
+        doc.inner().len_changes()
+    })
+}
+
+/// Returns the number of operations in the pending (uncommitted) transaction. Returns 0 on a
+/// null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_pending_txn_len(doc: *const LoroDoc) -> usize {
+    ffi_guard!(0usize, {
+        let doc = deref_or!(doc, 0usize);
+        doc.inner().get_pending_txn_len()
+    })
+}
+
+/// Returns whether the history cache (used to make checkout faster) is currently built.
+/// Returns `false` on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_has_history_cache(doc: *const LoroDoc) -> bool {
+    ffi_guard!(false, {
+        let doc = deref_or!(doc, false);
+        doc.inner().has_history_cache()
+    })
+}
+
+/// Frees the history cache used for faster checkout. It is rebuilt automatically on demand.
+#[no_mangle]
+pub extern "C" fn loro_doc_free_history_cache(doc: *const LoroDoc) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().free_history_cache();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Frees the cached diff calculator used for checkout. It is rebuilt automatically on demand.
+#[no_mangle]
+pub extern "C" fn loro_doc_free_diff_calculator(doc: *const LoroDoc) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().free_diff_calculator();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Encodes all ops and the history cache into the document's kv store, freeing the memory used
+/// by parsed ops.
+#[no_mangle]
+pub extern "C" fn loro_doc_compact_change_store(doc: *const LoroDoc) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().compact_change_store();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Sets whether empty root containers are hidden from `get_deep_value` results and snapshots.
+#[no_mangle]
+pub extern "C" fn loro_doc_set_hide_empty_root_containers(
+    doc: *const LoroDoc,
+    hide: bool,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().set_hide_empty_root_containers(hide);
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns whether the document contains the given container (by its history or current state).
+/// `cid` is a container-id string. Returns `false` on a null handle or unparseable id.
+#[no_mangle]
+pub extern "C" fn loro_doc_has_container(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> bool {
+    ffi_guard!(false, {
+        let doc = deref_or!(doc, false);
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return false,
+        };
+        doc.inner().has_container(&cid)
+    })
+}
+
+/// Deletes all content from a root container and hides it from the document. Only affects root
+/// containers (those without a parent). `cid` is a container-id string.
+#[no_mangle]
+pub extern "C" fn loro_doc_delete_root_container(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        doc.inner().delete_root_container(cid);
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Writes the path from the document root to the given container into `*out` as a JSON array of
+/// `{"cid": string, "index": {...}}` steps. `*out` is only written on `LORO_OK`; free it with
+/// `loro_bytes_free`. Returns `LORO_ERR_NOT_FOUND` if the container does not resolve.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_path_to_container(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let path = match doc.inner().get_path_to_container(&cid) {
+            Some(p) => p,
+            None => {
+                set_last_error("no path to container (container not found)");
+                return LoroStatus::LORO_ERR_NOT_FOUND;
+            }
+        };
+        let arr: Vec<serde_json::Value> = path
+            .iter()
+            .map(|(cid, index)| {
+                serde_json::json!({
+                    "cid": cid.to_string(),
+                    "index": crate::event::index_to_json(index),
+                })
+            })
+            .collect();
+        match serde_json::to_vec(&arr) {
+            Ok(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(format!("failed to serialize path to JSON: {e}"));
+                LoroStatus::LORO_ERR_ENCODE
+            }
+        }
+    })
+}
+
+/// Writes the container ids modified in the change range `[id, id+len)` into `*out` as a sorted
+/// JSON array of container-id strings (sorted for deterministic output). This implicitly commits
+/// the current transaction. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_changed_containers_in(
+    doc: *const LoroDoc,
+    id: LoroId,
+    len: usize,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let set = doc.inner().get_changed_containers_in(id.to_loro(), len);
+        let mut cids: Vec<String> = set.iter().map(|c| c.to_string()).collect();
+        cids.sort();
+        match serde_json::to_vec(&cids) {
+            Ok(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(format!("failed to serialize containers to JSON: {e}"));
+                LoroStatus::LORO_ERR_ENCODE
+            }
+        }
+    })
+}
+
+/// Compares `frontiers` with the document's current OpLog version, writing `-1` (the doc is
+/// behind / `frontiers` is not fully contained), `0` (equal), or `1` (the doc is ahead) into
+/// `*out`. `*out` is only written on `LORO_OK`.
+#[no_mangle]
+pub extern "C" fn loro_doc_cmp_with_frontiers(
+    doc: *const LoroDoc,
+    frontiers: *const LoroFrontiers,
+    out: *mut i32,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let frontiers = deref_or!(frontiers, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let ord = match doc.inner().cmp_with_frontiers(frontiers.inner()) {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        };
+        unsafe { out.write(ord) };
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns a minimized equivalent of `frontiers` (the smallest set marking the same version), as
+/// a new owned [`LoroFrontiers`]. Returns null if a frontier id is not included in this
+/// document's history. Release with `loro_frontiers_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_minimize_frontiers(
+    doc: *const LoroDoc,
+    frontiers: *const LoroFrontiers,
+) -> *mut LoroFrontiers {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let frontiers = deref_or!(frontiers, std::ptr::null_mut());
+        match doc.inner().minimize_frontiers(frontiers.inner()) {
+            Ok(f) => Box::into_raw(Box::new(LoroFrontiers::from_inner(f))),
+            Err(id) => {
+                set_last_error(format!("frontier id not included in document: {id}"));
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Forks the document at `frontiers`: the new document contains only the history up to that
+/// version. Returns a new owned [`LoroDoc`], or null on error (e.g. an unknown frontier).
+/// Release with `loro_doc_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_fork_at(
+    doc: *const LoroDoc,
+    frontiers: *const LoroFrontiers,
+) -> *mut LoroDoc {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let frontiers = deref_or!(frontiers, std::ptr::null_mut());
+        match doc.inner().fork_at(frontiers.inner()) {
+            Ok(d) => Box::into_raw(Box::new(LoroDoc(d))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Looks up an existing text container by container-id string, returning a live handle or null
+/// if it does not exist (or `cid` is unparseable). Release with `loro_text_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_try_get_text(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroText {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().try_get_text(cid) {
+            Some(t) => Box::into_raw(Box::new(LoroText::from_inner(t))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Looks up an existing map container by container-id string, returning a live handle or null
+/// if it does not exist (or `cid` is unparseable). Release with `loro_map_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_try_get_map(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroMap {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().try_get_map(cid) {
+            Some(m) => Box::into_raw(Box::new(LoroMap::from_inner(m))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Looks up an existing list container by container-id string, returning a live handle or null
+/// if it does not exist (or `cid` is unparseable). Release with `loro_list_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_try_get_list(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().try_get_list(cid) {
+            Some(l) => Box::into_raw(Box::new(LoroList::from_inner(l))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Looks up an existing movable-list container by container-id string, returning a live handle
+/// or null if it does not exist (or `cid` is unparseable). Release with `loro_movable_list_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_try_get_movable_list(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroMovableList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().try_get_movable_list(cid) {
+            Some(l) => Box::into_raw(Box::new(LoroMovableList::from_inner(l))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Looks up an existing tree container by container-id string, returning a live handle or null
+/// if it does not exist (or `cid` is unparseable). Release with `loro_tree_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_try_get_tree(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroTree {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().try_get_tree(cid) {
+            Some(t) => Box::into_raw(Box::new(LoroTree::from_inner(t))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Looks up an existing counter container by container-id string, returning a live handle or
+/// null if it does not exist (or `cid` is unparseable). Release with `loro_counter_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_try_get_counter(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroCounter {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().try_get_counter(cid) {
+            Some(c) => Box::into_raw(Box::new(LoroCounter::from_inner(c))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Looks up the change containing operation `id` and, on success, writes a new owned
+/// [`LoroChangeMetaOwned`] handle into `*out`. Read it via `loro_change_meta_owned_as_ref` +
+/// the `loro_change_meta_*` accessors; release it with `loro_change_meta_owned_free`. Returns
+/// `LORO_ERR_NOT_FOUND` if no change contains `id`. `*out` is only written on `LORO_OK`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_change(
+    doc: *const LoroDoc,
+    id: LoroId,
+    out: *mut *mut LoroChangeMetaOwned,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        match doc.inner().get_change(id.to_loro()) {
+            Some(meta) => {
+                let boxed = Box::into_raw(Box::new(LoroChangeMetaOwned(meta)));
+                unsafe { out.write(boxed) };
+                LoroStatus::LORO_OK
+            }
+            None => {
+                set_last_error("no change at the given id");
+                LoroStatus::LORO_ERR_NOT_FOUND
+            }
         }
     })
 }

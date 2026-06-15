@@ -503,7 +503,9 @@ pub(crate) fn write_json(out: *mut LoroBytes, value: &JsonValue) -> LoroStatus {
     }
 }
 
-fn index_to_json(index: &Index) -> JsonValue {
+/// Serializes a single path [`Index`] to JSON (`{"key":…}` / `{"seq":…}` / `{"node":…}`).
+/// Shared with the doc-introspection module ([`crate::doc::loro_doc_get_path_to_container`]).
+pub(crate) fn index_to_json(index: &Index) -> JsonValue {
     match index {
         Index::Key(k) => json!({ "key": k.to_string() }),
         Index::Seq(i) => json!({ "seq": i }),

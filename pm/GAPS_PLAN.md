@@ -243,19 +243,39 @@ accessors. Independent, low-risk, batchable; do in any order after G1–G4.
   `try_get_{text,map,list,movable_list,tree,counter}`, history-cache controls
   (`has_history_cache`/`free_history_cache`/`free_diff_calculator`/`compact_change_store`),
   `set_hide_empty_root_containers`, `delete_root_container`.
+- **Doc method tail** (was unenumerated — these have no local equivalent today):
+  `attach`/`detach` (we only ship `checkout`/`checkout_to_latest`/`is_detached`),
+  `get_container` (generic by `ContainerID`, complementing the existing typed `get_*`),
+  `get_deep_value_with_id`, `find_id_spans_between`.
+- **Commit-options surface** — [commit.rs](loro-c-api/src/commit.rs): `commit_with`,
+  `set_next_commit_origin`, `set_next_commit_options`, `clear_next_commit_options` (we only
+  ship `set_next_commit_message`/`set_next_commit_timestamp`). Marshal `CommitOptions` as a
+  small POD struct or opaque builder, consistent with the M5 commit-hook plumbing.
 - **Attribution getters:** map `get_last_editor`; movable_list `get_creator_at`/
-  `get_last_mover_at`/`get_last_editor_at`; tree `get_last_move_id`/`parent`/`nodes`/
-  `get_value_with_meta`/`disable_fractional_index`.
+  `get_last_mover_at`/`get_last_editor_at`; text `get_editor_at_unicode_pos`; tree
+  `get_last_move_id`/`parent`/`nodes`/`get_value_with_meta`/`disable_fractional_index`, plus
+  the vec-returning `roots`/`children`/`get_value` forms (we only ship the
+  `roots_len`/`root_at` and `children_len`/`child_at` index accessors today).
 - **Per-container uniform set** (each of the six): `is_deleted`, `is_attached`,
   `get_attached`, `doc`, `subscribe`(reuse the callback triple), `values`/`to_vec`.
+- **Mergeable containers** — map/list/movable_list `ensure_mergeable_{text,list,map,tree,`
+  `movable_list,counter}`. Distinct capability from the generic `*_insert_container(type)`
+  path (which supersedes the typed `get_or_create_*`/`insert_*`/`set_*_container` family — see
+  the intentional-omissions table), so it must be ported explicitly rather than collapsed.
 - **VersionVector algebra** — [version.rs](loro-c-api/src/version.rs): `merge`, `diff`,
   `get_missing_span`, `intersect_span`, `extend_to_include_vv`, `try_update_last`, `set_end`,
   `to_hashmap`.
+- **VersionRange interface** — [version.rs](loro-c-api/src/version.rs): the upstream
+  `VersionRange` is a full interface (`clear`, `get`, `insert`, `contains_ops_between`,
+  `has_overlap_with`, `contains_id`, `contains_id_span`, `extends_to_include_id_span`,
+  `is_empty`, `get_peers`, `get_all_ranges`), not just the POD struct G3 needs for
+  `redact_json_updates`. Low priority — gate behind whether any caller needs range algebra;
+  if not, move it to the intentional-omissions table instead of building it.
 - **UndoManager extras** — [undo.rs](loro-c-api/src/undo.rs): `peer`, `top_undo_meta`/
   `top_redo_meta`, `top_undo_value`/`top_redo_value`.
 
-**Effort:** ~40 small functions. High count, low individual complexity. Split across PRs by
-sub-bullet.
+**Effort:** ~60 small functions (up from the original ~40 once the previously-unenumerated
+tail above is counted). High count, low individual complexity. Split across PRs by sub-bullet.
 
 ---
 
@@ -269,7 +289,7 @@ sub-bullet.
 | 4 | **G4** — diff/patch | ~3 (after G1 codec) | low |
 | 5 | **G3** — JSON updates + export modes | ~12 + structs | medium (ExportMode union) |
 | 6 | **G5** — value navigation (decision) | ~2 or defer | low |
-| 7 | **G6** — utility/attribution long tail | ~40 | low, high volume |
+| 7 | **G6** — utility/attribution long tail | ~60 | low, high volume |
 
 Rationale for putting G4 before G3: G4 is tiny once G1 has factored out the shared delta/diff
 JSON codec, and it unblocks time-travel demos; G3's `ExportMode` union is the only place with
@@ -287,3 +307,24 @@ shows every interface method has a corresponding `loro_*` function (or a documen
 intentional omission — e.g. UniFFI-only scaffolding, or methods superseded by the JSON-value
 design). Track residual intentional omissions in a short table appended here, so "parity"
 stays a verifiable claim rather than a slogan.
+
+### Intentional omissions (stub — confirm/extend as milestones land)
+
+These upstream `loro.udl` interface methods are deliberately **not** mirrored 1:1. They are
+"covered" for parity purposes by the listed local mechanism; the final `loro.h`-vs-`loro.udl`
+diff-gate should treat them as expected absences, not gaps. Re-confirm each as the relevant
+milestone lands.
+
+| Upstream surface | Why omitted | Covered locally by |
+|---|---|---|
+| Typed container constructors: `get_or_create_{text,list,map,tree,movable_list,counter}_container`, `insert_*_container`, movable_list `set_*_container` (Map/List/MovableList) | Local API uses a generic type-discriminated path instead of one-fn-per-type | `loro_{map,list,movable_list}_insert_container(type, …)` / `_set_container` / `_get_container` (see [container/](loro-c-api/src/container/)). **Note:** `ensure_mergeable_*` is NOT covered by this — it is a distinct capability ported in G6. |
+| `LoroValueLike`, `ContainerIdLike` | UniFFI trait-adapter scaffolding with no C ABI meaning | JSON marshalling for values ([value.rs](loro-c-api/src/value.rs)); `LoroContainerId` POD for container IDs |
+| `DiffBatch` interface (`push`, `get_diff`) | UniFFI object wrapper around a diff collection | G4 marshals diffs as JSON (`diff`/`apply_diff`), per the shared codec decision |
+| Callback interfaces (`Subscriber`, `LocalUpdateCallback`, `JsonPathSubscriber`, `Unsubscriber`, `OnPush`/`OnPop`, `PreCommitCallback`, `FirstCommitFromPeerCallback`, `ChangeAncestorsTraveler`, `LocalEphemeralListener`, `EphemeralSubscriber`) | UniFFI callback-interface types; not standalone C surface | The uniform `{invoke, user_data, free_user_data}` callback triple ([callbacks.rs](loro-c-api/src/callbacks.rs)) |
+| `LoroDoc::check_state_correctness_slow` | Debug/test-only invariant checker | _(omit; not part of the public surface)_ — confirm before final sign-off |
+| `LoroUnknown` (`id`) | Placeholder for unknown/forward-compat container types | _(omit unless a concrete need appears)_ |
+| `FractionalIndex` constructors-only interface | No methods beyond construction | Existing `loro_fractional_index_*` constructors ([fractional_index.rs](loro-c-api/src/fractional_index.rs)) |
+
+If any row above turns out to have an actual caller need (e.g. `ensure_mergeable_*`, or
+`VersionRange` range-algebra), promote it out of this table into the relevant milestone rather
+than leaving it as a silent gap.

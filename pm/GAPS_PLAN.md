@@ -266,50 +266,99 @@ table); revisit only if profiling shows JSON (de)serialization is hot, as flagge
 ## G6 — Doc utilities, attribution & long tail
 
 The breadth that takes `LoroDoc` from ~40 to ~80 methods and fills in per-container/version
-accessors. Independent, low-risk, batchable; do in any order after G1–G4.
+accessors. Independent, low-risk, batchable. A full design pass against the pinned
+`loro = "=1.13.1"` confirmed **every** underlying Rust method exists and refined the surface to
+**~99 new C functions + 4 new types** — the original "~60" undercounted the per-container uniform
+set (×6 containers) and `ensure_mergeable_*` (×6). The work is staged into the grouped sub-steps
+**G6.1–G6.6** below; do them in order, **one commit per group**, following the per-group recipe at
+the end of this section.
 
-- **Configure** — [doc.rs](loro-c-api/src/doc.rs): `loro_doc_config` → `LoroConfigure*`
-  (opaque) with `record_timestamp`/`set_record_timestamp`, `merge_interval`/
-  `set_merge_interval`; plus doc-level `set_record_timestamp`, `set_change_merge_interval`.
-- **History / introspection:** `get_change`(→`LoroChangeMeta`), `len_ops`, `len_changes`,
-  `get_pending_txn_len`, `has_container`, `get_path_to_container`,
-  `get_changed_containers_in`, `cmp_with_frontiers`, `minimize_frontiers`, `fork_at`,
-  `try_get_{text,map,list,movable_list,tree,counter}`, history-cache controls
-  (`has_history_cache`/`free_history_cache`/`free_diff_calculator`/`compact_change_store`),
-  `set_hide_empty_root_containers`, `delete_root_container`.
-- **Doc method tail** (was unenumerated — these have no local equivalent today):
-  `attach`/`detach` (we only ship `checkout`/`checkout_to_latest`/`is_detached`),
-  `get_container` (generic by `ContainerID`, complementing the existing typed `get_*`),
-  `get_deep_value_with_id`, `find_id_spans_between`.
-- **Commit-options surface** — [commit.rs](loro-c-api/src/commit.rs): `commit_with`,
-  `set_next_commit_origin`, `set_next_commit_options`, `clear_next_commit_options` (we only
-  ship `set_next_commit_message`/`set_next_commit_timestamp`). Marshal `CommitOptions` as a
-  small POD struct or opaque builder, consistent with the M5 commit-hook plumbing.
-- **Attribution getters:** map `get_last_editor`; movable_list `get_creator_at`/
-  `get_last_mover_at`/`get_last_editor_at`; text `get_editor_at_unicode_pos`; tree
-  `get_last_move_id`/`parent`/`nodes`/`get_value_with_meta`/`disable_fractional_index`, plus
-  the vec-returning `roots`/`children`/`get_value` forms (we only ship the
-  `roots_len`/`root_at` and `children_len`/`child_at` index accessors today).
-- **Per-container uniform set** (each of the six): `is_deleted`, `is_attached`,
-  `get_attached`, `doc`, `subscribe`(reuse the callback triple), `values`/`to_vec`.
-- **Mergeable containers** — map/list/movable_list `ensure_mergeable_{text,list,map,tree,`
-  `movable_list,counter}`. Distinct capability from the generic `*_insert_container(type)`
-  path (which supersedes the typed `get_or_create_*`/`insert_*`/`set_*_container` family — see
-  the intentional-omissions table), so it must be ported explicitly rather than collapsed.
-- **VersionVector algebra** — [version.rs](loro-c-api/src/version.rs): `merge`, `diff`,
-  `get_missing_span`, `intersect_span`, `extend_to_include_vv`, `try_update_last`, `set_end`,
-  `to_hashmap`.
-- **VersionRange interface** — [version.rs](loro-c-api/src/version.rs): the upstream
-  `VersionRange` is a full interface (`clear`, `get`, `insert`, `contains_ops_between`,
-  `has_overlap_with`, `contains_id`, `contains_id_span`, `extends_to_include_id_span`,
-  `is_empty`, `get_peers`, `get_all_ranges`), not just the POD struct G3 needs for
-  `redact_json_updates`. Low priority — gate behind whether any caller needs range algebra;
-  if not, move it to the intentional-omissions table instead of building it.
-- **UndoManager extras** — [undo.rs](loro-c-api/src/undo.rs): `peer`, `top_undo_meta`/
-  `top_redo_meta`, `top_undo_value`/`top_redo_value`.
+**New types (4):**
 
-**Effort:** ~60 small functions (up from the original ~40 once the previously-unenumerated
-tail above is counted). High count, low individual complexity. Split across PRs by sub-bullet.
+| Type | File | Kind | Note |
+|---|---|---|---|
+| `LoroConfigure(loro::Configure)` | [doc.rs](loro-c-api/src/doc.rs) | opaque, owned clone | `Configure` is `Clone` over `Arc<Atomic*>`; a clone **shares** the doc's live config (tracks later changes, not a snapshot). Free `loro_configure_free`. |
+| `LoroChangeMetaOwned(loro::ChangeMeta)` | [version.rs](loro-c-api/src/version.rs) | opaque, owned | distinct from the borrowed callback-scoped `LoroChangeMeta`; ships `_free` + `loro_change_meta_owned_as_ref` that reinterprets to `*const LoroChangeMeta` so it reuses the existing 5 accessors. |
+| `LoroCommitOptions` | [commit.rs](loro-c-api/src/commit.rs) | `#[repr(C)]` POD | `{origin*, origin_len, message*, message_len, timestamp:i64, has_timestamp:bool, immediate_renew:bool}`; a null string ptr means `None`. |
+| `LoroTreeParentKind` | [container/tree.rs](loro-c-api/src/container/tree.rs) | `#[repr(C)]` enum | `{ROOT=0, DELETED=1, NODE=2, UNEXIST=3}` for `tree.parent()`. |
+
+### G6.1 — Doc config & timestamps — [doc.rs](loro-c-api/src/doc.rs) (8 fns)
+
+- [ ] `loro_doc_config` → `*mut LoroConfigure`; `loro_configure_free`; `_record_timestamp`,
+  `_set_record_timestamp`, `_merge_interval`, `_set_merge_interval` (setters take `*const` —
+  interior mutability via `Arc<Atomic>`); doc-level shortcuts `loro_doc_set_record_timestamp(bool)`,
+  `loro_doc_set_change_merge_interval(i64)`.
+
+### G6.2 — Doc history & introspection — [doc.rs](loro-c-api/src/doc.rs) + [version.rs](loro-c-api/src/version.rs) (~24 fns)
+
+- [ ] Scalars: `loro_doc_len_ops`, `_len_changes`, `_get_pending_txn_len`,
+  `_has_history_cache`(bool). Void→OK: `_free_history_cache`, `_free_diff_calculator`,
+  `_compact_change_store`, `_set_hide_empty_root_containers(bool)`.
+- [ ] By container-id string: `_has_container`(bool), `_delete_root_container`.
+- [ ] JSON out: `_get_path_to_container` (`[{cid,index}]`, reuse the `index_to_json` shape in
+  [event.rs](loro-c-api/src/event.rs)); `_get_changed_containers_in(LoroId,len)` (sorted
+  `["cid:…"]` for deterministic output).
+- [ ] Out-param: `_cmp_with_frontiers` (`*i32`, −1/0/1). Handle returns: `_minimize_frontiers`
+  → `*mut LoroFrontiers` (null on Err), `_fork_at` → `*mut LoroDoc` (null on Err),
+  `_try_get_{text,map,list,movable_list,tree,counter}` (nullable typed ptr, parse id string).
+- [ ] `_get_change(LoroId, out: **LoroChangeMetaOwned)` → `LoroStatus` (`NOT_FOUND` on `None`) +
+  the `LoroChangeMetaOwned` type, its `_free`, and `_as_ref` accessor reuse.
+
+### G6.3 — Doc method tail & commit options — [doc.rs](loro-c-api/src/doc.rs) + [commit.rs](loro-c-api/src/commit.rs) (9 fns)
+
+- [ ] Doc: `loro_doc_attach`, `_detach` (void→OK; `is_detached`/`checkout`/`checkout_to_latest`
+  already exist — do not duplicate); `_get_container(cid)` → `*mut LoroContainer` (type-erased,
+  null on `None`); `_get_deep_value_with_id_json` (JSON); `_find_id_spans_between(from,to)` (JSON
+  `{retreat,forward}` of `{peer:{start,end}}`).
+- [ ] Commit: `LoroCommitOptions` POD + `loro_doc_commit_with(opts)`, `_set_next_commit_origin(str)`,
+  `_set_next_commit_options(opts)`, `_clear_next_commit_options`. Keep the existing
+  `set_next_commit_message`/`_timestamp`.
+
+### G6.4 — Per-container uniform set & attribution — all six [container/](loro-c-api/src/container/) files (~36 fns)
+
+- [ ] Uniform set ×6 (map/list/movable_list/text/tree/counter) via `loro::ContainerTrait`:
+  `_is_deleted`(bool), `_is_attached`(bool), `_get_attached` → `*mut Self` (null on `None`),
+  `_doc` → `*mut LoroDoc` (owned clone, null on `None`), `_subscribe(LoroSubscriber)` →
+  `*mut LoroSubscription` (null when detached; reuse the shared subscription plumbing —
+  cf. the existing `loro_doc_subscribe(doc, cid, …)` by-id path).
+- [ ] Attribution (out-param `*mut u64` + `bool found`): map `_get_last_editor(key)`;
+  movable_list `_get_creator_at`/`_get_last_mover_at`/`_get_last_editor_at(pos)`; text
+  `_get_editor_at_unicode_pos(pos)`; tree `_get_last_move_id(LoroTreeID, out:*mut LoroId)`→bool.
+
+### G6.5 — Tree extras & mergeable — [container/tree.rs](loro-c-api/src/container/tree.rs) + [container/map.rs](loro-c-api/src/container/map.rs) (12 fns)
+
+- [ ] Tree: `LoroTreeParentKind` enum + `_parent(LoroTreeID, out_kind, out_node)`→bool;
+  JSON-array bulk forms `_roots_json`, `_nodes_json`, `_children_json(parent*)` (TreeID
+  `{peer,counter}`); `_get_value_with_meta_json` (JSON); `_disable_fractional_index`.
+  (`get_value` is covered by the existing `loro_tree_to_json` — omit.)
+- [ ] Map mergeable — upstream `ensure_mergeable_*` lives on **`LoroMap` only**, arg `key:&str`,
+  returns the matching typed handle (null on Err):
+  `_ensure_mergeable_{text,map,list,movable_list,tree,counter}`. (The plan's earlier
+  "map/list/movable_list" was inaccurate — list/movable_list have no such method.) Distinct from
+  the generic `*_insert_container(type)` path, so it is ported explicitly rather than collapsed.
+
+### G6.6 — VersionVector algebra & UndoManager extras — [version.rs](loro-c-api/src/version.rs) + [undo.rs](loro-c-api/src/undo.rs) (10 fns)
+
+- [ ] VV: `_merge(other)`, `_extend_to_include_vv(other)`, `_set_end(LoroId)` (void→OK);
+  `_try_update_last(LoroId, out_updated:*mut bool)`; `_diff(other)` → JSON `{retreat,forward}`;
+  `_get_missing_span(target)` → JSON `[{peer,counter_start,counter_end}]`;
+  `_intersect_span(LoroIdSpan, out:*mut LoroCounterSpan)`→bool.
+  (`to_hashmap` is covered by the existing `loro_version_vector_to_json` — omit.)
+- [ ] Undo: `loro_undo_manager_peer`→u64; `_top_undo_value_json(out)`→bool,
+  `_top_redo_value_json(out)`→bool. (`top_undo_meta`/`top_redo_meta` owned-meta handle deferred —
+  its `cursors: Vec<CursorWithPos>` has no FFI form yet; see the omissions table.)
+
+**Per-group recipe** (each sub-step, in order, on a feature branch — not `main`): add the Rust fns
+→ **rebuild the staticlib by hand** (`cargo build` in `loro-c-api`; manual CMake mode won't rebuild
+the `.a` on Rust edits) → `cmake --build build --target regenerate-header` and commit
+[loro.h](include/loro/loro.h) (CI drift guard: `git diff --exit-code`) → add the C++ RAII wrappers
+in [loro.hpp](include/loro/loro.hpp) → extend `tests/test_g6.cpp` + `test_g6_c()` in
+[test_c_only.c](tests/test_c_only.c) (register in [tests/CMakeLists.txt](tests/CMakeLists.txt) like
+the existing test targets) → build with the MSYS2 CLANG64 toolchain (gnullvm Rust host + clang +
+Ninja) and run `ctest`.
+
+**Effort:** ~99 small functions + 4 types across six groups. High count, low individual complexity;
+one commit per group.
 
 ---
 
@@ -323,7 +372,7 @@ tail above is counted). High count, low individual complexity. Split across PRs 
 | 4 | **G4** — diff/patch | ~3 (after G1 codec) | low |
 | 5 | **G3** — JSON updates + export modes | ~12 + structs | medium (ExportMode union) |
 | 6 | **G5** — value navigation ✅ landed | ~7 + handle/POD | low |
-| 7 | **G6** — utility/attribution long tail | ~60 | low, high volume |
+| 7 | **G6** — utility/attribution long tail (staged G6.1–G6.6) | ~99 | low, high volume |
 
 Rationale for putting G4 before G3: G4 is tiny once G1 has factored out the shared delta/diff
 JSON codec, and it unblocks time-travel demos; G3's `ExportMode` union is the only place with
@@ -363,6 +412,11 @@ milestone lands.
 | Runtime-selected `LoroExportMode` tagged union | G3 ships per-mode helper fns instead (no union ABI risk), per the plan's own recommendation ([GAPS_PLAN.md:170](pm/GAPS_PLAN.md#L170)). | `loro_doc_export_{shallow_snapshot,snapshot_at,state_only,updates_in_range}` plus the existing snapshot/updates wrappers ([doc.rs](loro-c-api/src/doc.rs)); add the union only if a caller must pick the mode at runtime. |
 | `ImportStatus { success, pending }` returned by `import_json_updates`/`import_batch`/`import_with` (and binary `import`) | Not `Serialize`, and the existing binary `loro_doc_import` already discards it. | Imports return `LoroStatus` only ([doc.rs](loro-c-api/src/doc.rs)); surface the pending/success ranges as a JSON out-param if a caller needs dependency-gap detection. |
 | Full structured `LoroValue` tagged union + `ValueOrContainer`'s `as_loro_text()`-style typed accessors | Large ABI surface; JSON marshalling already round-trips plain data. The only thing JSON loses — a live nested container — is recovered by the G5 navigation handle. | JSON value marshalling ([value.rs](loro-c-api/src/value.rs)) plus the opaque `LoroValueOrContainer` from G5 ([value_or_container.rs](loro-c-api/src/value_or_container.rs)): `is_container`/`container_type`/`get_container` (live handle) / `get_value_json`. Build the tagged union only if profiling shows JSON (de)serialization is hot ([CBINDGEN_PLAN.md:274](CBINDGEN_PLAN.md#L274)). |
+| Full `VersionRange` range-algebra interface (`clear`/`get`/`insert`/`contains_ops_between`/`has_overlap_with`/`contains_id`/`contains_id_span`/`extends_to_include_id_span`/`is_empty`/`get_peers`/`get_all_ranges`) | No G6 consumer needs range algebra — ~11 fns + an opaque handle for zero callers; deferred per the plan's own gate. | _(deferred; promote into G6 only if a caller needs range algebra)_ |
+| Container `values()` / list & movable_list `to_vec()` | Same contents the existing JSON serializers already emit at the JSON boundary | `loro_map_to_json` / `loro_list_to_json` / `loro_movable_list_to_json` ([container/](loro-c-api/src/container/)) |
+| Tree `get_value` (plain) | Duplicate of the tree's existing JSON serialization | `loro_tree_to_json` ([container/tree.rs](loro-c-api/src/container/tree.rs)); G6.5 still adds `get_value_with_meta` (resolves node metadata — genuinely new) |
+| `VersionVector::to_hashmap` | No such method upstream; the deref-to-map is already emitted as `{"peer":counter}` JSON | `loro_version_vector_to_json` ([version.rs](loro-c-api/src/version.rs)) |
+| `UndoManager::top_undo_meta` / `top_redo_meta` (owned `UndoItemMeta` handle) | Its `cursors: Vec<CursorWithPos>` has no FFI representation yet; only `value` is expressible | G6.6 ships the value via `loro_undo_manager_top_{undo,redo}_value_json` ([undo.rs](loro-c-api/src/undo.rs)); promote an owned-meta handle only when a caller needs `cursors` |
 
 If any row above turns out to have an actual caller need (e.g. `ensure_mergeable_*`, or
 `VersionRange` range-algebra), promote it out of this table into the relevant milestone rather

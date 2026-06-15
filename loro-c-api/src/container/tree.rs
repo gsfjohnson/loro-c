@@ -25,7 +25,7 @@ pub struct LoroTreeID {
 }
 
 impl LoroTreeID {
-    fn to_loro(self) -> loro::TreeID {
+    pub(crate) fn to_loro(self) -> loro::TreeID {
         loro::TreeID::new(self.peer, self.counter)
     }
 

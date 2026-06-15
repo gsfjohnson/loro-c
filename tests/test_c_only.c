@@ -614,6 +614,82 @@ static void test_diff_c(void) {
     loro_doc_free(a);
 }
 
+/* G5: navigate to a value or live container by path. The key assertion is that a container
+ * obtained via get_by_* is LIVE — mutating it shows up on the parent document, which a flat
+ * JSON dump could never round-trip. */
+static void test_get_by_path_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    CHECK(doc != NULL);
+
+    /* items[0] = { "name": "alice" } */
+    LoroList* items = loro_doc_get_list(doc, "items", 5);
+    CHECK(items != NULL);
+    LoroContainer* detached = loro_container_new(LORO_CONTAINER_MAP);
+    LoroContainer* attached = loro_list_push_container(items, detached); /* consumes detached */
+    CHECK(attached != NULL);
+    LoroMap* m0 = loro_container_get_map(attached);
+    CHECK(m0 != NULL);
+    CHECK(loro_map_insert(m0, "name", 4, "\"alice\"", 7) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    /* Navigate by string path to the nested container. */
+    LoroValueOrContainer* voc = loro_doc_get_by_str_path(doc, "items/0", 7);
+    CHECK(voc != NULL);
+    CHECK(loro_value_or_container_is_container(voc) == true);
+    CHECK(loro_value_or_container_container_type(voc) == LORO_CONTAINER_MAP);
+
+    /* The handle is LIVE: write a new key through it, then observe it on the parent doc. */
+    LoroContainer* live = loro_value_or_container_get_container(voc);
+    CHECK(live != NULL);
+    LoroMap* live_map = loro_container_get_map(live);
+    CHECK(live_map != NULL);
+    CHECK(loro_map_insert(live_map, "age", 3, "30", 2) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    LoroBytes dj = {0};
+    CHECK(loro_doc_get_deep_value_json(doc, &dj) == LORO_OK);
+    CHECK(bytes_contains(&dj, "age"));
+    CHECK(bytes_contains(&dj, "30"));
+    loro_bytes_free(dj);
+
+    /* Navigate to a leaf value: not a container, read as JSON. */
+    LoroValueOrContainer* leaf = loro_doc_get_by_str_path(doc, "items/0/name", 12);
+    CHECK(leaf != NULL);
+    CHECK(loro_value_or_container_is_container(leaf) == false);
+    CHECK(loro_value_or_container_container_type(leaf) == LORO_CONTAINER_UNKNOWN);
+    CHECK(loro_value_or_container_get_container(leaf) == NULL); /* it's a value */
+    LoroBytes lj = {0};
+    CHECK(loro_value_or_container_get_value_json(leaf, &lj) == LORO_OK);
+    CHECK(bytes_contains(&lj, "alice"));
+    loro_bytes_free(lj);
+
+    /* The same node via explicit {KEY, SEQ} path components. */
+    LoroPathComponent path[2];
+    memset(path, 0, sizeof(path));
+    path[0].kind = LORO_PATH_KEY;
+    path[0].key = "items";
+    path[0].key_len = 5;
+    path[1].kind = LORO_PATH_SEQ;
+    path[1].seq = 0;
+    LoroValueOrContainer* voc2 = loro_doc_get_by_path(doc, path, 2);
+    CHECK(voc2 != NULL);
+    CHECK(loro_value_or_container_is_container(voc2) == true);
+    CHECK(loro_value_or_container_container_type(voc2) == LORO_CONTAINER_MAP);
+
+    /* A path that does not resolve returns NULL. */
+    CHECK(loro_doc_get_by_str_path(doc, "items/99", 8) == NULL);
+
+    loro_value_or_container_free(voc2);
+    loro_value_or_container_free(leaf);
+    loro_value_or_container_free(voc);
+    loro_map_free(live_map);
+    loro_container_free(live);
+    loro_map_free(m0);
+    loro_container_free(attached);
+    loro_list_free(items);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -626,6 +702,7 @@ int main(void) {
     test_cursor_c();
     test_json_sync_c();
     test_diff_c();
+    test_get_by_path_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

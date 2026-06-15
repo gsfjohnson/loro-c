@@ -217,26 +217,49 @@ to the F0 snapshot.
 
 ---
 
-## G5 — Structured values *(decision point, not necessarily build)*
+## G5 — Value navigation ✅ *(landed)*
 
 The deepest divergence: upstream exposes a typed `LoroValue` enum + `ValueOrContainer` with
 `as_loro_text()`-style accessors; we marshal everything as JSON strings. JSON round-trips
-plain data fine, so this is **lower priority than G1–G4**. The one thing JSON genuinely
+plain data fine, so this was **lower priority than G1–G4**. The one thing JSON genuinely
 *cannot* express is "this value is a live nested container" — a JSON dump flattens it and
-loses the handle.
+loses the handle. G5 closed exactly that gap, per the plan's recommendation, without porting
+the full tagged-union `LoroValue`. Shipped in
+[value_or_container.rs](loro-c-api/src/value_or_container.rs).
 
-**Recommendation:** don't port the full tagged-union `LoroValue` (large ABI surface, the JSON
-path already works). Instead close just the navigation gap:
+**Design decision (refines the original POD sketch).** The plan first sketched a POD
+`LoroValueOrContainer { bool is_container; LoroContainerType type; }` returned alongside a live
+handle. G5 instead ships `LoroValueOrContainer` as an **opaque handle + accessors**, mirroring
+the existing [jsonpath.rs](loro-c-api/src/jsonpath.rs) `LoroJsonPathResults` pattern (which
+solves the identical value-or-container problem losslessly) — the same kind of refinement G4
+made when it dropped JSON in favour of an opaque `LoroDiffBatch`.
 
-- `loro_doc_get_by_path(doc, indices, count, out_value_or_container)` and
-  `loro_doc_get_by_str_path(doc, path, len, …)` returning a small
-  `LoroValueOrContainer { bool is_container; LoroContainerType type; }` plus, when it's a
-  container, a `loro_*_get_container`-style live handle (the M1 plan already extracts
-  containers from values this way — see [value.rs](loro-c-api/src/value.rs)).
+**Rust — [value_or_container.rs](loro-c-api/src/value_or_container.rs):**
+- `loro_doc_get_by_path(doc, path: *const LoroPathComponent, count)` → `LoroValueOrContainer*`
+  (null if a component is invalid UTF-8 or the path doesn't resolve). `LoroPathComponent` is a
+  tagged POD (`LoroPathComponentKind ∈ {Key, Seq, Node}`) mirroring `loro::Index`, reusing the
+  existing `LoroTreeID` POD for the tree-node case.
+- `loro_doc_get_by_str_path(doc, path, len)` → `LoroValueOrContainer*` (null if unresolved).
+- Accessors on the handle: `loro_value_or_container_is_container`, `_container_type`
+  (→ `LoroContainerType`, reusing a factored `container_type_of` in
+  [container/any.rs](loro-c-api/src/container/any.rs)), `_get_container`
+  (→ a live `LoroContainer*`, the case JSON can't express), `_get_value_json`
+  (→ deep-value JSON, like the jsonpath accessor), and `_free`.
 
-Revisit a full structured `LoroValue` only if profiling shows JSON (de)serialization is hot,
-exactly as flagged in [CBINDGEN_PLAN.md:274](CBINDGEN_PLAN.md#L274). Pull `get_by_path`
-forward into G6 if a structured value isn't built.
+**C++ wrapper:** `loro::ValueOrContainer` RAII type (`is_container()`/`container_type()`/
+`container()` → `std::optional<Container>`/`value_json()`); `loro::PathComponent` builder
+(`key`/`seq`/`node`); `Doc::get_by_str_path` / `Doc::get_by_path` returning
+`std::optional<ValueOrContainer>`.
+
+**Tests:** [tests/test_navigate.cpp](tests/test_navigate.cpp) + `test_get_by_path_c()` in
+[tests/test_c_only.c](tests/test_c_only.c): navigate to a nested container, prove the handle is
+*live* (a write through it shows on the parent doc after commit — the thing JSON can't
+round-trip); navigate to a leaf value (`get_value_json`); reach the same node via explicit
+`{Key, Seq}` path components; a non-resolving path returns null/`std::nullopt`.
+
+A full structured `LoroValue` remains intentionally deferred (see the intentional-omissions
+table); revisit only if profiling shows JSON (de)serialization is hot, as flagged in
+[CBINDGEN_PLAN.md:274](CBINDGEN_PLAN.md#L274).
 
 ---
 
@@ -299,7 +322,7 @@ tail above is counted). High count, low individual complexity. Split across PRs 
 | 3 | **G2** — cursors | ~7 + enum/handle | low (self-contained) |
 | 4 | **G4** — diff/patch | ~3 (after G1 codec) | low |
 | 5 | **G3** — JSON updates + export modes | ~12 + structs | medium (ExportMode union) |
-| 6 | **G5** — value navigation (decision) | ~2 or defer | low |
+| 6 | **G5** — value navigation ✅ landed | ~7 + handle/POD | low |
 | 7 | **G6** — utility/attribution long tail | ~60 | low, high volume |
 
 Rationale for putting G4 before G3: G4 is tiny once G1 has factored out the shared delta/diff
@@ -339,6 +362,7 @@ milestone lands.
 | `LoroDoc::redact_json_updates` (+ the `VersionRange` POD it needed) | Not exposed on the public `loro` crate — redaction lives only in `loro-internal`'s `JsonSchema::redact`, and `loro-c` depends on `loro` alone. Dropped from G3 (this also removed the need for a `LoroVersionRange` POD). | _(deferred; promote back into G3 only if a caller needs redaction and adding the `loro-internal` dependency is accepted)_ |
 | Runtime-selected `LoroExportMode` tagged union | G3 ships per-mode helper fns instead (no union ABI risk), per the plan's own recommendation ([GAPS_PLAN.md:170](pm/GAPS_PLAN.md#L170)). | `loro_doc_export_{shallow_snapshot,snapshot_at,state_only,updates_in_range}` plus the existing snapshot/updates wrappers ([doc.rs](loro-c-api/src/doc.rs)); add the union only if a caller must pick the mode at runtime. |
 | `ImportStatus { success, pending }` returned by `import_json_updates`/`import_batch`/`import_with` (and binary `import`) | Not `Serialize`, and the existing binary `loro_doc_import` already discards it. | Imports return `LoroStatus` only ([doc.rs](loro-c-api/src/doc.rs)); surface the pending/success ranges as a JSON out-param if a caller needs dependency-gap detection. |
+| Full structured `LoroValue` tagged union + `ValueOrContainer`'s `as_loro_text()`-style typed accessors | Large ABI surface; JSON marshalling already round-trips plain data. The only thing JSON loses — a live nested container — is recovered by the G5 navigation handle. | JSON value marshalling ([value.rs](loro-c-api/src/value.rs)) plus the opaque `LoroValueOrContainer` from G5 ([value_or_container.rs](loro-c-api/src/value_or_container.rs)): `is_container`/`container_type`/`get_container` (live handle) / `get_value_json`. Build the tagged union only if profiling shows JSON (de)serialization is hot ([CBINDGEN_PLAN.md:274](CBINDGEN_PLAN.md#L274)). |
 
 If any row above turns out to have an actual caller need (e.g. `ensure_mergeable_*`, or
 `VersionRange` range-algebra), promote it out of this table into the relevant milestone rather

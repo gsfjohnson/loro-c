@@ -120,20 +120,26 @@ pub extern "C" fn loro_container_id(
     })
 }
 
+/// Maps a `loro::Container` to its [`LoroContainerType`]. Shared by [`loro_container_type`] and
+/// the value-navigation accessors (see [`crate::value_or_container`]).
+pub(crate) fn container_type_of(container: &loro::Container) -> LoroContainerType {
+    match container {
+        loro::Container::Map(_) => LoroContainerType::LORO_CONTAINER_MAP,
+        loro::Container::List(_) => LoroContainerType::LORO_CONTAINER_LIST,
+        loro::Container::Text(_) => LoroContainerType::LORO_CONTAINER_TEXT,
+        loro::Container::MovableList(_) => LoroContainerType::LORO_CONTAINER_MOVABLE_LIST,
+        loro::Container::Tree(_) => LoroContainerType::LORO_CONTAINER_TREE,
+        loro::Container::Counter(_) => LoroContainerType::LORO_CONTAINER_COUNTER,
+        loro::Container::Unknown(_) => LoroContainerType::LORO_CONTAINER_UNKNOWN,
+    }
+}
+
 /// Returns the kind of the container. Returns `LORO_CONTAINER_UNKNOWN` on a null handle.
 #[no_mangle]
 pub extern "C" fn loro_container_type(container: *const LoroContainer) -> LoroContainerType {
     ffi_guard!(LoroContainerType::LORO_CONTAINER_UNKNOWN, {
         let container = deref_or!(container, LoroContainerType::LORO_CONTAINER_UNKNOWN);
-        match container.inner() {
-            loro::Container::Map(_) => LoroContainerType::LORO_CONTAINER_MAP,
-            loro::Container::List(_) => LoroContainerType::LORO_CONTAINER_LIST,
-            loro::Container::Text(_) => LoroContainerType::LORO_CONTAINER_TEXT,
-            loro::Container::MovableList(_) => LoroContainerType::LORO_CONTAINER_MOVABLE_LIST,
-            loro::Container::Tree(_) => LoroContainerType::LORO_CONTAINER_TREE,
-            loro::Container::Counter(_) => LoroContainerType::LORO_CONTAINER_COUNTER,
-            loro::Container::Unknown(_) => LoroContainerType::LORO_CONTAINER_UNKNOWN,
-        }
+        container_type_of(container.inner())
     })
 }
 

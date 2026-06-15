@@ -1476,6 +1476,97 @@ private:
 };
 
 // ===========================================================================
+// G5: value navigation (get_by_path / get_by_str_path)
+
+/// One step of a structured path for Doc::get_by_path. Build with the static makers. Owns its
+/// map key, so the LoroPathComponent it lowers to (via lower()) borrows a pointer that stays
+/// valid as long as this object lives.
+class PathComponent {
+public:
+    /// A map key step.
+    static PathComponent key(std::string k) {
+        PathComponent p;
+        p.kind_ = LORO_PATH_KEY;
+        p.key_ = std::move(k);
+        return p;
+    }
+    /// A list / movable-list index step.
+    static PathComponent seq(std::size_t index) {
+        PathComponent p;
+        p.kind_ = LORO_PATH_SEQ;
+        p.seq_ = index;
+        return p;
+    }
+    /// A tree node-id step.
+    static PathComponent node(TreeId id) {
+        PathComponent p;
+        p.kind_ = LORO_PATH_NODE;
+        p.node_ = id;
+        return p;
+    }
+
+    /// Lowers to the C struct, borrowing this object's key string.
+    LoroPathComponent lower() const {
+        LoroPathComponent c{};
+        c.kind = kind_;
+        c.key = key_.data();
+        c.key_len = key_.size();
+        c.seq = seq_;
+        c.node = node_;
+        return c;
+    }
+
+private:
+    LoroPathComponentKind kind_ = LORO_PATH_KEY;
+    std::string key_;
+    std::size_t seq_ = 0;
+    TreeId node_{};
+};
+
+/// RAII wrapper around a `LoroValueOrContainer*` — the result of Doc::get_by_path /
+/// get_by_str_path. Either a plain value (read with value_json()) or a live container (recovered
+/// with container()). Move-only. Like DiffBatch, it can hand back a live nested container, which
+/// a flat JSON dump cannot represent.
+class ValueOrContainer {
+public:
+    explicit ValueOrContainer(LoroValueOrContainer* raw) : handle_(raw) {
+        if (!raw) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    LoroValueOrContainer* raw() const noexcept { return handle_.get(); }
+
+    /// Whether the result is a live container (vs. a plain value).
+    bool is_container() const { return loro_value_or_container_is_container(handle_.get()); }
+
+    /// The container kind; meaningful only when is_container() is true.
+    ContainerType container_type() const {
+        return loro_value_or_container_container_type(handle_.get());
+    }
+
+    /// The result as a live container, or std::nullopt if it is a plain value.
+    std::optional<Container> container() const {
+        LoroContainer* c = loro_value_or_container_get_container(handle_.get());
+        if (!c) return std::nullopt;
+        return Container(c);
+    }
+
+    /// The result as JSON (a container renders as its deep value).
+    std::string value_json() const {
+        detail::Bytes b;
+        detail::check(loro_value_or_container_get_value_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroValueOrContainer* p) const noexcept {
+            loro_value_or_container_free(p);
+        }
+    };
+    std::unique_ptr<LoroValueOrContainer, Deleter> handle_;
+};
+
+// ===========================================================================
 // M4: commit hooks
 // ===========================================================================
 
@@ -2182,6 +2273,28 @@ public:
             throw Error(LORO_ERR_OTHER, detail::last_error_message());
         }
         return Subscription(s);
+    }
+
+    // ---- G5: value navigation ----
+
+    /// Resolves a string path (e.g. "map/key", "list/0", "tree/0/prop") to a value or live
+    /// container, or std::nullopt if the path does not resolve.
+    std::optional<ValueOrContainer> get_by_str_path(std::string_view path) const {
+        LoroValueOrContainer* v =
+            loro_doc_get_by_str_path(handle_.get(), path.data(), path.size());
+        if (!v) return std::nullopt;
+        return ValueOrContainer(v);
+    }
+
+    /// Resolves a structured path (a sequence of PathComponent steps) to a value or live
+    /// container, or std::nullopt if the path does not resolve.
+    std::optional<ValueOrContainer> get_by_path(const std::vector<PathComponent>& path) const {
+        std::vector<LoroPathComponent> raw;
+        raw.reserve(path.size());
+        for (const auto& c : path) raw.push_back(c.lower());
+        LoroValueOrContainer* v = loro_doc_get_by_path(handle_.get(), raw.data(), raw.size());
+        if (!v) return std::nullopt;
+        return ValueOrContainer(v);
     }
 
     // ---- M4: commit hooks ----

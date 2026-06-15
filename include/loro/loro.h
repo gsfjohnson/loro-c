@@ -189,6 +189,24 @@ typedef enum LoroUndoOrRedo {
 } LoroUndoOrRedo;
 
 /**
+ * Which kind of path step a [`LoroPathComponent`] is. Mirrors the variants of `loro::Index`.
+ */
+typedef enum LoroPathComponentKind {
+    /**
+     * Index into a map by string key (uses `key`/`key_len`).
+     */
+    LORO_PATH_KEY = 0,
+    /**
+     * Index into a list / movable-list by position (uses `seq`).
+     */
+    LORO_PATH_SEQ = 1,
+    /**
+     * Index into a tree by node id (uses `node`).
+     */
+    LORO_PATH_NODE = 2,
+} LoroPathComponentKind;
+
+/**
  * Opaque handle to a [`loro::awareness::Awareness`]. Free with [`loro_awareness_free`].
  */
 typedef struct LoroAwareness LoroAwareness;
@@ -331,6 +349,14 @@ typedef struct LoroUndoManager LoroUndoManager;
  * on_pop callbacks. A `*mut LoroUndoMeta` always points to a real `loro::UndoItemMeta`.
  */
 typedef struct LoroUndoMeta LoroUndoMeta;
+
+/**
+ * Opaque, owned result of [`loro_doc_get_by_path`] / [`loro_doc_get_by_str_path`]: either a
+ * plain value (read as JSON with [`loro_value_or_container_get_value_json`]) or a live container
+ * (recovered as a `LoroContainer*` with [`loro_value_or_container_get_container`]). Free with
+ * [`loro_value_or_container_free`].
+ */
+typedef struct LoroValueOrContainer LoroValueOrContainer;
 
 /**
  * Opaque handle to a [`loro::VersionVector`]. Free with [`loro_version_vector_free`].
@@ -522,6 +548,34 @@ typedef struct LoroUndoOnPop {
     void *user_data;
     void (*free_user_data)(void*);
 } LoroUndoOnPop;
+
+/**
+ * One step of a path passed to [`loro_doc_get_by_path`]. Mirrors a `loro::Index`; `kind`
+ * selects which of the remaining fields is meaningful. The `key` pointer is borrowed for the
+ * duration of the call and is not owned by this struct.
+ */
+typedef struct LoroPathComponent {
+    /**
+     * Selects which field below carries the index.
+     */
+    enum LoroPathComponentKind kind;
+    /**
+     * `LORO_PATH_KEY`: pointer to the UTF-8 map key (not nul-terminated, not owned).
+     */
+    const char *key;
+    /**
+     * `LORO_PATH_KEY`: byte length of `key`.
+     */
+    uintptr_t key_len;
+    /**
+     * `LORO_PATH_SEQ`: list / movable-list index.
+     */
+    uintptr_t seq;
+    /**
+     * `LORO_PATH_NODE`: tree node id.
+     */
+    struct LoroTreeID node;
+} LoroPathComponent;
 
 /**
  * A single operation id: the creating peer and that peer's op counter. Mirrors `loro::ID`.
@@ -2220,6 +2274,58 @@ enum LoroStatus loro_undo_meta_get_value_json(const struct LoroUndoMeta *meta,
  * all-zero/empty buffer is a no-op. Must be called at most once per buffer.
  */
 void loro_bytes_free(struct LoroBytes bytes);
+
+/**
+ * Resolves the document path `(path, count)` to a value or live container, or returns null if a
+ * component is invalid UTF-8 or the path does not resolve (see `loro_last_error_message`).
+ * Release the returned handle with [`loro_value_or_container_free`].
+ */
+struct LoroValueOrContainer *loro_doc_get_by_path(const struct LoroDoc *doc,
+                                                  const struct LoroPathComponent *path,
+                                                  uintptr_t count);
+
+/**
+ * Resolves the string path `(path, path_len)` to a value or live container, or returns null if
+ * the path is invalid UTF-8 or does not resolve. The path syntax follows the container kind,
+ * e.g. `map/key`, `list/0`, `tree/{node_id}/prop` or `tree/0/prop`. Release the returned handle
+ * with [`loro_value_or_container_free`].
+ */
+struct LoroValueOrContainer *loro_doc_get_by_str_path(const struct LoroDoc *doc,
+                                                      const char *path,
+                                                      uintptr_t path_len);
+
+/**
+ * Returns whether the result is a live container (vs. a plain value). Returns `false` on a null
+ * handle.
+ */
+bool loro_value_or_container_is_container(const struct LoroValueOrContainer *voc);
+
+/**
+ * Returns the container kind of the result. Meaningful only when
+ * [`loro_value_or_container_is_container`] is `true`; returns `LORO_CONTAINER_UNKNOWN` for a
+ * plain value or a null handle.
+ */
+enum LoroContainerType loro_value_or_container_container_type(const struct LoroValueOrContainer *voc);
+
+/**
+ * Recovers the result as a type-erased `LoroContainer*`, or null (with an error recorded) if it
+ * is a plain value. The returned handle is independent; free it with `loro_container_free`. The
+ * source `LoroValueOrContainer*` is unaffected.
+ */
+struct LoroContainer *loro_value_or_container_get_container(const struct LoroValueOrContainer *voc);
+
+/**
+ * Writes the result as JSON into `*out` (a container is rendered as its deep value, like
+ * `loro_jsonpath_results_get_value_json`). `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_value_or_container_get_value_json(const struct LoroValueOrContainer *voc,
+                                                       struct LoroBytes *out);
+
+/**
+ * Frees a value-or-container handle. Passing null is a no-op.
+ */
+void loro_value_or_container_free(struct LoroValueOrContainer *voc);
 
 /**
  * Creates a new, empty version vector. Release with [`loro_version_vector_free`].

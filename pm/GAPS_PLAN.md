@@ -307,11 +307,11 @@ the end of this section.
 
 ### G6.3 — Doc method tail & commit options — [doc.rs](loro-c-api/src/doc.rs) + [commit.rs](loro-c-api/src/commit.rs) (9 fns)
 
-- [ ] Doc: `loro_doc_attach`, `_detach` (void→OK; `is_detached`/`checkout`/`checkout_to_latest`
+- [x] Doc: `loro_doc_attach`, `_detach` (void→OK; `is_detached`/`checkout`/`checkout_to_latest`
   already exist — do not duplicate); `_get_container(cid)` → `*mut LoroContainer` (type-erased,
   null on `None`); `_get_deep_value_with_id_json` (JSON); `_find_id_spans_between(from,to)` (JSON
   `{retreat,forward}` of `{peer:{start,end}}`).
-- [ ] Commit: `LoroCommitOptions` POD + `loro_doc_commit_with(opts)`, `_set_next_commit_origin(str)`,
+- [x] Commit: `LoroCommitOptions` POD + `loro_doc_commit_with(opts)`, `_set_next_commit_origin(str)`,
   `_set_next_commit_options(opts)`, `_clear_next_commit_options`. Keep the existing
   `set_next_commit_message`/`_timestamp`.
 

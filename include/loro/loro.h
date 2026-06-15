@@ -430,6 +430,23 @@ typedef struct LoroLocalUpdateCallback {
 } LoroLocalUpdateCallback;
 
 /**
+ * Options for [`loro_doc_commit_with`] / [`loro_doc_set_next_commit_options`].
+ *
+ * A null `origin` / `message` pointer means "unset" (`None`); an empty-but-non-null string is a
+ * real empty value. `has_timestamp == false` leaves the timestamp unset (the current time is used
+ * at commit). `origin` does not persist; `message` does and replicates to peers.
+ */
+typedef struct LoroCommitOptions {
+    const char *origin;
+    uintptr_t origin_len;
+    const char *message;
+    uintptr_t message_len;
+    int64_t timestamp;
+    bool has_timestamp;
+    bool immediate_renew;
+} LoroCommitOptions;
+
+/**
  * A C pre-commit callback. `invoke` receives a callback-scoped `const LoroPreCommitPayload*`
  * and the opaque `user_data`, and returns `true` to stay subscribed (`false`
  * auto-unsubscribes). `free_user_data` (may be null) runs once when the subscription is
@@ -828,6 +845,30 @@ enum LoroStatus loro_doc_set_next_commit_message(const struct LoroDoc *doc,
  * Sets the timestamp (seconds since the Unix epoch) for the next commit.
  */
 enum LoroStatus loro_doc_set_next_commit_timestamp(const struct LoroDoc *doc, int64_t timestamp);
+
+/**
+ * Commits the pending operations using `opts` (origin / message / timestamp / immediate_renew).
+ */
+enum LoroStatus loro_doc_commit_with(const struct LoroDoc *doc, struct LoroCommitOptions opts);
+
+/**
+ * Sets the origin `(origin, origin_len)` to attach to the next commit. The origin is reported to
+ * event/commit subscribers but is not persisted.
+ */
+enum LoroStatus loro_doc_set_next_commit_origin(const struct LoroDoc *doc,
+                                                const char *origin,
+                                                uintptr_t origin_len);
+
+/**
+ * Sets the full options (origin / message / timestamp / immediate_renew) for the next commit.
+ */
+enum LoroStatus loro_doc_set_next_commit_options(const struct LoroDoc *doc,
+                                                 struct LoroCommitOptions opts);
+
+/**
+ * Clears any options previously set for the next commit (message / timestamp / origin / options).
+ */
+enum LoroStatus loro_doc_clear_next_commit_options(const struct LoroDoc *doc);
 
 /**
  * Returns a callback-scoped pointer to the change's metadata. Do NOT free or store it; read
@@ -2111,6 +2152,44 @@ struct LoroCounter *loro_doc_try_get_counter(const struct LoroDoc *doc,
 enum LoroStatus loro_doc_get_change(const struct LoroDoc *doc,
                                     struct LoroId id,
                                     struct LoroChangeMetaOwned **out);
+
+/**
+ * Forces the document into attached mode, re-syncing the doc state to the latest version.
+ */
+enum LoroStatus loro_doc_attach(const struct LoroDoc *doc);
+
+/**
+ * Forces the document into detached mode: imported updates are recorded in the OpLog only, and
+ * the doc state is frozen until [`loro_doc_attach`] (or a checkout) re-syncs it.
+ */
+enum LoroStatus loro_doc_detach(const struct LoroDoc *doc);
+
+/**
+ * Looks up any container by container-id string, returning a type-erased [`LoroContainer`] handle
+ * or null if it does not exist (or `cid` is unparseable). Release with `loro_container_free`.
+ */
+struct LoroContainer *loro_doc_get_container(const struct LoroDoc *doc,
+                                             const char *cid,
+                                             uintptr_t cid_len);
+
+/**
+ * Writes the document's deep value *including container ids* into `*out` as JSON. Unlike
+ * [`loro_doc_get_deep_value_json`], nested containers carry their id. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_get_deep_value_with_id_json(const struct LoroDoc *doc,
+                                                     struct LoroBytes *out);
+
+/**
+ * Writes the operation id spans between versions `from` and `to` into `*out` as JSON
+ * `{ "retreat": {…}, "forward": {…} }`, where each side is `{ "<peer>": {"start":…, "end":…} }`.
+ * `forward` are spans in `to` but not `from`; `retreat` are spans in `from` but not `to`. `*out`
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_doc_find_id_spans_between(const struct LoroDoc *doc,
+                                               const struct LoroFrontiers *from,
+                                               const struct LoroFrontiers *to,
+                                               struct LoroBytes *out);
 
 /**
  * Returns a pointer to the current thread's last-error message as a nul-terminated C

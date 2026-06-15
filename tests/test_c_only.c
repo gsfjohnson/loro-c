@@ -828,6 +828,83 @@ static void test_g6_c(void) {
 
     loro_text_free(t);
     loro_doc_free(d);
+
+    /* --- G6.3: doc method tail & commit options --- */
+    LoroDoc* g3 = loro_doc_new();
+    CHECK(g3 != NULL);
+    CHECK(loro_doc_set_peer_id(g3, 11) == LORO_OK);
+
+    /* commit_with applies the message + timestamp (seen via change metadata). */
+    LoroText* g3t = loro_doc_get_text(g3, "t", 1);
+    CHECK(loro_text_insert(g3t, 0, "x", 1) == LORO_OK);
+    LoroCommitOptions opts = {0};
+    opts.message = "hi";
+    opts.message_len = 2;
+    opts.timestamp = 555;
+    opts.has_timestamp = true;
+    opts.immediate_renew = true;
+    CHECK(loro_doc_commit_with(g3, opts) == LORO_OK);
+
+    LoroId g3id = {11, 0};
+    LoroChangeMetaOwned* g3meta = NULL;
+    CHECK(loro_doc_get_change(g3, g3id, &g3meta) == LORO_OK);
+    {
+        const LoroChangeMeta* r = loro_change_meta_owned_as_ref(g3meta);
+        LoroBytes msg = {0};
+        CHECK(loro_change_meta_message(r, &msg) == LORO_OK);
+        CHECK(bytes_eq(&msg, "hi"));
+        loro_bytes_free(msg);
+        CHECK(loro_change_meta_timestamp(r) == 555);
+    }
+    loro_change_meta_owned_free(g3meta);
+
+    /* set_next_commit_origin + clear_next_commit_options are callable. */
+    CHECK(loro_doc_set_next_commit_origin(g3, "ui", 2) == LORO_OK);
+    CHECK(loro_doc_clear_next_commit_options(g3) == LORO_OK);
+
+    /* get_container by id (type-erased) returns the right kind; bogus id -> NULL. */
+    LoroBytes g3cid = {0};
+    CHECK(loro_text_id(g3t, &g3cid) == LORO_OK);
+    LoroContainer* anyc = loro_doc_get_container(g3, (const char*)g3cid.data, g3cid.len);
+    CHECK(anyc != NULL);
+    CHECK(loro_container_type(anyc) == LORO_CONTAINER_TEXT);
+    loro_container_free(anyc);
+    loro_bytes_free(g3cid);
+    CHECK(loro_doc_get_container(g3, "cid:99@99:Map", 13) == NULL);
+
+    /* deep_value_with_id JSON mentions the root text key. */
+    LoroBytes dvid = {0};
+    CHECK(loro_doc_get_deep_value_with_id_json(g3, &dvid) == LORO_OK);
+    CHECK(bytes_contains(&dvid, "\"t\"") == 1);
+    loro_bytes_free(dvid);
+
+    /* attach / detach toggle is_detached. */
+    CHECK(loro_doc_is_detached(g3) == false);
+    CHECK(loro_doc_detach(g3) == LORO_OK);
+    CHECK(loro_doc_is_detached(g3) == true);
+    CHECK(loro_doc_attach(g3) == LORO_OK);
+    CHECK(loro_doc_is_detached(g3) == false);
+
+    /* find_id_spans_between: forward holds the new ops under peer 11. */
+    LoroFrontiers* g3f = loro_doc_state_frontiers(g3);
+    CHECK(g3f != NULL);
+    LoroFrontiers* g3empty = loro_frontiers_new();
+    LoroBytes spans = {0};
+    CHECK(loro_doc_find_id_spans_between(g3, g3empty, g3f, &spans) == LORO_OK);
+    CHECK(bytes_contains(&spans, "forward") == 1);
+    CHECK(bytes_contains(&spans, "\"11\"") == 1);
+    loro_bytes_free(spans);
+    loro_frontiers_free(g3empty);
+    loro_frontiers_free(g3f);
+
+    /* Null-handle fallbacks for the G6.3 surface. */
+    CHECK(loro_doc_attach(NULL) == LORO_ERR_INVALID_ARG);
+    CHECK(loro_doc_get_container(NULL, "x", 1) == NULL);
+    LoroCommitOptions nopts = {0};
+    CHECK(loro_doc_commit_with(NULL, nopts) == LORO_ERR_INVALID_ARG);
+
+    loro_text_free(g3t);
+    loro_doc_free(g3);
 }
 
 int main(void) {

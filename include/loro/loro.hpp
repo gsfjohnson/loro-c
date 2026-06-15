@@ -1970,6 +1970,55 @@ private:
     std::unique_ptr<LoroConfigure, Deleter> handle_;
 };
 
+/// Builder for the options passed to `Doc::commit_with` / `Doc::set_next_commit_options`. Each
+/// field is optional; unset fields fall back to loro's defaults (current time for the timestamp,
+/// immediate-renew on). `origin` is reported to subscribers but not persisted; `message` persists.
+class CommitOptions {
+public:
+    CommitOptions& origin(std::string_view o) {
+        origin_ = std::string(o);
+        has_origin_ = true;
+        return *this;
+    }
+    CommitOptions& message(std::string_view m) {
+        message_ = std::string(m);
+        has_message_ = true;
+        return *this;
+    }
+    CommitOptions& timestamp(std::int64_t ts) {
+        timestamp_ = ts;
+        has_timestamp_ = true;
+        return *this;
+    }
+    CommitOptions& immediate_renew(bool renew) {
+        immediate_renew_ = renew;
+        return *this;
+    }
+
+    /// Builds the C POD. The returned struct borrows this object's string storage, so keep the
+    /// CommitOptions alive until the FFI call returns.
+    LoroCommitOptions to_c() const {
+        LoroCommitOptions o{};
+        o.origin = has_origin_ ? origin_.data() : nullptr;
+        o.origin_len = has_origin_ ? origin_.size() : 0;
+        o.message = has_message_ ? message_.data() : nullptr;
+        o.message_len = has_message_ ? message_.size() : 0;
+        o.timestamp = timestamp_;
+        o.has_timestamp = has_timestamp_;
+        o.immediate_renew = immediate_renew_;
+        return o;
+    }
+
+private:
+    std::string origin_;
+    std::string message_;
+    std::int64_t timestamp_ = 0;
+    bool has_origin_ = false;
+    bool has_message_ = false;
+    bool has_timestamp_ = false;
+    bool immediate_renew_ = true;
+};
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -2525,6 +2574,56 @@ public:
     /// Sets the timestamp (seconds since the Unix epoch) for the next commit.
     void set_next_commit_timestamp(std::int64_t timestamp) {
         detail::check(loro_doc_set_next_commit_timestamp(handle_.get(), timestamp));
+    }
+    /// Sets the origin for the next commit (reported to subscribers; not persisted).
+    void set_next_commit_origin(std::string_view origin) {
+        detail::check(
+            loro_doc_set_next_commit_origin(handle_.get(), origin.data(), origin.size()));
+    }
+    /// Sets the full options (origin / message / timestamp / immediate_renew) for the next commit.
+    void set_next_commit_options(const CommitOptions& opts) {
+        LoroCommitOptions c = opts.to_c();
+        detail::check(loro_doc_set_next_commit_options(handle_.get(), c));
+    }
+    /// Clears any options previously set for the next commit.
+    void clear_next_commit_options() {
+        detail::check(loro_doc_clear_next_commit_options(handle_.get()));
+    }
+    /// Commits the pending operations using the given options.
+    void commit_with(const CommitOptions& opts) {
+        LoroCommitOptions c = opts.to_c();
+        detail::check(loro_doc_commit_with(handle_.get(), c));
+    }
+
+    // ---- G6.3: doc method tail ----
+
+    /// Forces the document into attached mode, re-syncing the state to the latest version.
+    void attach() { detail::check(loro_doc_attach(handle_.get())); }
+    /// Forces the document into detached mode (imports recorded in the OpLog only until reattach).
+    void detach() { detail::check(loro_doc_detach(handle_.get())); }
+
+    /// Looks up any container by container-id string as a type-erased Container (std::nullopt if
+    /// absent or `cid` is unparseable).
+    std::optional<Container> get_container(std::string_view cid) const {
+        LoroContainer* c = loro_doc_get_container(handle_.get(), cid.data(), cid.size());
+        if (!c) return std::nullopt;
+        return Container(c);
+    }
+
+    /// The document's deep value including container ids, as a JSON string.
+    std::string deep_value_with_id() const {
+        detail::Bytes b;
+        detail::check(loro_doc_get_deep_value_with_id_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// The operation id spans between versions `from` and `to`, as a JSON string
+    /// `{"retreat":{…},"forward":{…}}` keyed by peer.
+    std::string find_id_spans_between(const Frontiers& from, const Frontiers& to) const {
+        detail::Bytes b;
+        detail::check(
+            loro_doc_find_id_spans_between(handle_.get(), from.raw(), to.raw(), b.out()));
+        return b.to_string();
     }
 
     /// Subscribes to pre-commit events. The callback returns true to stay subscribed (false

@@ -2,6 +2,7 @@
 //! commit, peer id, snapshot & update export/import, whole-document JSON, and obtaining
 //! the root `LoroText` container.
 
+use crate::container::any::LoroContainer;
 use crate::container::counter::LoroCounter;
 use crate::container::list::LoroList;
 use crate::container::map::LoroMap;
@@ -1119,6 +1120,135 @@ pub extern "C" fn loro_doc_get_change(
             None => {
                 set_last_error("no change at the given id");
                 LoroStatus::LORO_ERR_NOT_FOUND
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.3 — Doc method tail
+// ---------------------------------------------------------------------------
+
+/// Forces the document into attached mode, re-syncing the doc state to the latest version.
+#[no_mangle]
+pub extern "C" fn loro_doc_attach(doc: *const LoroDoc) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().attach();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Forces the document into detached mode: imported updates are recorded in the OpLog only, and
+/// the doc state is frozen until [`loro_doc_attach`] (or a checkout) re-syncs it.
+#[no_mangle]
+pub extern "C" fn loro_doc_detach(doc: *const LoroDoc) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().detach();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Looks up any container by container-id string, returning a type-erased [`LoroContainer`] handle
+/// or null if it does not exist (or `cid` is unparseable). Release with `loro_container_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_container(
+    doc: *const LoroDoc,
+    cid: *const c_char,
+    cid_len: usize,
+) -> *mut LoroContainer {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        let cid = match cid_from_raw(cid, cid_len) {
+            Some(c) => c,
+            None => return std::ptr::null_mut(),
+        };
+        match doc.inner().get_container(cid) {
+            Some(c) => Box::into_raw(Box::new(LoroContainer::from_inner(c))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Writes the document's deep value *including container ids* into `*out` as JSON. Unlike
+/// [`loro_doc_get_deep_value_json`], nested containers carry their id. `*out` is only written on
+/// `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_deep_value_with_id_json(
+    doc: *const LoroDoc,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let value = doc.inner().get_deep_value_with_id();
+        match serde_json::to_vec(&value) {
+            Ok(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(format!("failed to serialize document to JSON: {e}"));
+                LoroStatus::LORO_ERR_ENCODE
+            }
+        }
+    })
+}
+
+/// Serializes an `IdSpanVector` (`peer -> CounterSpan`) to a JSON object `{ "<peer>": {start,end} }`,
+/// with peers sorted for deterministic output.
+fn id_spans_to_json<S: std::hash::BuildHasher>(
+    m: &std::collections::HashMap<u64, loro::CounterSpan, S>,
+) -> serde_json::Value {
+    let mut peers: Vec<u64> = m.keys().copied().collect();
+    peers.sort_unstable();
+    let mut obj = serde_json::Map::new();
+    for peer in peers {
+        let cs = &m[&peer];
+        obj.insert(
+            peer.to_string(),
+            serde_json::json!({ "start": cs.start, "end": cs.end }),
+        );
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Writes the operation id spans between versions `from` and `to` into `*out` as JSON
+/// `{ "retreat": {…}, "forward": {…} }`, where each side is `{ "<peer>": {"start":…, "end":…} }`.
+/// `forward` are spans in `to` but not `from`; `retreat` are spans in `from` but not `to`. `*out`
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_find_id_spans_between(
+    doc: *const LoroDoc,
+    from: *const LoroFrontiers,
+    to: *const LoroFrontiers,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let from = deref_or!(from, LoroStatus::LORO_ERR_INVALID_ARG);
+        let to = deref_or!(to, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let diff = doc.inner().find_id_spans_between(from.inner(), to.inner());
+        let value = serde_json::json!({
+            "retreat": id_spans_to_json(&diff.retreat),
+            "forward": id_spans_to_json(&diff.forward),
+        });
+        match serde_json::to_vec(&value) {
+            Ok(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(format!("failed to serialize id spans to JSON: {e}"));
+                LoroStatus::LORO_ERR_ENCODE
             }
         }
     })

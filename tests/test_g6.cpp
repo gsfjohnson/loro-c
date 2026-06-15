@@ -194,6 +194,105 @@ static void test_cache_and_hide_controls() {
     (void)doc.has_history_cache();
 }
 
+// ---- G6.3: doc method tail & commit options ----
+
+// commit_with applies the message and timestamp, observable through the change metadata.
+static void test_commit_with_options() {
+    loro::Doc doc;
+    doc.set_peer_id(11);
+    doc.get_text("t").insert(0, "x");
+    doc.commit_with(loro::CommitOptions().message("hello-msg").timestamp(1234567));
+
+    auto ch = doc.get_change(loro::Id{11, 0});
+    CHECK(ch.has_value());
+    CHECK(ch->message() == "hello-msg");
+    CHECK(ch->timestamp() == 1234567);
+}
+
+// set_next_commit_options stages options for the next commit; clear discards them; origin is
+// callable.
+static void test_next_commit_options() {
+    {
+        loro::Doc doc;
+        doc.set_peer_id(12);
+        doc.set_next_commit_options(loro::CommitOptions().message("opt-msg").timestamp(42));
+        doc.get_text("t").insert(0, "a");
+        doc.commit();
+        auto ch = doc.get_change(loro::Id{12, 0});
+        CHECK(ch.has_value());
+        CHECK(ch->message() == "opt-msg");
+        CHECK(ch->timestamp() == 42);
+    }
+    {
+        // A clear drops the staged message: the commit lands with an empty message.
+        loro::Doc doc;
+        doc.set_peer_id(13);
+        doc.set_next_commit_options(loro::CommitOptions().message("dropped"));
+        doc.clear_next_commit_options();
+        doc.get_text("t").insert(0, "a");
+        doc.commit();
+        auto ch = doc.get_change(loro::Id{13, 0});
+        CHECK(ch.has_value());
+        CHECK(ch->message().empty());
+    }
+    {
+        // set_next_commit_origin is callable; the commit still lands as one change.
+        loro::Doc doc;
+        doc.set_peer_id(14);
+        doc.set_next_commit_origin("ui");
+        doc.get_text("t").insert(0, "a");
+        doc.commit();
+        CHECK(doc.len_changes() == 1);
+    }
+}
+
+// detach freezes the doc state; attach re-syncs it.
+static void test_attach_detach() {
+    loro::Doc doc;
+    doc.get_text("t").insert(0, "x");
+    doc.commit();
+    CHECK(doc.is_detached() == false);
+    doc.detach();
+    CHECK(doc.is_detached() == true);
+    doc.attach();
+    CHECK(doc.is_detached() == false);
+}
+
+// get_container resolves any container by id (type-erased); deep_value_with_id carries ids.
+static void test_get_container_and_deep_value() {
+    loro::Doc doc;
+    loro::Map m = doc.get_map("m");
+    m.insert("k", "\"v\"");
+    std::string m_cid = m.id();
+    doc.commit();
+
+    auto c = doc.get_container(m_cid);
+    CHECK(c.has_value());
+    CHECK(c->type() == LORO_CONTAINER_MAP);
+    CHECK(!doc.get_container("cid:99@99:Map").has_value());
+
+    std::string dv = doc.deep_value_with_id();
+    CHECK(dv.find("\"m\"") != std::string::npos);
+}
+
+// find_id_spans_between reports new ops under "forward" (and under "retreat" in reverse).
+static void test_find_id_spans_between() {
+    loro::Doc doc;
+    doc.set_peer_id(1);
+    loro::Frontiers f0 = doc.state_frontiers();
+    doc.get_text("t").insert(0, "AB");
+    doc.commit();
+    loro::Frontiers f1 = doc.state_frontiers();
+
+    std::string fwd = doc.find_id_spans_between(f0, f1);
+    CHECK(fwd.find("forward") != std::string::npos);
+    CHECK(fwd.find("retreat") != std::string::npos);
+    CHECK(fwd.find("\"1\"") != std::string::npos); // peer 1 key
+
+    std::string rev = doc.find_id_spans_between(f1, f0);
+    CHECK(rev.find("\"1\"") != std::string::npos);
+}
+
 int main() {
     test_config_defaults();
     test_config_handle_shares_live_state();
@@ -204,6 +303,11 @@ int main() {
     test_frontiers_and_fork();
     test_get_change();
     test_cache_and_hide_controls();
+    test_commit_with_options();
+    test_next_commit_options();
+    test_attach_detach();
+    test_get_container_and_deep_value();
+    test_find_id_spans_between();
 
     if (failures == 0) {
         std::puts("test_g6: OK");

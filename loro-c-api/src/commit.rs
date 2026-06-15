@@ -17,7 +17,7 @@ use crate::error::{set_last_error, LoroStatus};
 use crate::event::LoroSubscription;
 use crate::value::{str_from_raw, LoroBytes};
 use crate::version::LoroChangeMeta;
-use loro::{FirstCommitFromPeerPayload, PreCommitCallbackPayload};
+use loro::{CommitOptions, FirstCommitFromPeerPayload, PreCommitCallbackPayload};
 use std::os::raw::{c_char, c_void};
 
 // ---------------------------------------------------------------------------
@@ -52,6 +52,104 @@ pub extern "C" fn loro_doc_set_next_commit_timestamp(
     ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
         let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
         doc.inner().set_next_commit_timestamp(timestamp);
+        LoroStatus::LORO_OK
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Commit options (G6.3)
+// ---------------------------------------------------------------------------
+
+/// Options for [`loro_doc_commit_with`] / [`loro_doc_set_next_commit_options`].
+///
+/// A null `origin` / `message` pointer means "unset" (`None`); an empty-but-non-null string is a
+/// real empty value. `has_timestamp == false` leaves the timestamp unset (the current time is used
+/// at commit). `origin` does not persist; `message` does and replicates to peers.
+#[repr(C)]
+pub struct LoroCommitOptions {
+    pub origin: *const c_char,
+    pub origin_len: usize,
+    pub message: *const c_char,
+    pub message_len: usize,
+    pub timestamp: i64,
+    pub has_timestamp: bool,
+    pub immediate_renew: bool,
+}
+
+/// Builds a `loro::CommitOptions` from the C POD. Returns `None` (after recording an error) if a
+/// non-null string field is not valid UTF-8.
+fn build_commit_options(opts: &LoroCommitOptions) -> Option<CommitOptions> {
+    let mut co = CommitOptions::new().immediate_renew(opts.immediate_renew);
+    if !opts.origin.is_null() {
+        let origin = str_from_raw(opts.origin, opts.origin_len)?;
+        co = co.origin(origin);
+    }
+    if !opts.message.is_null() {
+        let message = str_from_raw(opts.message, opts.message_len)?;
+        co = co.commit_msg(message);
+    }
+    if opts.has_timestamp {
+        co = co.timestamp(opts.timestamp);
+    }
+    Some(co)
+}
+
+/// Commits the pending operations using `opts` (origin / message / timestamp / immediate_renew).
+#[no_mangle]
+pub extern "C" fn loro_doc_commit_with(doc: *const LoroDoc, opts: LoroCommitOptions) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let co = match build_commit_options(&opts) {
+            Some(co) => co,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        doc.inner().commit_with(co);
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Sets the origin `(origin, origin_len)` to attach to the next commit. The origin is reported to
+/// event/commit subscribers but is not persisted.
+#[no_mangle]
+pub extern "C" fn loro_doc_set_next_commit_origin(
+    doc: *const LoroDoc,
+    origin: *const c_char,
+    origin_len: usize,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let origin = match str_from_raw(origin, origin_len) {
+            Some(s) => s,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        doc.inner().set_next_commit_origin(origin);
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Sets the full options (origin / message / timestamp / immediate_renew) for the next commit.
+#[no_mangle]
+pub extern "C" fn loro_doc_set_next_commit_options(
+    doc: *const LoroDoc,
+    opts: LoroCommitOptions,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let co = match build_commit_options(&opts) {
+            Some(co) => co,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        doc.inner().set_next_commit_options(co);
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Clears any options previously set for the next commit (message / timestamp / origin / options).
+#[no_mangle]
+pub extern "C" fn loro_doc_clear_next_commit_options(doc: *const LoroDoc) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        doc.inner().clear_next_commit_options();
         LoroStatus::LORO_OK
     })
 }

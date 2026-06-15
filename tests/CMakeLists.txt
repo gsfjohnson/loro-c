@@ -8,6 +8,11 @@ add_executable(loro_test_text test_text.cpp)
 target_link_libraries(loro_test_text PRIVATE loro::loro)
 add_test(NAME test_text COMMAND loro_test_text)
 
+# G1 rich text: marks, deltas, expand semantics, UTF-16, convert_pos.
+add_executable(loro_test_richtext test_richtext.cpp)
+target_link_libraries(loro_test_richtext PRIVATE loro::loro)
+add_test(NAME test_richtext COMMAND loro_test_richtext)
+
 # M2 containers.
 add_executable(loro_test_map_list test_map_list.cpp)
 target_link_libraries(loro_test_map_list PRIVATE loro::loro)
@@ -45,6 +50,7 @@ add_test(NAME test_c_only COMMAND loro_test_c_only)
 if(TARGET loro_cargo_build)
     add_dependencies(loro_test_doc loro_cargo_build)
     add_dependencies(loro_test_text loro_cargo_build)
+    add_dependencies(loro_test_richtext loro_cargo_build)
     add_dependencies(loro_test_map_list loro_cargo_build)
     add_dependencies(loro_test_movable_list loro_cargo_build)
     add_dependencies(loro_test_counter loro_cargo_build)

@@ -24,6 +24,7 @@ pub mod fractional_index;
 // The `loro` dependency unconditionally enables its `jsonpath` feature (see Cargo.toml),
 // so this module is always available.
 pub mod jsonpath;
+pub mod style;
 pub mod undo;
 pub mod value;
 pub mod version;

@@ -87,6 +87,25 @@ typedef enum LoroContainerType {
 } LoroContainerType;
 
 /**
+ * Indexing coordinate system for text positions. Mirrors the common subset of
+ * `loro::cursor::PosType`.
+ */
+typedef enum LoroPosType {
+    /**
+     * Index counts UTF-8 bytes.
+     */
+    LORO_POS_BYTES = 0,
+    /**
+     * Index counts Unicode code points.
+     */
+    LORO_POS_UNICODE = 1,
+    /**
+     * Index counts UTF-16 code units.
+     */
+    LORO_POS_UTF16 = 2,
+} LoroPosType;
+
+/**
  * How a diff event was triggered. Mirrors `loro::EventTriggerKind`.
  */
 typedef enum LoroEventTriggerKind {
@@ -116,6 +135,29 @@ typedef enum LoroDiffKind {
     LORO_DIFF_COUNTER = 4,
     LORO_DIFF_UNKNOWN = 5,
 } LoroDiffKind;
+
+/**
+ * How a text mark expands when text is inserted at its boundaries. Mirrors
+ * `loro::ExpandType`.
+ */
+typedef enum LoroExpandType {
+    /**
+     * Inserting text just before the range extends the mark to cover it.
+     */
+    LORO_EXPAND_BEFORE = 0,
+    /**
+     * Inserting text just after the range extends the mark to cover it (the usual default).
+     */
+    LORO_EXPAND_AFTER = 1,
+    /**
+     * Inserting text at either boundary extends the mark.
+     */
+    LORO_EXPAND_BOTH = 2,
+    /**
+     * The mark never expands at its boundaries.
+     */
+    LORO_EXPAND_NONE = 3,
+} LoroExpandType;
 
 /**
  * Whether a pushed/popped item belongs to the undo or the redo stack. Mirrors
@@ -224,6 +266,13 @@ typedef struct LoroMovableList LoroMovableList;
  * `loro::PreCommitCallbackPayload`.
  */
 typedef struct LoroPreCommitPayload LoroPreCommitPayload;
+
+/**
+ * Opaque, mutable builder mapping style keys to their expand behaviour. Create with
+ * [`loro_style_config_map_new`], populate with [`loro_style_config_map_insert`], hand to
+ * [`loro_doc_config_text_style`], then release with [`loro_style_config_map_free`].
+ */
+typedef struct LoroStyleConfigMap LoroStyleConfigMap;
 
 /**
  * Opaque subscription handle / unsubscriber. Free with [`loro_subscription_free`]
@@ -358,6 +407,16 @@ typedef struct LoroJsonPathSubscriber {
     void *user_data;
     void (*free_user_data)(void*);
 } LoroJsonPathSubscriber;
+
+/**
+ * Expand configuration for a single style key. Plain-old-data, passed by value.
+ */
+typedef struct LoroStyleConfig {
+    /**
+     * Expand behaviour for marks created with this key.
+     */
+    enum LoroExpandType expand;
+} LoroStyleConfig;
 
 /**
  * A half-open span of op counters `[start, end)` for the change being pushed/popped.
@@ -1121,6 +1180,164 @@ bool loro_text_is_empty(const struct LoroText *text);
 enum LoroStatus loro_text_to_string(const struct LoroText *text, struct LoroBytes *out);
 
 /**
+ * Marks the range `[from, to)` (Unicode codepoint indices) with `key` = `value`, where
+ * `value` is a JSON-encoded value (e.g. `true` for bold, or `"https://…"` for a link).
+ * Use the doc-level style config to control how the mark expands at its boundaries.
+ */
+enum LoroStatus loro_text_mark(struct LoroText *text,
+                               uintptr_t from,
+                               uintptr_t to,
+                               const char *key,
+                               uintptr_t key_len,
+                               const char *value,
+                               uintptr_t value_len);
+
+/**
+ * Like [`loro_text_mark`] but `from`/`to` are UTF-8 byte indices.
+ */
+enum LoroStatus loro_text_mark_utf8(struct LoroText *text,
+                                    uintptr_t from,
+                                    uintptr_t to,
+                                    const char *key,
+                                    uintptr_t key_len,
+                                    const char *value,
+                                    uintptr_t value_len);
+
+/**
+ * Like [`loro_text_mark`] but `from`/`to` are UTF-16 code unit indices.
+ */
+enum LoroStatus loro_text_mark_utf16(struct LoroText *text,
+                                     uintptr_t from,
+                                     uintptr_t to,
+                                     const char *key,
+                                     uintptr_t key_len,
+                                     const char *value,
+                                     uintptr_t value_len);
+
+/**
+ * Removes the mark `key` over the range `[from, to)` (Unicode codepoint indices). Use the
+ * same expand type that was used when marking. Cannot delete unmergeable annotations.
+ */
+enum LoroStatus loro_text_unmark(struct LoroText *text,
+                                 uintptr_t from,
+                                 uintptr_t to,
+                                 const char *key,
+                                 uintptr_t key_len);
+
+/**
+ * Like [`loro_text_unmark`] but `from`/`to` are UTF-16 code unit indices.
+ */
+enum LoroStatus loro_text_unmark_utf16(struct LoroText *text,
+                                       uintptr_t from,
+                                       uintptr_t to,
+                                       const char *key,
+                                       uintptr_t key_len);
+
+/**
+ * Writes the rich-text value as a JSON delta-with-attributes array (e.g.
+ * `[{"insert":"Hello","attributes":{"bold":true}},{"insert":" world"}]`) into `*out`.
+ * `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_text_get_richtext_value(const struct LoroText *text, struct LoroBytes *out);
+
+/**
+ * Writes the text in [Quill Delta](https://quilljs.com/docs/delta/) format as a JSON array
+ * into `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_text_to_delta(const struct LoroText *text, struct LoroBytes *out);
+
+/**
+ * Applies a [Quill Delta](https://quilljs.com/docs/delta/), supplied as a JSON array
+ * `(delta, len)`, to the text container.
+ */
+enum LoroStatus loro_text_apply_delta(struct LoroText *text, const char *delta, uintptr_t len);
+
+/**
+ * Replaces the whole content of the text with `(s, len)` by computing and applying a diff.
+ * `timeout_ms` bounds the diff computation; pass a negative value for no timeout.
+ * `use_refined_diff` selects the slower-but-more-precise diff algorithm. Returns
+ * `LORO_ERR_OTHER` if the computation times out.
+ */
+enum LoroStatus loro_text_update(struct LoroText *text,
+                                 const char *s,
+                                 uintptr_t len,
+                                 double timeout_ms,
+                                 bool use_refined_diff);
+
+/**
+ * Like [`loro_text_update`] but uses a faster, line-based (less precise) diff.
+ */
+enum LoroStatus loro_text_update_by_line(struct LoroText *text,
+                                         const char *s,
+                                         uintptr_t len,
+                                         double timeout_ms,
+                                         bool use_refined_diff);
+
+/**
+ * Deletes `len` Unicode codepoints at `pos`, then inserts `(s, s_len)` there. Writes the
+ * removed text (UTF-8) into `*out`. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`.
+ */
+enum LoroStatus loro_text_splice(struct LoroText *text,
+                                 uintptr_t pos,
+                                 uintptr_t len,
+                                 const char *s,
+                                 uintptr_t s_len,
+                                 struct LoroBytes *out);
+
+/**
+ * Writes the substring over the Unicode codepoint range `[start, end)` (UTF-8) into
+ * `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_text_slice(const struct LoroText *text,
+                                uintptr_t start,
+                                uintptr_t end,
+                                struct LoroBytes *out);
+
+/**
+ * Writes the single Unicode character at codepoint index `pos` (encoded as 1–4 UTF-8
+ * bytes) into `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_text_char_at(const struct LoroText *text,
+                                  uintptr_t pos,
+                                  struct LoroBytes *out);
+
+/**
+ * Inserts the UTF-8 string `(s, len)` at UTF-16 code unit index `pos`.
+ */
+enum LoroStatus loro_text_insert_utf16(struct LoroText *text,
+                                       uintptr_t pos,
+                                       const char *s,
+                                       uintptr_t len);
+
+/**
+ * Deletes `len` UTF-16 code units starting at UTF-16 code unit index `pos`.
+ */
+enum LoroStatus loro_text_delete_utf16(struct LoroText *text, uintptr_t pos, uintptr_t len);
+
+/**
+ * Returns the length of the text in UTF-16 code units. Returns 0 on a null handle.
+ */
+uintptr_t loro_text_len_utf16(const struct LoroText *text);
+
+/**
+ * Converts `index` from the `from` coordinate system to the `to` coordinate system,
+ * writing the result into `*out`. `*out` is only written on `LORO_OK`. Returns
+ * `LORO_ERR_INVALID_ARG` if the position is out of bounds or the conversion is
+ * unsupported.
+ */
+enum LoroStatus loro_text_convert_pos(const struct LoroText *text,
+                                      uintptr_t index,
+                                      enum LoroPosType from,
+                                      enum LoroPosType to,
+                                      uintptr_t *out);
+
+/**
+ * Appends the UTF-8 string `(s, len)` to the end of the text container.
+ */
+enum LoroStatus loro_text_push_str(struct LoroText *text, const char *s, uintptr_t len);
+
+/**
  * Frees a tree handle. Passing null is a no-op. Safe to call before or after the
  * originating `LoroDoc*` is freed.
  */
@@ -1606,6 +1823,39 @@ struct LoroSubscription *loro_doc_subscribe_jsonpath(const struct LoroDoc *doc,
                                                      const char *path,
                                                      uintptr_t path_len,
                                                      struct LoroJsonPathSubscriber callback);
+
+/**
+ * Creates an empty style-config map. Release with [`loro_style_config_map_free`].
+ */
+struct LoroStyleConfigMap *loro_style_config_map_new(void);
+
+/**
+ * Inserts/overwrites the entry for style `key` (a UTF-8 string `(key, key_len)`, which
+ * must not contain `:`).
+ */
+enum LoroStatus loro_style_config_map_insert(struct LoroStyleConfigMap *map,
+                                             const char *key,
+                                             uintptr_t key_len,
+                                             struct LoroStyleConfig config);
+
+/**
+ * Frees a style-config map. Passing null is a no-op.
+ */
+void loro_style_config_map_free(struct LoroStyleConfigMap *map);
+
+/**
+ * Applies the style configuration in `map` to `doc`. The map is copied; the caller still
+ * owns it and must free it.
+ */
+enum LoroStatus loro_doc_config_text_style(const struct LoroDoc *doc,
+                                           const struct LoroStyleConfigMap *map);
+
+/**
+ * Sets the document's default text style (used for any key without an explicit entry).
+ * Pass a null `config` to reset the default.
+ */
+enum LoroStatus loro_doc_config_default_text_style(const struct LoroDoc *doc,
+                                                   const struct LoroStyleConfig *config);
 
 /**
  * Creates an undo manager bound to `doc`'s current peer. Release with

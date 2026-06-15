@@ -126,6 +126,12 @@ using ContainerType = ::LoroContainerType;
 /// Identifies a tree node (`peer`, `counter`). Alias of the C ABI struct.
 using TreeId = ::LoroTreeID;
 
+/// Text position coordinate system (bytes / Unicode / UTF-16). Alias of the C ABI enum.
+using PosType = ::LoroPosType;
+
+/// How a text mark expands at its boundaries. Alias of the C ABI enum.
+using ExpandType = ::LoroExpandType;
+
 /// RAII wrapper around a `LoroText*` container handle. Move-only.
 class Text {
 public:
@@ -178,6 +184,118 @@ public:
         detail::Bytes b;
         detail::check(loro_text_to_string(handle_.get(), b.out()));
         return b.to_string();
+    }
+
+    // --- G1: rich text ---
+
+    /// Marks the range `[from, to)` (Unicode codepoint indices) with `key` = `value`,
+    /// where `value` is a JSON-encoded value (e.g. "true" for bold, "\"https://…\"" for a
+    /// link).
+    void mark(std::size_t from, std::size_t to, std::string_view key, std::string_view value) {
+        detail::check(loro_text_mark(handle_.get(), from, to, key.data(), key.size(),
+                                     value.data(), value.size()));
+    }
+
+    /// Like `mark`, but `from`/`to` are UTF-8 byte indices.
+    void mark_utf8(std::size_t from, std::size_t to, std::string_view key,
+                   std::string_view value) {
+        detail::check(loro_text_mark_utf8(handle_.get(), from, to, key.data(), key.size(),
+                                          value.data(), value.size()));
+    }
+
+    /// Like `mark`, but `from`/`to` are UTF-16 code unit indices.
+    void mark_utf16(std::size_t from, std::size_t to, std::string_view key,
+                    std::string_view value) {
+        detail::check(loro_text_mark_utf16(handle_.get(), from, to, key.data(), key.size(),
+                                           value.data(), value.size()));
+    }
+
+    /// Removes the mark `key` over the range `[from, to)` (Unicode codepoint indices).
+    void unmark(std::size_t from, std::size_t to, std::string_view key) {
+        detail::check(loro_text_unmark(handle_.get(), from, to, key.data(), key.size()));
+    }
+
+    /// Like `unmark`, but `from`/`to` are UTF-16 code unit indices.
+    void unmark_utf16(std::size_t from, std::size_t to, std::string_view key) {
+        detail::check(loro_text_unmark_utf16(handle_.get(), from, to, key.data(), key.size()));
+    }
+
+    /// The rich-text value as a JSON delta-with-attributes array.
+    std::string get_richtext_value() const {
+        detail::Bytes b;
+        detail::check(loro_text_get_richtext_value(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// The text in Quill Delta format as a JSON array string.
+    std::string to_delta() const {
+        detail::Bytes b;
+        detail::check(loro_text_to_delta(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// Applies a Quill Delta (a JSON array string) to the text.
+    void apply_delta(std::string_view delta) {
+        detail::check(loro_text_apply_delta(handle_.get(), delta.data(), delta.size()));
+    }
+
+    /// Replaces the whole content with `s` by diffing. `timeout_ms < 0` means no timeout.
+    void update(std::string_view s, double timeout_ms = -1.0, bool use_refined_diff = true) {
+        detail::check(
+            loro_text_update(handle_.get(), s.data(), s.size(), timeout_ms, use_refined_diff));
+    }
+
+    /// Like `update`, but uses a faster, line-based diff.
+    void update_by_line(std::string_view s, double timeout_ms = -1.0,
+                        bool use_refined_diff = true) {
+        detail::check(loro_text_update_by_line(handle_.get(), s.data(), s.size(), timeout_ms,
+                                               use_refined_diff));
+    }
+
+    /// Deletes `len` codepoints at `pos`, inserts `s` there; returns the removed text.
+    std::string splice(std::size_t pos, std::size_t len, std::string_view s) {
+        detail::Bytes b;
+        detail::check(loro_text_splice(handle_.get(), pos, len, s.data(), s.size(), b.out()));
+        return b.to_string();
+    }
+
+    /// The substring over the Unicode codepoint range `[start, end)`.
+    std::string slice(std::size_t start, std::size_t end) const {
+        detail::Bytes b;
+        detail::check(loro_text_slice(handle_.get(), start, end, b.out()));
+        return b.to_string();
+    }
+
+    /// The single Unicode character at codepoint index `pos` (as a UTF-8 std::string).
+    std::string char_at(std::size_t pos) const {
+        detail::Bytes b;
+        detail::check(loro_text_char_at(handle_.get(), pos, b.out()));
+        return b.to_string();
+    }
+
+    /// Inserts `s` (UTF-8) at UTF-16 code unit index `pos`.
+    void insert_utf16(std::size_t pos, std::string_view s) {
+        detail::check(loro_text_insert_utf16(handle_.get(), pos, s.data(), s.size()));
+    }
+
+    /// Deletes `len` UTF-16 code units starting at UTF-16 code unit index `pos`.
+    void remove_utf16(std::size_t pos, std::size_t len) {
+        detail::check(loro_text_delete_utf16(handle_.get(), pos, len));
+    }
+
+    /// Length in UTF-16 code units.
+    std::size_t len_utf16() const { return loro_text_len_utf16(handle_.get()); }
+
+    /// Converts `index` from the `from` coordinate system to the `to` coordinate system.
+    std::size_t convert_pos(std::size_t index, PosType from, PosType to) const {
+        std::size_t out = 0;
+        detail::check(loro_text_convert_pos(handle_.get(), index, from, to, &out));
+        return out;
+    }
+
+    /// Appends `s` (UTF-8) to the end of the text.
+    void push_str(std::string_view s) {
+        detail::check(loro_text_push_str(handle_.get(), s.data(), s.size()));
     }
 
 private:
@@ -1557,6 +1675,31 @@ private:
     std::unique_ptr<LoroUndoManager, Deleter> handle_;
 };
 
+/// RAII builder mapping text-style keys to their expand behaviour. Pass to
+/// `Doc::config_text_style`. Move-only.
+class StyleConfigMap {
+public:
+    StyleConfigMap() : handle_(loro_style_config_map_new()) {
+        if (!handle_) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    }
+
+    /// The underlying C handle (non-owning).
+    LoroStyleConfigMap* raw() const noexcept { return handle_.get(); }
+
+    /// Sets the expand behaviour for marks created with style `key` (must not contain `:`).
+    void insert(std::string_view key, ExpandType expand) {
+        LoroStyleConfig config{expand};
+        detail::check(
+            loro_style_config_map_insert(handle_.get(), key.data(), key.size(), config));
+    }
+
+private:
+    struct Deleter {
+        void operator()(LoroStyleConfigMap* p) const noexcept { loro_style_config_map_free(p); }
+    };
+    std::unique_ptr<LoroStyleConfigMap, Deleter> handle_;
+};
+
 /// RAII wrapper around a `LoroDoc*`. Move-only.
 class Doc {
 public:
@@ -1601,6 +1744,23 @@ public:
     /// Returns the root counter container `id`, creating it if absent.
     Counter get_counter(std::string_view id) {
         return Counter(loro_doc_get_counter(handle_.get(), id.data(), id.size()));
+    }
+
+    /// Applies a text-style configuration (controls mark expand semantics). The map is
+    /// copied; the caller still owns it.
+    void config_text_style(const StyleConfigMap& styles) {
+        detail::check(loro_doc_config_text_style(handle_.get(), styles.raw()));
+    }
+
+    /// Sets the default text style used for any key without an explicit entry.
+    void config_default_text_style(ExpandType expand) {
+        LoroStyleConfig config{expand};
+        detail::check(loro_doc_config_default_text_style(handle_.get(), &config));
+    }
+
+    /// Resets the default text style.
+    void reset_default_text_style() {
+        detail::check(loro_doc_config_default_text_style(handle_.get(), nullptr));
     }
 
     /// Commits pending operations into the oplog.

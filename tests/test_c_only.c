@@ -23,6 +23,17 @@ static int bytes_eq(const LoroBytes* b, const char* s) {
     return b->len == n && (n == 0 || memcmp(b->data, s, n) == 0);
 }
 
+/* Whether the (non-nul-terminated) LoroBytes buffer contains `s` as a substring. */
+static int bytes_contains(const LoroBytes* b, const char* s) {
+    size_t n = strlen(s);
+    if (n == 0) return 1;
+    if (b->len < n) return 0;
+    for (size_t i = 0; i + n <= b->len; ++i) {
+        if (memcmp(b->data + i, s, n) == 0) return 1;
+    }
+    return 0;
+}
+
 static void test_snapshot_round_trip(void) {
     LoroDoc* doc = loro_doc_new();
     CHECK(doc != NULL);
@@ -296,6 +307,64 @@ static void test_advanced_c(void) {
     loro_fractional_index_free(lo);
 }
 
+/* G1: rich text from plain C — mark/unmark, richtext-value JSON, splice, push_str, and the
+ * style-config builder + doc config. */
+static void test_richtext_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    LoroText* t = loro_doc_get_text(doc, "t", 1);
+    CHECK(loro_text_insert(t, 0, "Hello world!", 12) == LORO_OK);
+
+    /* "bold" is in the default rich-text config, so this marks without extra setup. */
+    CHECK(loro_text_mark(t, 0, 5, "bold", 4, "true", 4) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    LoroBytes rv = {0};
+    CHECK(loro_text_get_richtext_value(t, &rv) == LORO_OK);
+    CHECK(bytes_contains(&rv, "bold"));
+    CHECK(bytes_contains(&rv, "Hello"));
+    loro_bytes_free(rv);
+
+    LoroBytes delta = {0};
+    CHECK(loro_text_to_delta(t, &delta) == LORO_OK);
+    CHECK(bytes_contains(&delta, "bold"));
+    loro_bytes_free(delta);
+
+    CHECK(loro_text_unmark(t, 0, 5, "bold", 4) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    /* splice returns the removed slice: "Hello world!" -> "world!". */
+    LoroBytes removed = {0};
+    CHECK(loro_text_splice(t, 0, 6, "", 0, &removed) == LORO_OK);
+    CHECK(bytes_eq(&removed, "Hello "));
+    loro_bytes_free(removed);
+
+    CHECK(loro_text_push_str(t, "X", 1) == LORO_OK);
+    LoroBytes str = {0};
+    CHECK(loro_text_to_string(t, &str) == LORO_OK);
+    CHECK(bytes_eq(&str, "world!X"));
+    loro_bytes_free(str);
+
+    loro_text_free(t);
+    loro_doc_free(doc);
+
+    /* style-config builder + doc config, then mark with the custom key. */
+    LoroDoc* d2 = loro_doc_new();
+    LoroStyleConfigMap* styles = loro_style_config_map_new();
+    CHECK(styles != NULL);
+    LoroStyleConfig cfg;
+    cfg.expand = LORO_EXPAND_NONE;
+    CHECK(loro_style_config_map_insert(styles, "fmt", 3, cfg) == LORO_OK);
+    CHECK(loro_doc_config_text_style(d2, styles) == LORO_OK);
+    loro_style_config_map_free(styles);
+
+    LoroText* t2 = loro_doc_get_text(d2, "t", 1);
+    CHECK(loro_text_insert(t2, 0, "abc", 3) == LORO_OK);
+    CHECK(loro_text_mark(t2, 0, 3, "fmt", 3, "true", 4) == LORO_OK);
+    CHECK(loro_doc_commit(d2) == LORO_OK);
+    loro_text_free(t2);
+    loro_doc_free(d2);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -304,6 +373,7 @@ int main(void) {
     test_containers();
     test_subscribe();
     test_advanced_c();
+    test_richtext_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

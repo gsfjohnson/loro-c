@@ -8,6 +8,8 @@ To consume Loro from a C++ project, the cleanest path is a **purpose-built Rust�
 
 Per the user's choices, the v1 surface targets **full parity with `loro-ffi`** (LoroDoc + Text/Map/List/MovableList/Tree/Counter + events/subscriptions + Awareness + EphemeralStore + UndoManager + FractionalIndex + version vectors/frontiers + JSON Path). This is a sizeable surface (`loro-ffi` exposes ~23 interfaces); the work is staged into milestones M1–M5 below.
 
+> **Update (post-M5):** M1–M5 landed a strong *subset*, not full parity — an audit against upstream [`loro.udl`](https://github.com/loro-dev/loro-ffi/blob/main/src/loro.udl) put real coverage at roughly **70%**. The "full parity" goal above is superseded by the staged remaining work in [GAPS_PLAN.md](GAPS_PLAN.md) (milestones G1–G6: rich text, cursors, JSON-update sync, diff/patch, structured values, and the doc-utility/attribution long tail). Rich text (G1) has since landed.
+
 The end product: a CMake target `loro::loro` exposing `#include <loro/loro.hpp>`, statically linked, that any C++20 project can `target_link_libraries(... loro::loro)` against.
 
 ## High-level architecture

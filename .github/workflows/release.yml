@@ -1,0 +1,280 @@
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# gh release upload needs write access to the repo's releases.
+permissions:
+  contents: write
+
+# Release builds across the three supported platforms. Each job:
+#   1. Configures + builds + runs the test suite (BUILD_TESTING=ON) in Release.
+#   2. Installs to a job-local prefix.
+#   3. Builds the standalone find_package consumer against the install tree,
+#      confirming loroConfig + loro-targets resolve and the static link list is
+#      complete (pkg-config path additionally verified on Linux).
+#   4. Packages the install tree (.tar.gz on Linux/macOS, .zip on Windows).
+#   5. Uploads it as a run artifact, and — when triggered by a published
+#      release — attaches it to the GitHub Release.
+#
+# Unlike ../loro-cpp this repo has no CPack/packaging setup, so the install
+# tree is archived directly. Windows uses the GitHub runner's native MSVC
+# toolchain via the default Corrosion path (the same path ci.yml exercises);
+# the dev-box MSYS2/CLANG64 gnullvm workaround is not needed here because the
+# hosted runner has a working link.exe.
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned runner images (not *-latest) so the uploaded artifact names
+          # stay stable across runs. These mirror ci.yml's matrix.
+          - os: ubuntu-22.04
+            artifact: linux-x86_64
+          - os: macos-latest
+            artifact: macos-arm64
+          # Native MSVC toolchain (default Corrosion path). ABI-incompatible
+          # with the gnullvm artifact built by the build-windows-gnullvm job
+          # below — consumers pick the one matching their compiler.
+          - os: windows-2022
+            artifact: windows-x86_64-msvc
+
+    env:
+      # GitHub-expanded before any shell sees it, so this is shell-agnostic
+      # (pwsh on Windows, bash on Linux/macOS). Native cmake on every runner
+      # accepts this drive-letter / forward-slash path.
+      INSTALL_DIR: ${{ github.workspace }}/install
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+
+      # CMAKE_BUILD_TYPE drives single-config generators (Make/Ninja on
+      # Linux/macOS); --config drives the multi-config Visual Studio generator
+      # on Windows. Passing both is the standard cross-generator pattern — each
+      # ignores the one it doesn't use. (Same approach as ci.yml.)
+      - name: Configure (Release)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
+          -DLORO_BUILD_EXAMPLES=ON
+          -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Install
+        run: cmake --install build --config Release
+
+      # The only real test of transitive static linkage: build a downstream
+      # project against the install tree via find_package(loro), then run it.
+      # Catches a missing system lib in the per-platform lists baked into
+      # loroConfig.cmake.
+      - name: Consumer find_package smoke test
+        run: >
+          cmake -S tests/consumer -B build-consumer
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="${{ env.INSTALL_DIR }}" &&
+          cmake --build build-consumer --config Release &&
+          ctest --test-dir build-consumer -C Release --output-on-failure
+
+      # pkg-config is the other supported discovery path; validate it on Linux.
+      - name: Consumer pkg-config smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export PKG_CONFIG_PATH="${{ env.INSTALL_DIR }}/lib/pkgconfig:${{ env.INSTALL_DIR }}/lib64/pkgconfig"
+          pkg-config --exists loro
+          echo "cflags: $(pkg-config --cflags loro)"
+          echo "libs:   $(pkg-config --libs --static loro)"
+          c++ -std=c++20 tests/consumer/main.cpp $(pkg-config --cflags loro) \
+            $(pkg-config --libs --static loro) -o consumer_pc
+          ./consumer_pc
+
+      # ----- Package the install tree --------------------------------------
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: tar czf "loro-c-${{ matrix.artifact }}.tar.gz" -C "${{ env.INSTALL_DIR }}" .
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "${{ env.INSTALL_DIR }}/*" -DestinationPath "loro-c-${{ matrix.artifact }}.zip"
+
+      # Run artifact: visible on the Actions run page (expires in 90 days).
+      # Both patterns are listed; only the one matching this OS exists, which is
+      # fine — upload-artifact only errors when *no* pattern matches.
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loro-c-${{ matrix.artifact }}
+          path: |
+            loro-c-${{ matrix.artifact }}.tar.gz
+            loro-c-${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+      # Populate the Release page itself by attaching the same archive to the
+      # release that triggered this workflow. Skipped on manual workflow_dispatch
+      # runs (which still produce the run artifact above).
+      - name: Attach to GitHub Release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          shopt -s nullglob
+          files=(loro-c-${{ matrix.artifact }}.*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No archive found to upload" >&2
+            exit 1
+          fi
+          gh release upload "$TAG" "${files[@]}" --clobber
+
+  # Second Windows artifact: the MSYS2/CLANG64 gnullvm build. ABI-compatible
+  # with mingw/clang downstreams (the MSVC artifact from the build job is not).
+  # This reproduces the local dev-box toolchain — gnullvm Rust host + CLANG64
+  # clang + Ninja — and uses the manual cargo->CMake path (LORO_USE_CORROSION
+  # =OFF), because Corrosion's absolute-path handling breaks under MSYS2's
+  # POSIX cmake (see CMakeLists.txt:11-15 and cmake/BuildRustStaticlib.cmake).
+  # It is a separate job rather than a matrix entry because the shell, toolchain
+  # setup, and path handling diverge wholesale from the native jobs above.
+  build-windows-gnullvm:
+    name: windows-2022 (gnullvm)
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        shell: 'msys2 {0}'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # path-type: inherit appends the Windows PATH after MSYS2's, so the shell
+      # can see rustup's ~/.cargo/bin (added to the Windows PATH via $GITHUB_PATH
+      # in "Expose rustup" below). cmake/ninja are pulled from the MSYS2 *base*
+      # repo (msys/cmake, msys/ninja), NOT the mingw-prefixed CLANG64 packages:
+      # the base-repo build reports CMAKE_HOST_SYSTEM_NAME == "MSYS" and consumes
+      # POSIX paths, which is what the manual build path expects and matches the
+      # dev box (where CMake's WIN32 is unset though the gnullvm target is
+      # Windows). clang/pkgconf come from CLANG64 for the C/C++ layer + tests.
+      - name: Setup MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          path-type: inherit
+          install: >-
+            git
+            cmake
+            ninja
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-pkgconf
+
+      # Installs rustup + stable and puts ~/.cargo/bin on the Windows PATH.
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+
+      # The rustup toolchain isn't on the MSYS2 PATH by default. cygpath -u
+      # converts $USERPROFILE (C:\Users\…) to MSYS form (/c/Users/…); embedding
+      # the raw Windows path breaks $PATH because the drive-letter colon reads as
+      # a PATH separator.
+      - name: Expose rustup to MSYS2
+        run: |
+          CARGO_BIN="$(cygpath -u "$USERPROFILE")/.cargo/bin"
+          echo "$CARGO_BIN" >> "$GITHUB_PATH"
+          export PATH="$CARGO_BIN:$PATH"
+          rustc --version
+          cargo --version
+
+      # The runner's default toolchain is msvc-host; install the gnullvm-host
+      # toolchain that the manual build pins via LORO_RUST_TOOLCHAIN. With a
+      # gnullvm host the build target == host, so std is present and linking goes
+      # through the gnullvm (clang/lld) linker rather than MSVC link.exe.
+      - name: Install gnullvm Rust toolchain
+        run: rustup toolchain install --no-self-update stable-x86_64-pc-windows-gnullvm
+
+      # MSYS2-base cmake does not treat D:\… (or D:/…) as absolute and would
+      # double-nest the install tree; convert $GITHUB_WORKSPACE to MSYS form so
+      # cmake sees /d/a/…. Exported for the configure/install/consumer steps.
+      - name: Compute workspace paths
+        run: echo "INSTALL_DIR=$(cygpath -u "${GITHUB_WORKSPACE}")/install" >> "${GITHUB_ENV}"
+
+      # Manual path: gnullvm target + the gnullvm toolchain. cmake auto-detects
+      # the CLANG64 clang/clang++ from PATH for the C/C++ layer and tests.
+      - name: Configure (Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DLORO_BUILD_EXAMPLES=ON \
+            -DLORO_USE_CORROSION=OFF \
+            -DLORO_CARGO_TARGET=x86_64-pc-windows-gnullvm \
+            -DLORO_RUST_TOOLCHAIN=stable-x86_64-pc-windows-gnullvm \
+            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install
+        run: cmake --install build
+
+      # find_package against the install tree exercises loro-manual-targets.cmake
+      # (the relocatable IMPORTED archive) + the baked gnullvm system-lib list
+      # (incl. libunwind). This is the real check that the packaged tree links.
+      - name: Consumer find_package smoke test
+        run: |
+          cmake -S tests/consumer -B build-consumer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.INSTALL_DIR }}"
+          cmake --build build-consumer --parallel
+          ctest --test-dir build-consumer --output-on-failure
+
+      # Package as .zip for parity with the MSVC artifact, via pwsh (avoids the
+      # MSYS2 GNU-tar-can't-write-zip issue). The install tree is the same
+      # physical dir as ${{ github.workspace }}/install — pwsh just addresses it
+      # in Windows form.
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path "${{ github.workspace }}/install/*" -DestinationPath "loro-c-windows-x86_64-gnullvm.zip"
+
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loro-c-windows-x86_64-gnullvm
+          path: loro-c-windows-x86_64-gnullvm.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "loro-c-windows-x86_64-gnullvm.zip" --clobber

@@ -1484,6 +1484,53 @@ public:
         return b.to_string();
     }
 
+    /// Merges everything in `other` into this vector (the entrywise maximum / union).
+    void merge(const VersionVector& other) {
+        detail::check(loro_version_vector_merge(handle_.get(), other.raw()));
+    }
+
+    /// Extends this vector so it includes every entry in `other` (entrywise maximum).
+    void extend_to_include(const VersionVector& other) {
+        detail::check(loro_version_vector_extend_to_include_vv(handle_.get(), other.raw()));
+    }
+
+    /// Sets the exclusive end counter for `id`'s peer to `id.counter` (ops `[0, id.counter)`
+    /// from that peer become seen; `id` itself is not included).
+    void set_end(Id id) { detail::check(loro_version_vector_set_end(handle_.get(), id)); }
+
+    /// Treats `id` as the last op seen from its peer and extends the entry to include it only if
+    /// that grows the vector. Returns whether an update happened.
+    bool try_update_last(Id id) {
+        bool updated = false;
+        detail::check(loro_version_vector_try_update_last(handle_.get(), id, &updated));
+        return updated;
+    }
+
+    /// The difference from this vector to `other` as a JSON string
+    /// `{"retreat": [span, ...], "forward": [span, ...]}`, each span
+    /// `{"peer", "counter_start", "counter_end"}`.
+    std::string diff(const VersionVector& other) const {
+        detail::Bytes b;
+        detail::check(loro_version_vector_diff(handle_.get(), other.raw(), b.out()));
+        return b.to_string();
+    }
+
+    /// The spans `other` has seen that this vector is missing, as a JSON array string
+    /// `[{"peer", "counter_start", "counter_end"}, ...]`.
+    std::string get_missing_span(const VersionVector& other) const {
+        detail::Bytes b;
+        detail::check(loro_version_vector_get_missing_span(handle_.get(), other.raw(), b.out()));
+        return b.to_string();
+    }
+
+    /// Intersects `span` with what this vector has seen for that peer, or std::nullopt if the
+    /// intersection is empty.
+    std::optional<CounterSpan> intersect_span(LoroIdSpan span) const {
+        CounterSpan out{};
+        if (!loro_version_vector_intersect_span(handle_.get(), span, &out)) return std::nullopt;
+        return out;
+    }
+
 private:
     struct Deleter {
         void operator()(LoroVersionVector* p) const noexcept { loro_version_vector_free(p); }
@@ -2167,6 +2214,25 @@ public:
         auto* fn = new UndoOnPopFn(std::move(cb));
         LoroUndoOnPop c{detail::loro_hpp_undo_on_pop, fn, detail::loro_hpp_undo_on_pop_free};
         detail::check(loro_undo_manager_set_on_pop(handle_.get(), c));
+    }
+
+    /// The peer id this undo manager is bound to.
+    std::uint64_t peer() const { return loro_undo_manager_peer(handle_.get()); }
+
+    /// The metadata value (stored by an on_push listener) attached to the top undo-stack item,
+    /// as a JSON string, or std::nullopt when the undo stack is empty.
+    std::optional<std::string> top_undo_value_json() const {
+        detail::Bytes b;
+        if (!loro_undo_manager_top_undo_value_json(handle_.get(), b.out())) return std::nullopt;
+        return b.to_string();
+    }
+
+    /// The metadata value attached to the top redo-stack item, as a JSON string, or
+    /// std::nullopt when the redo stack is empty.
+    std::optional<std::string> top_redo_value_json() const {
+        detail::Bytes b;
+        if (!loro_undo_manager_top_redo_value_json(handle_.get(), b.out())) return std::nullopt;
+        return b.to_string();
     }
 
 private:

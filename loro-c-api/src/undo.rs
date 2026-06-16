@@ -239,6 +239,74 @@ pub extern "C" fn loro_undo_manager_redo_count(um: *const LoroUndoManager) -> us
     })
 }
 
+/// Returns the peer id this undo manager is bound to. Returns 0 on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_peer(um: *const LoroUndoManager) -> u64 {
+    ffi_guard!(0u64, {
+        let um = deref_or!(um, 0u64);
+        um.0.peer()
+    })
+}
+
+/// Writes the metadata value attached to the top item of the undo stack (whatever an on_push
+/// listener stored via [`loro_undo_meta_set_value_json`]) as JSON into `*out`. Returns `true`
+/// (and writes `*out`) when there is a top undo item; returns `false` (leaving `*out` untouched)
+/// on a null handle, an empty undo stack, or a serialization error. Free `*out` with
+/// `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_top_undo_value_json(
+    um: *const LoroUndoManager,
+    out: *mut LoroBytes,
+) -> bool {
+    ffi_guard!(false, {
+        let um = deref_or!(um, false);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        top_value_json(um.0.top_undo_value(), out)
+    })
+}
+
+/// Writes the metadata value attached to the top item of the redo stack as JSON into `*out`.
+/// Returns `true` (and writes `*out`) when there is a top redo item; returns `false` (leaving
+/// `*out` untouched) on a null handle, an empty redo stack, or a serialization error. Free
+/// `*out` with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_top_redo_value_json(
+    um: *const LoroUndoManager,
+    out: *mut LoroBytes,
+) -> bool {
+    ffi_guard!(false, {
+        let um = deref_or!(um, false);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        top_value_json(um.0.top_redo_value(), out)
+    })
+}
+
+/// Shared body for `loro_undo_manager_top_{undo,redo}_value_json`: serializes an optional
+/// [`loro::LoroValue`] to JSON and writes it into `*out` (assumed non-null). Returns whether a
+/// value was present and successfully encoded.
+fn top_value_json(value: Option<loro::LoroValue>, out: *mut LoroBytes) -> bool {
+    let value = match value {
+        Some(v) => v,
+        None => return false,
+    };
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => {
+            unsafe { out.write(LoroBytes::from_vec(bytes)) };
+            true
+        }
+        Err(e) => {
+            set_last_error(format!("failed to serialize undo value: {e}"));
+            false
+        }
+    }
+}
+
 /// Records a checkpoint so subsequent edits become a new, separately-undoable item.
 #[no_mangle]
 pub extern "C" fn loro_undo_manager_record_new_checkpoint(

@@ -544,6 +544,99 @@ static void test_g65() {
     }
 }
 
+// ---- G6.6: VersionVector algebra & UndoManager extras ----
+
+// merge / extend_to_include unite two peers' histories; the synthetic set_end / try_update_last /
+// diff / get_missing_span / intersect_span paths are checked against a hand-built vector.
+static void test_g66_vv_algebra() {
+    // Two peers edit independently, producing concurrent oplog version vectors.
+    loro::Doc a;
+    a.set_peer_id(1);
+    a.get_text("t").insert(0, "hello");
+    a.commit();
+    loro::Doc b;
+    b.set_peer_id(2);
+    b.get_text("t").insert(0, "world");
+    b.commit();
+
+    loro::VersionVector av = a.oplog_vv();
+    loro::VersionVector bv = b.oplog_vv();
+    CHECK(!av.includes(bv));  // concurrent: a has peer 1 only, b has peer 2 only
+
+    av.merge(bv);  // a's vv now covers both peers
+    CHECK(av.includes(bv));
+
+    loro::VersionVector av2 = a.oplog_vv();
+    av2.extend_to_include(bv);  // same effect as merge for two vectors
+    CHECK(av2.includes(bv));
+
+    // set_end sets the EXCLUSIVE end, so ops [0,5) for peer 42 are seen (4 yes, 5 no).
+    loro::VersionVector v = loro::VersionVector::create();
+    const std::uint64_t peer = 42;
+    v.set_end(loro::Id{peer, 5});
+    CHECK(v.includes(loro::Id{peer, 4}));
+    CHECK(!v.includes(loro::Id{peer, 5}));
+
+    // try_update_last({42,9}) treats 9 as the last seen op → grows the end to 10, returns true.
+    CHECK(v.try_update_last(loro::Id{peer, 9}) == true);
+    CHECK(v.includes(loro::Id{peer, 9}));
+    // A lower last-op does not grow the vector → returns false.
+    CHECK(v.try_update_last(loro::Id{peer, 3}) == false);
+
+    // diff from empty → v: v's whole span is "forward", "retreat" is empty.
+    loro::VersionVector empty = loro::VersionVector::create();
+    std::string d = empty.diff(v);
+    CHECK(d.find("\"forward\"") != std::string::npos);
+    CHECK(d.find("\"retreat\"") != std::string::npos);
+    CHECK(d.find("\"peer\":42") != std::string::npos);
+
+    // get_missing_span: empty is missing peer 42's [0,10) span.
+    std::string missing = empty.get_missing_span(v);
+    CHECK(missing.find("\"peer\":42") != std::string::npos);
+    CHECK(missing.find("\"counter_start\":0") != std::string::npos);
+    CHECK(missing.find("\"counter_end\":10") != std::string::npos);
+
+    // intersect_span: v has peer 42 up to end 10; [0,20) clamps to [0,10).
+    auto cs = v.intersect_span(LoroIdSpan{peer, 0, 20});
+    CHECK(cs.has_value());
+    CHECK(cs->start == 0);
+    CHECK(cs->end == 10);
+    // A peer the vector has never seen → no intersection.
+    CHECK(!v.intersect_span(LoroIdSpan{999, 0, 5}).has_value());
+}
+
+// peer() reports the bound peer; top_undo/redo_value_json read back the on_push metadata.
+static void test_g66_undo_extras() {
+    loro::Doc doc;
+    loro::Text t = doc.get_text("t");
+    loro::UndoManager um = doc.undo_manager();
+
+    CHECK(um.peer() == doc.peer_id());
+
+    // Empty stacks → no top value.
+    CHECK(!um.top_undo_value_json().has_value());
+    CHECK(!um.top_redo_value_json().has_value());
+
+    // Tag every pushed item with a JSON value.
+    um.set_on_push([&](loro::UndoOrRedo, loro::CounterSpan, const loro::DiffEvent*,
+                       loro::UndoMeta& meta) { meta.set_value("{\"sel\":7}"); });
+
+    t.insert(0, "hello");
+    doc.commit();
+
+    // The top undo item carries the value on_push stored.
+    auto uv = um.top_undo_value_json();
+    CHECK(uv.has_value());
+    CHECK(uv && uv->find("\"sel\":7") != std::string::npos);
+
+    // After undo the item moves to the redo stack (and a redo entry is pushed → tagged too).
+    CHECK(um.undo());
+    CHECK(!um.top_undo_value_json().has_value());
+    auto rv = um.top_redo_value_json();
+    CHECK(rv.has_value());
+    CHECK(rv && rv->find("\"sel\":7") != std::string::npos);
+}
+
 int main() {
     test_config_defaults();
     test_config_handle_shares_live_state();
@@ -565,6 +658,8 @@ int main() {
     test_g64_subscribe_fires();
     test_g64_attribution();
     test_g65();
+    test_g66_vv_algebra();
+    test_g66_undo_extras();
 
     if (failures == 0) {
         std::puts("test_g6: OK");

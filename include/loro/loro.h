@@ -2855,6 +2855,28 @@ uintptr_t loro_undo_manager_undo_count(const struct LoroUndoManager *um);
 uintptr_t loro_undo_manager_redo_count(const struct LoroUndoManager *um);
 
 /**
+ * Returns the peer id this undo manager is bound to. Returns 0 on a null handle.
+ */
+uint64_t loro_undo_manager_peer(const struct LoroUndoManager *um);
+
+/**
+ * Writes the metadata value attached to the top item of the undo stack (whatever an on_push
+ * listener stored via [`loro_undo_meta_set_value_json`]) as JSON into `*out`. Returns `true`
+ * (and writes `*out`) when there is a top undo item; returns `false` (leaving `*out` untouched)
+ * on a null handle, an empty undo stack, or a serialization error. Free `*out` with
+ * `loro_bytes_free`.
+ */
+bool loro_undo_manager_top_undo_value_json(const struct LoroUndoManager *um, struct LoroBytes *out);
+
+/**
+ * Writes the metadata value attached to the top item of the redo stack as JSON into `*out`.
+ * Returns `true` (and writes `*out`) when there is a top redo item; returns `false` (leaving
+ * `*out` untouched) on a null handle, an empty redo stack, or a serialization error. Free
+ * `*out` with `loro_bytes_free`.
+ */
+bool loro_undo_manager_top_redo_value_json(const struct LoroUndoManager *um, struct LoroBytes *out);
+
+/**
  * Records a checkpoint so subsequent edits become a new, separately-undoable item.
  */
 enum LoroStatus loro_undo_manager_record_new_checkpoint(struct LoroUndoManager *um);
@@ -3052,6 +3074,66 @@ struct LoroFrontiers *loro_version_vector_to_frontiers(const struct LoroVersionV
  */
 enum LoroStatus loro_version_vector_to_json(const struct LoroVersionVector *vv,
                                             struct LoroBytes *out);
+
+/**
+ * Merges everything in `other` into `vv` (the entrywise maximum — the union of the two
+ * histories).
+ */
+enum LoroStatus loro_version_vector_merge(struct LoroVersionVector *vv,
+                                          const struct LoroVersionVector *other);
+
+/**
+ * Extends `vv` so it includes every entry in `other` (entrywise maximum). Equivalent in effect
+ * to [`loro_version_vector_merge`] for two version vectors.
+ */
+enum LoroStatus loro_version_vector_extend_to_include_vv(struct LoroVersionVector *vv,
+                                                         const struct LoroVersionVector *other);
+
+/**
+ * Sets the exclusive end counter for `id`'s peer to `id.counter`: ops `[0, id.counter)` from
+ * that peer are then considered seen, and `id` itself is NOT included. A non-positive counter
+ * removes the peer's entry.
+ */
+enum LoroStatus loro_version_vector_set_end(struct LoroVersionVector *vv, struct LoroId id);
+
+/**
+ * Treats `id` as the last op seen from its peer and extends the vector's end to include it,
+ * but only if that would grow the entry. Writes whether an update happened into `*out_updated`
+ * (may be null). Always returns `LORO_OK`.
+ */
+enum LoroStatus loro_version_vector_try_update_last(struct LoroVersionVector *vv,
+                                                    struct LoroId id,
+                                                    bool *out_updated);
+
+/**
+ * Writes the difference from `vv` to `other` as a JSON object
+ * `{"retreat": [span, ...], "forward": [span, ...]}` into `*out`, where each `span` is
+ * `{"peer", "counter_start", "counter_end"}`. `retreat` are the spans `vv` has that `other`
+ * lacks; `forward` are the spans `other` has that `vv` lacks. Both arrays are sorted by peer
+ * for deterministic output. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_version_vector_diff(const struct LoroVersionVector *vv,
+                                         const struct LoroVersionVector *other,
+                                         struct LoroBytes *out);
+
+/**
+ * Writes the spans `target` has seen that `vv` is missing, as a JSON array
+ * `[{"peer", "counter_start", "counter_end"}, ...]`, into `*out`. `*out` is only written on
+ * `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_version_vector_get_missing_span(const struct LoroVersionVector *vv,
+                                                     const struct LoroVersionVector *target,
+                                                     struct LoroBytes *out);
+
+/**
+ * Intersects `span` with what `vv` has seen for that peer, writing the resulting half-open
+ * counter span into `*out`. Returns `true` (and writes `*out`) when the intersection is
+ * non-empty; returns `false` (leaving `*out` untouched) on a null handle or an empty
+ * intersection.
+ */
+bool loro_version_vector_intersect_span(const struct LoroVersionVector *vv,
+                                        struct LoroIdSpan span,
+                                        struct LoroCounterSpan *out);
 
 /**
  * Creates a new, empty frontiers. Release with [`loro_frontiers_free`].

@@ -13,6 +13,7 @@
 
 use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
+use crate::undo::LoroCounterSpan;
 use crate::value::LoroBytes;
 use loro::{ChangeMeta, ExportMode, Frontiers, IdSpan, VersionVector, ID};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -276,6 +277,223 @@ pub extern "C" fn loro_version_vector_to_json(
                 set_last_error(format!("failed to serialize version vector: {e}"));
                 LoroStatus::LORO_ERR_ENCODE
             }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// VersionVector algebra (G6.6)
+// ---------------------------------------------------------------------------
+
+/// Builds a `{"peer", "counter_start", "counter_end"}` JSON object for one id-span. Shared by
+/// [`loro_version_vector_diff`] and [`loro_version_vector_get_missing_span`].
+fn span_to_json(peer: u64, counter_start: i32, counter_end: i32) -> JsonValue {
+    let mut obj = JsonMap::new();
+    obj.insert("peer".to_string(), JsonValue::from(peer));
+    obj.insert("counter_start".to_string(), JsonValue::from(counter_start));
+    obj.insert("counter_end".to_string(), JsonValue::from(counter_end));
+    JsonValue::Object(obj)
+}
+
+/// Collects `(peer, counter-span)` entries into a JSON array of [`span_to_json`] objects, sorted
+/// by peer for deterministic output. Used for the `retreat`/`forward` arrays of
+/// [`loro_version_vector_diff`] (whose source maps have non-deterministic iteration order).
+fn spans_to_json_array<'a>(
+    entries: impl Iterator<Item = (&'a u64, &'a loro::CounterSpan)>,
+) -> JsonValue {
+    let mut entries: Vec<(&u64, &loro::CounterSpan)> = entries.collect();
+    entries.sort_by_key(|(peer, _)| **peer);
+    JsonValue::Array(
+        entries
+            .into_iter()
+            .map(|(peer, span)| span_to_json(*peer, span.start, span.end))
+            .collect(),
+    )
+}
+
+/// Helper: dereference a `*mut LoroVersionVector` to `&mut`, recording an error on null.
+fn vv_mut<'a>(vv: *mut LoroVersionVector) -> Option<&'a mut LoroVersionVector> {
+    match unsafe { vv.as_mut() } {
+        Some(v) => Some(v),
+        None => {
+            set_last_error("null pointer passed to loro-c-api");
+            None
+        }
+    }
+}
+
+/// Merges everything in `other` into `vv` (the entrywise maximum — the union of the two
+/// histories).
+#[no_mangle]
+pub extern "C" fn loro_version_vector_merge(
+    vv: *mut LoroVersionVector,
+    other: *const LoroVersionVector,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let vv = match vv_mut(vv) {
+            Some(v) => v,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let other = deref_or!(other, LoroStatus::LORO_ERR_INVALID_ARG);
+        vv.0.merge(other.inner());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Extends `vv` so it includes every entry in `other` (entrywise maximum). Equivalent in effect
+/// to [`loro_version_vector_merge`] for two version vectors.
+#[no_mangle]
+pub extern "C" fn loro_version_vector_extend_to_include_vv(
+    vv: *mut LoroVersionVector,
+    other: *const LoroVersionVector,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let vv = match vv_mut(vv) {
+            Some(v) => v,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let other = deref_or!(other, LoroStatus::LORO_ERR_INVALID_ARG);
+        vv.0.extend_to_include_vv(other.inner().iter());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Sets the exclusive end counter for `id`'s peer to `id.counter`: ops `[0, id.counter)` from
+/// that peer are then considered seen, and `id` itself is NOT included. A non-positive counter
+/// removes the peer's entry.
+#[no_mangle]
+pub extern "C" fn loro_version_vector_set_end(
+    vv: *mut LoroVersionVector,
+    id: LoroId,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let vv = match vv_mut(vv) {
+            Some(v) => v,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        vv.0.set_end(id.to_loro());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Treats `id` as the last op seen from its peer and extends the vector's end to include it,
+/// but only if that would grow the entry. Writes whether an update happened into `*out_updated`
+/// (may be null). Always returns `LORO_OK`.
+#[no_mangle]
+pub extern "C" fn loro_version_vector_try_update_last(
+    vv: *mut LoroVersionVector,
+    id: LoroId,
+    out_updated: *mut bool,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let vv = match vv_mut(vv) {
+            Some(v) => v,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let updated = vv.0.try_update_last(id.to_loro());
+        if !out_updated.is_null() {
+            unsafe { out_updated.write(updated) };
+        }
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Writes the difference from `vv` to `other` as a JSON object
+/// `{"retreat": [span, ...], "forward": [span, ...]}` into `*out`, where each `span` is
+/// `{"peer", "counter_start", "counter_end"}`. `retreat` are the spans `vv` has that `other`
+/// lacks; `forward` are the spans `other` has that `vv` lacks. Both arrays are sorted by peer
+/// for deterministic output. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_version_vector_diff(
+    vv: *const LoroVersionVector,
+    other: *const LoroVersionVector,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let vv = deref_or!(vv, LoroStatus::LORO_ERR_INVALID_ARG);
+        let other = deref_or!(other, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let diff = vv.inner().diff(other.inner());
+        let mut obj = JsonMap::new();
+        obj.insert("retreat".to_string(), spans_to_json_array(diff.retreat.iter()));
+        obj.insert("forward".to_string(), spans_to_json_array(diff.forward.iter()));
+        match serde_json::to_vec(&JsonValue::Object(obj)) {
+            Ok(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(format!("failed to serialize version vector diff: {e}"));
+                LoroStatus::LORO_ERR_ENCODE
+            }
+        }
+    })
+}
+
+/// Writes the spans `target` has seen that `vv` is missing, as a JSON array
+/// `[{"peer", "counter_start", "counter_end"}, ...]`, into `*out`. `*out` is only written on
+/// `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_version_vector_get_missing_span(
+    vv: *const LoroVersionVector,
+    target: *const LoroVersionVector,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let vv = deref_or!(vv, LoroStatus::LORO_ERR_INVALID_ARG);
+        let target = deref_or!(target, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let spans = vv.inner().get_missing_span(target.inner());
+        let arr: Vec<JsonValue> = spans
+            .iter()
+            .map(|s| span_to_json(s.peer, s.counter.start, s.counter.end))
+            .collect();
+        match serde_json::to_vec(&JsonValue::Array(arr)) {
+            Ok(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(format!("failed to serialize missing span: {e}"));
+                LoroStatus::LORO_ERR_ENCODE
+            }
+        }
+    })
+}
+
+/// Intersects `span` with what `vv` has seen for that peer, writing the resulting half-open
+/// counter span into `*out`. Returns `true` (and writes `*out`) when the intersection is
+/// non-empty; returns `false` (leaving `*out` untouched) on a null handle or an empty
+/// intersection.
+#[no_mangle]
+pub extern "C" fn loro_version_vector_intersect_span(
+    vv: *const LoroVersionVector,
+    span: LoroIdSpan,
+    out: *mut LoroCounterSpan,
+) -> bool {
+    ffi_guard!(false, {
+        let vv = deref_or!(vv, false);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        match vv.inner().intersect_span(span.to_loro()) {
+            Some(cs) => {
+                unsafe {
+                    out.write(LoroCounterSpan {
+                        start: cs.start,
+                        end: cs.end,
+                    })
+                };
+                true
+            }
+            None => false,
         }
     })
 }

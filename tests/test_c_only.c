@@ -1078,6 +1078,105 @@ static void test_g6_c(void) {
 
     loro_text_free(g3t);
     loro_doc_free(g3);
+
+    /* ---- G6.6: VersionVector algebra & UndoManager extras ---- */
+    LoroDoc* va = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(va, 1) == LORO_OK);
+    LoroText* vat = loro_doc_get_text(va, "t", 1);
+    CHECK(loro_text_insert(vat, 0, "hello", 5) == LORO_OK);
+    CHECK(loro_doc_commit(va) == LORO_OK);
+    LoroDoc* vb = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(vb, 2) == LORO_OK);
+    LoroText* vbt = loro_doc_get_text(vb, "t", 1);
+    CHECK(loro_text_insert(vbt, 0, "world", 5) == LORO_OK);
+    CHECK(loro_doc_commit(vb) == LORO_OK);
+
+    LoroVersionVector* vva = loro_doc_oplog_vv(va);
+    LoroVersionVector* vvb = loro_doc_oplog_vv(vb);
+    CHECK(vva != NULL && vvb != NULL);
+    /* concurrent: a covers peer 1, b covers peer 2 */
+    CHECK(loro_version_vector_includes_vv(vva, vvb) == false);
+    CHECK(loro_version_vector_merge(vva, vvb) == LORO_OK);
+    CHECK(loro_version_vector_includes_vv(vva, vvb) == true);
+
+    /* extend_to_include_vv mirrors merge */
+    LoroVersionVector* vva2 = loro_doc_oplog_vv(va);
+    CHECK(loro_version_vector_extend_to_include_vv(vva2, vvb) == LORO_OK);
+    CHECK(loro_version_vector_includes_vv(vva2, vvb) == true);
+
+    /* synthetic vector: set_end is exclusive, then try_update_last grows the end */
+    LoroVersionVector* sv = loro_version_vector_new();
+    LoroId end5 = {42, 5};
+    CHECK(loro_version_vector_set_end(sv, end5) == LORO_OK);
+    LoroId id4 = {42, 4};
+    LoroId id5 = {42, 5};
+    CHECK(loro_version_vector_includes_id(sv, id4) == true);
+    CHECK(loro_version_vector_includes_id(sv, id5) == false);
+    bool updated = false;
+    LoroId last9 = {42, 9};
+    CHECK(loro_version_vector_try_update_last(sv, last9, &updated) == LORO_OK);
+    CHECK(updated == true);
+    LoroId last3 = {42, 3};
+    CHECK(loro_version_vector_try_update_last(sv, last3, &updated) == LORO_OK);
+    CHECK(updated == false);
+
+    /* diff + get_missing_span against an empty vector */
+    LoroVersionVector* ev = loro_version_vector_new();
+    LoroBytes diffb = {0};
+    CHECK(loro_version_vector_diff(ev, sv, &diffb) == LORO_OK);
+    CHECK(bytes_contains(&diffb, "\"forward\""));
+    CHECK(bytes_contains(&diffb, "\"retreat\""));
+    CHECK(bytes_contains(&diffb, "\"peer\":42"));
+    loro_bytes_free(diffb);
+
+    LoroBytes missb = {0};
+    CHECK(loro_version_vector_get_missing_span(ev, sv, &missb) == LORO_OK);
+    CHECK(bytes_contains(&missb, "\"counter_start\":0"));
+    CHECK(bytes_contains(&missb, "\"counter_end\":10"));
+    loro_bytes_free(missb);
+
+    /* intersect_span clamps to what sv has seen for peer 42 */
+    LoroIdSpan isp = {42, 0, 20};
+    LoroCounterSpan ico = {0, 0};
+    CHECK(loro_version_vector_intersect_span(sv, isp, &ico) == true);
+    CHECK(ico.start == 0 && ico.end == 10);
+    LoroIdSpan absent = {999, 0, 5};
+    CHECK(loro_version_vector_intersect_span(sv, absent, &ico) == false);
+
+    /* null-handle fallbacks */
+    CHECK(loro_version_vector_merge(NULL, vvb) == LORO_ERR_INVALID_ARG);
+    CHECK(loro_version_vector_intersect_span(NULL, isp, &ico) == false);
+
+    loro_version_vector_free(ev);
+    loro_version_vector_free(sv);
+    loro_version_vector_free(vva2);
+    loro_version_vector_free(vvb);
+    loro_version_vector_free(vva);
+
+    /* UndoManager extras: peer() and the top undo-stack value */
+    LoroUndoManager* um = loro_undo_manager_new(va);
+    CHECK(um != NULL);
+    CHECK(loro_undo_manager_peer(um) == loro_doc_peer_id(va));
+    LoroBytes uvb = {0};
+    /* this manager has recorded nothing since creation -> empty undo stack */
+    CHECK(loro_undo_manager_top_undo_value_json(um, &uvb) == false);
+    /* a fresh local edit becomes an undoable item with the default (null) meta value */
+    CHECK(loro_text_insert(vat, 5, "!", 1) == LORO_OK);
+    CHECK(loro_doc_commit(va) == LORO_OK);
+    CHECK(loro_undo_manager_top_undo_value_json(um, &uvb) == true);
+    CHECK(bytes_contains(&uvb, "null"));
+    loro_bytes_free(uvb);
+    /* null-handle fallbacks */
+    CHECK(loro_undo_manager_peer(NULL) == 0);
+    LoroBytes uvb2 = {0};
+    CHECK(loro_undo_manager_top_undo_value_json(NULL, &uvb2) == false);
+    CHECK(loro_undo_manager_top_undo_value_json(um, NULL) == false);
+
+    loro_undo_manager_free(um);
+    loro_text_free(vbt);
+    loro_text_free(vat);
+    loro_doc_free(vb);
+    loro_doc_free(va);
 }
 
 int main(void) {

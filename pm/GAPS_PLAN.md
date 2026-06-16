@@ -340,12 +340,12 @@ the end of this section.
 
 ### G6.6 — VersionVector algebra & UndoManager extras — [version.rs](loro-c-api/src/version.rs) + [undo.rs](loro-c-api/src/undo.rs) (10 fns)
 
-- [ ] VV: `_merge(other)`, `_extend_to_include_vv(other)`, `_set_end(LoroId)` (void→OK);
+- [x] VV: `_merge(other)`, `_extend_to_include_vv(other)`, `_set_end(LoroId)` (void→OK);
   `_try_update_last(LoroId, out_updated:*mut bool)`; `_diff(other)` → JSON `{retreat,forward}`;
   `_get_missing_span(target)` → JSON `[{peer,counter_start,counter_end}]`;
   `_intersect_span(LoroIdSpan, out:*mut LoroCounterSpan)`→bool.
   (`to_hashmap` is covered by the existing `loro_version_vector_to_json` — omit.)
-- [ ] Undo: `loro_undo_manager_peer`→u64; `_top_undo_value_json(out)`→bool,
+- [x] Undo: `loro_undo_manager_peer`→u64; `_top_undo_value_json(out)`→bool,
   `_top_redo_value_json(out)`→bool. (`top_undo_meta`/`top_redo_meta` owned-meta handle deferred —
   its `cursors: Vec<CursorWithPos>` has no FFI form yet; see the omissions table.)
 

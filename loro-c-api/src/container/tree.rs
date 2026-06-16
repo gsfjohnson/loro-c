@@ -11,9 +11,14 @@
 //! Like every container handle, a `LoroTree*` is a strong co-owner of the document state
 //! (see `doc.rs`) and may be freed in any order. Free with [`loro_tree_free`].
 
+use crate::callbacks::CCallback;
 use crate::container::map::LoroMap;
+use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
+use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{value_to_json_bytes, LoroBytes};
+use crate::version::LoroId;
+use std::sync::Arc;
 
 /// Identifies a tree node. Mirrors `loro::TreeID` (`peer`: the creating peer id;
 /// `counter`: that peer's op counter at creation).
@@ -440,6 +445,110 @@ pub extern "C" fn loro_tree_to_json(tree: *const LoroTree, out: *mut LoroBytes) 
                 LoroStatus::LORO_OK
             }
             None => LoroStatus::LORO_ERR_ENCODE,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.4 — uniform container introspection (via loro::ContainerTrait) + attribution
+// ---------------------------------------------------------------------------
+
+/// Returns whether this tree container has been deleted from its document.
+#[no_mangle]
+pub extern "C" fn loro_tree_is_deleted(tree: *const LoroTree) -> bool {
+    ffi_guard!(false, {
+        let tree = deref_or!(tree, false);
+        loro::ContainerTrait::is_deleted(tree.inner())
+    })
+}
+
+/// Returns whether this tree container is attached to a document.
+#[no_mangle]
+pub extern "C" fn loro_tree_is_attached(tree: *const LoroTree) -> bool {
+    ffi_guard!(false, {
+        let tree = deref_or!(tree, false);
+        loro::ContainerTrait::is_attached(tree.inner())
+    })
+}
+
+/// If this detached container has an attached counterpart in its document, returns a new
+/// handle to it; otherwise returns null. Free the result with [`loro_tree_free`].
+#[no_mangle]
+pub extern "C" fn loro_tree_get_attached(tree: *const LoroTree) -> *mut LoroTree {
+    ffi_guard!(std::ptr::null_mut(), {
+        let tree = deref_or!(tree, std::ptr::null_mut());
+        match loro::ContainerTrait::get_attached(tree.inner()) {
+            Some(t) => Box::into_raw(Box::new(LoroTree::from_inner(t))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Returns a new handle to the document this container belongs to, or null if it is
+/// detached. Free the result with `loro_doc_free`.
+#[no_mangle]
+pub extern "C" fn loro_tree_doc(tree: *const LoroTree) -> *mut LoroDoc {
+    ffi_guard!(std::ptr::null_mut(), {
+        let tree = deref_or!(tree, std::ptr::null_mut());
+        match loro::ContainerTrait::doc(tree.inner()) {
+            Some(d) => Box::into_raw(Box::new(LoroDoc::from_inner(d))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Subscribes to changes of this tree container. Returns a `LoroSubscription*`, or null if
+/// the container is detached / on a null handle / caught panic. Free it with
+/// `loro_subscription_free` (which unsubscribes).
+#[no_mangle]
+pub extern "C" fn loro_tree_subscribe(
+    tree: *const LoroTree,
+    callback: LoroSubscriber,
+) -> *mut LoroSubscription {
+    ffi_guard!(std::ptr::null_mut(), {
+        let tree = deref_or!(tree, std::ptr::null_mut());
+        // Resolve the doc first: a detached container returns null WITHOUT taking ownership
+        // of the callback (the caller frees it), mirroring `loro_doc_subscribe`'s contract.
+        let doc = match loro::ContainerTrait::doc(tree.inner()) {
+            Some(d) => d,
+            None => return std::ptr::null_mut(),
+        };
+        let owner = CCallback {
+            invoke: callback.invoke,
+            user_data: callback.user_data,
+            free_user_data: callback.free_user_data,
+        };
+        let subscriber: loro::event::Subscriber = Arc::new(move |e: loro::event::DiffEvent| {
+            let owner = &owner;
+            let ptr = (&e as *const loro::event::DiffEvent) as *const LoroDiffEvent;
+            (owner.invoke)(ptr, owner.user_data);
+        });
+        let sub = doc.subscribe(&loro::ContainerTrait::id(tree.inner()), subscriber);
+        LoroSubscription::into_raw(sub)
+    })
+}
+
+/// Writes the op id of the last move of node `target` into `*out` and returns true; returns
+/// false (leaving `*out` untouched) when the node has no recorded move (e.g. never moved or
+/// unknown), or on a null handle / null `out` / caught panic.
+#[no_mangle]
+pub extern "C" fn loro_tree_get_last_move_id(
+    tree: *const LoroTree,
+    target: LoroTreeID,
+    out: *mut LoroId,
+) -> bool {
+    ffi_guard!(false, {
+        let tree = deref_or!(tree, false);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        match tree.inner().get_last_move_id(&target.to_loro()) {
+            Some(id) => {
+                unsafe { out.write(LoroId::from_loro(id)) };
+                true
+            }
+            None => false,
         }
     })
 }

@@ -9,10 +9,14 @@
 //! (see `doc.rs`): it stays valid after the originating `LoroDoc*` is freed, and handles
 //! may be freed in any order. Free with [`loro_map_free`].
 
+use crate::callbacks::CCallback;
 use crate::container::any::LoroContainer;
+use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
+use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{str_from_raw, value_from_json, value_to_json_bytes, LoroBytes};
 use std::os::raw::c_char;
+use std::sync::Arc;
 
 /// Opaque handle to a Loro map container.
 pub struct LoroMap(loro::LoroMap);
@@ -276,6 +280,115 @@ pub extern "C" fn loro_map_clear(map: *mut LoroMap) -> LoroStatus {
         match map.inner().clear() {
             Ok(()) => LoroStatus::LORO_OK,
             Err(e) => record_loro_error(&e),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.4 — uniform container introspection (via loro::ContainerTrait) + attribution
+// ---------------------------------------------------------------------------
+
+/// Returns whether this map container has been deleted from its document.
+#[no_mangle]
+pub extern "C" fn loro_map_is_deleted(map: *const LoroMap) -> bool {
+    ffi_guard!(false, {
+        let map = deref_or!(map, false);
+        loro::ContainerTrait::is_deleted(map.inner())
+    })
+}
+
+/// Returns whether this map container is attached to a document.
+#[no_mangle]
+pub extern "C" fn loro_map_is_attached(map: *const LoroMap) -> bool {
+    ffi_guard!(false, {
+        let map = deref_or!(map, false);
+        loro::ContainerTrait::is_attached(map.inner())
+    })
+}
+
+/// If this detached container has an attached counterpart in its document, returns a new
+/// handle to it; otherwise returns null. Free the result with [`loro_map_free`].
+#[no_mangle]
+pub extern "C" fn loro_map_get_attached(map: *const LoroMap) -> *mut LoroMap {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        match loro::ContainerTrait::get_attached(map.inner()) {
+            Some(m) => Box::into_raw(Box::new(LoroMap::from_inner(m))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Returns a new handle to the document this container belongs to, or null if it is
+/// detached. Free the result with `loro_doc_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_doc(map: *const LoroMap) -> *mut LoroDoc {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        match loro::ContainerTrait::doc(map.inner()) {
+            Some(d) => Box::into_raw(Box::new(LoroDoc::from_inner(d))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Subscribes to changes of this map container. Returns a `LoroSubscription*`, or null if
+/// the container is detached / on a null handle / caught panic. Free it with
+/// `loro_subscription_free` (which unsubscribes).
+#[no_mangle]
+pub extern "C" fn loro_map_subscribe(
+    map: *const LoroMap,
+    callback: LoroSubscriber,
+) -> *mut LoroSubscription {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        // Resolve the doc first: a detached container returns null WITHOUT taking ownership
+        // of the callback (the caller frees it), mirroring `loro_doc_subscribe`'s contract.
+        let doc = match loro::ContainerTrait::doc(map.inner()) {
+            Some(d) => d,
+            None => return std::ptr::null_mut(),
+        };
+        let owner = CCallback {
+            invoke: callback.invoke,
+            user_data: callback.user_data,
+            free_user_data: callback.free_user_data,
+        };
+        let subscriber: loro::event::Subscriber = Arc::new(move |e: loro::event::DiffEvent| {
+            let owner = &owner;
+            let ptr = (&e as *const loro::event::DiffEvent) as *const LoroDiffEvent;
+            (owner.invoke)(ptr, owner.user_data);
+        });
+        let sub = doc.subscribe(&loro::ContainerTrait::id(map.inner()), subscriber);
+        LoroSubscription::into_raw(sub)
+    })
+}
+
+/// Writes the peer id of the last editor of `key` into `*out` and returns true; returns
+/// false (leaving `*out` untouched) when the key has no recorded editor, or on a null
+/// handle / null `out` / invalid UTF-8 key / caught panic.
+#[no_mangle]
+pub extern "C" fn loro_map_get_last_editor(
+    map: *const LoroMap,
+    key: *const c_char,
+    key_len: usize,
+    out: *mut u64,
+) -> bool {
+    ffi_guard!(false, {
+        let map = deref_or!(map, false);
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return false,
+        };
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        match map.inner().get_last_editor(key) {
+            Some(peer) => {
+                unsafe { out.write(peer) };
+                true
+            }
+            None => false,
         }
     })
 }

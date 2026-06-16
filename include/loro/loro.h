@@ -470,6 +470,20 @@ typedef struct LoroFirstCommitFromPeerCallback {
 } LoroFirstCommitFromPeerCallback;
 
 /**
+ * A C subscriber callback for [`loro_doc_subscribe`] / [`loro_doc_subscribe_root`].
+ *
+ * `invoke` is called with a callback-scoped `const LoroDiffEvent*` and the opaque
+ * `user_data`. `free_user_data` (may be null) is called once when the subscription is
+ * released. The callback may be invoked from any thread that mutates the document, so it
+ * must be reentrant / thread-safe.
+ */
+typedef struct LoroSubscriber {
+    void (*invoke)(const struct LoroDiffEvent *event, void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroSubscriber;
+
+/**
  * Identifies a tree node. Mirrors `loro::TreeID` (`peer`: the creating peer id;
  * `counter`: that peer's op counter at creation).
  */
@@ -477,6 +491,14 @@ typedef struct LoroTreeID {
     uint64_t peer;
     int32_t counter;
 } LoroTreeID;
+
+/**
+ * A single operation id: the creating peer and that peer's op counter. Mirrors `loro::ID`.
+ */
+typedef struct LoroId {
+    uint64_t peer;
+    int32_t counter;
+} LoroId;
 
 /**
  * The resolved absolute position of a cursor against a document. Plain-old-data, written
@@ -511,28 +533,6 @@ typedef struct LoroIdSpan {
      */
     int32_t counter_end;
 } LoroIdSpan;
-
-/**
- * A single operation id: the creating peer and that peer's op counter. Mirrors `loro::ID`.
- */
-typedef struct LoroId {
-    uint64_t peer;
-    int32_t counter;
-} LoroId;
-
-/**
- * A C subscriber callback for [`loro_doc_subscribe`] / [`loro_doc_subscribe_root`].
- *
- * `invoke` is called with a callback-scoped `const LoroDiffEvent*` and the opaque
- * `user_data`. `free_user_data` (may be null) is called once when the subscription is
- * released. The callback may be invoked from any thread that mutates the document, so it
- * must be reentrant / thread-safe.
- */
-typedef struct LoroSubscriber {
-    void (*invoke)(const struct LoroDiffEvent *event, void *user_data);
-    void *user_data;
-    void (*free_user_data)(void*);
-} LoroSubscriber;
 
 /**
  * A C subscriber callback for [`loro_doc_subscribe_jsonpath`]. `invoke` is a payload-free
@@ -999,6 +999,36 @@ enum LoroStatus loro_counter_decrement(struct LoroCounter *counter, double value
 double loro_counter_get_value(const struct LoroCounter *counter);
 
 /**
+ * Returns whether this counter container has been deleted from its document.
+ */
+bool loro_counter_is_deleted(const struct LoroCounter *counter);
+
+/**
+ * Returns whether this counter container is attached to a document.
+ */
+bool loro_counter_is_attached(const struct LoroCounter *counter);
+
+/**
+ * If this detached container has an attached counterpart in its document, returns a new
+ * handle to it; otherwise returns null. Free the result with [`loro_counter_free`].
+ */
+struct LoroCounter *loro_counter_get_attached(const struct LoroCounter *counter);
+
+/**
+ * Returns a new handle to the document this container belongs to, or null if it is
+ * detached. Free the result with `loro_doc_free`.
+ */
+struct LoroDoc *loro_counter_doc(const struct LoroCounter *counter);
+
+/**
+ * Subscribes to changes of this counter container. Returns a `LoroSubscription*`, or null
+ * if the container is detached / on a null handle / caught panic. Free it with
+ * `loro_subscription_free` (which unsubscribes).
+ */
+struct LoroSubscription *loro_counter_subscribe(const struct LoroCounter *counter,
+                                                struct LoroSubscriber callback);
+
+/**
  * Frees a list handle. Passing null is a no-op. Safe to call before or after the
  * originating `LoroDoc*` is freed.
  */
@@ -1090,6 +1120,36 @@ bool loro_list_is_empty(const struct LoroList *list);
 enum LoroStatus loro_list_clear(struct LoroList *list);
 
 /**
+ * Returns whether this list container has been deleted from its document.
+ */
+bool loro_list_is_deleted(const struct LoroList *list);
+
+/**
+ * Returns whether this list container is attached to a document.
+ */
+bool loro_list_is_attached(const struct LoroList *list);
+
+/**
+ * If this detached container has an attached counterpart in its document, returns a new
+ * handle to it; otherwise returns null. Free the result with [`loro_list_free`].
+ */
+struct LoroList *loro_list_get_attached(const struct LoroList *list);
+
+/**
+ * Returns a new handle to the document this container belongs to, or null if it is
+ * detached. Free the result with `loro_doc_free`.
+ */
+struct LoroDoc *loro_list_doc(const struct LoroList *list);
+
+/**
+ * Subscribes to changes of this list container. Returns a `LoroSubscription*`, or null if
+ * the container is detached / on a null handle / caught panic. Free it with
+ * `loro_subscription_free` (which unsubscribes).
+ */
+struct LoroSubscription *loro_list_subscribe(const struct LoroList *list,
+                                             struct LoroSubscriber callback);
+
+/**
  * Frees a map handle. Passing null is a no-op. Safe to call before or after the
  * originating `LoroDoc*` is freed.
  */
@@ -1173,6 +1233,46 @@ bool loro_map_is_empty(const struct LoroMap *map);
  * Removes all entries from the map.
  */
 enum LoroStatus loro_map_clear(struct LoroMap *map);
+
+/**
+ * Returns whether this map container has been deleted from its document.
+ */
+bool loro_map_is_deleted(const struct LoroMap *map);
+
+/**
+ * Returns whether this map container is attached to a document.
+ */
+bool loro_map_is_attached(const struct LoroMap *map);
+
+/**
+ * If this detached container has an attached counterpart in its document, returns a new
+ * handle to it; otherwise returns null. Free the result with [`loro_map_free`].
+ */
+struct LoroMap *loro_map_get_attached(const struct LoroMap *map);
+
+/**
+ * Returns a new handle to the document this container belongs to, or null if it is
+ * detached. Free the result with `loro_doc_free`.
+ */
+struct LoroDoc *loro_map_doc(const struct LoroMap *map);
+
+/**
+ * Subscribes to changes of this map container. Returns a `LoroSubscription*`, or null if
+ * the container is detached / on a null handle / caught panic. Free it with
+ * `loro_subscription_free` (which unsubscribes).
+ */
+struct LoroSubscription *loro_map_subscribe(const struct LoroMap *map,
+                                            struct LoroSubscriber callback);
+
+/**
+ * Writes the peer id of the last editor of `key` into `*out` and returns true; returns
+ * false (leaving `*out` untouched) when the key has no recorded editor, or on a null
+ * handle / null `out` / invalid UTF-8 key / caught panic.
+ */
+bool loro_map_get_last_editor(const struct LoroMap *map,
+                              const char *key,
+                              uintptr_t key_len,
+                              uint64_t *out);
 
 /**
  * Frees a movable-list handle. Passing null is a no-op. Safe to call before or after the
@@ -1297,6 +1397,63 @@ bool loro_movable_list_is_empty(const struct LoroMovableList *list);
  * Removes all elements from the list.
  */
 enum LoroStatus loro_movable_list_clear(struct LoroMovableList *list);
+
+/**
+ * Returns whether this movable-list container has been deleted from its document.
+ */
+bool loro_movable_list_is_deleted(const struct LoroMovableList *list);
+
+/**
+ * Returns whether this movable-list container is attached to a document.
+ */
+bool loro_movable_list_is_attached(const struct LoroMovableList *list);
+
+/**
+ * If this detached container has an attached counterpart in its document, returns a new
+ * handle to it; otherwise returns null. Free the result with [`loro_movable_list_free`].
+ */
+struct LoroMovableList *loro_movable_list_get_attached(const struct LoroMovableList *list);
+
+/**
+ * Returns a new handle to the document this container belongs to, or null if it is
+ * detached. Free the result with `loro_doc_free`.
+ */
+struct LoroDoc *loro_movable_list_doc(const struct LoroMovableList *list);
+
+/**
+ * Subscribes to changes of this movable-list container. Returns a `LoroSubscription*`, or
+ * null if the container is detached / on a null handle / caught panic. Free it with
+ * `loro_subscription_free` (which unsubscribes).
+ */
+struct LoroSubscription *loro_movable_list_subscribe(const struct LoroMovableList *list,
+                                                     struct LoroSubscriber callback);
+
+/**
+ * Writes the peer id that created the element at `pos` into `*out` and returns true;
+ * returns false (leaving `*out` untouched) when there is no element / recorded creator at
+ * that position, or on a null handle / null `out` / caught panic.
+ */
+bool loro_movable_list_get_creator_at(const struct LoroMovableList *list,
+                                      uintptr_t pos,
+                                      uint64_t *out);
+
+/**
+ * Writes the peer id that last moved the element at `pos` into `*out` and returns true;
+ * returns false (leaving `*out` untouched) when there is no element / recorded mover at
+ * that position, or on a null handle / null `out` / caught panic.
+ */
+bool loro_movable_list_get_last_mover_at(const struct LoroMovableList *list,
+                                         uintptr_t pos,
+                                         uint64_t *out);
+
+/**
+ * Writes the peer id that last edited the value at `pos` into `*out` and returns true;
+ * returns false (leaving `*out` untouched) when there is no element / recorded editor at
+ * that position, or on a null handle / null `out` / caught panic.
+ */
+bool loro_movable_list_get_last_editor_at(const struct LoroMovableList *list,
+                                          uintptr_t pos,
+                                          uint64_t *out);
 
 /**
  * Frees a text handle. Passing null is a no-op. Safe to call before or after the
@@ -1518,6 +1675,43 @@ enum LoroStatus loro_text_convert_pos(const struct LoroText *text,
 enum LoroStatus loro_text_push_str(struct LoroText *text, const char *s, uintptr_t len);
 
 /**
+ * Returns whether this text container has been deleted from its document.
+ */
+bool loro_text_is_deleted(const struct LoroText *text);
+
+/**
+ * Returns whether this text container is attached to a document.
+ */
+bool loro_text_is_attached(const struct LoroText *text);
+
+/**
+ * If this detached container has an attached counterpart in its document, returns a new
+ * handle to it; otherwise returns null. Free the result with [`loro_text_free`].
+ */
+struct LoroText *loro_text_get_attached(const struct LoroText *text);
+
+/**
+ * Returns a new handle to the document this container belongs to, or null if it is
+ * detached. Free the result with `loro_doc_free`.
+ */
+struct LoroDoc *loro_text_doc(const struct LoroText *text);
+
+/**
+ * Subscribes to changes of this text container. Returns a `LoroSubscription*`, or null if
+ * the container is detached / on a null handle / caught panic. Free it with
+ * `loro_subscription_free` (which unsubscribes).
+ */
+struct LoroSubscription *loro_text_subscribe(const struct LoroText *text,
+                                             struct LoroSubscriber callback);
+
+/**
+ * Writes the peer id of the last editor at unicode position `pos` into `*out` and returns
+ * true; returns false (leaving `*out` untouched) when there is no recorded editor at that
+ * position, or on a null handle / null `out` / caught panic.
+ */
+bool loro_text_get_editor_at_unicode_pos(const struct LoroText *text, uintptr_t pos, uint64_t *out);
+
+/**
  * Frees a tree handle. Passing null is a no-op. Safe to call before or after the
  * originating `LoroDoc*` is freed.
  */
@@ -1665,6 +1859,45 @@ bool loro_tree_is_empty(const struct LoroTree *tree);
  * free it with `loro_bytes_free`.
  */
 enum LoroStatus loro_tree_to_json(const struct LoroTree *tree, struct LoroBytes *out);
+
+/**
+ * Returns whether this tree container has been deleted from its document.
+ */
+bool loro_tree_is_deleted(const struct LoroTree *tree);
+
+/**
+ * Returns whether this tree container is attached to a document.
+ */
+bool loro_tree_is_attached(const struct LoroTree *tree);
+
+/**
+ * If this detached container has an attached counterpart in its document, returns a new
+ * handle to it; otherwise returns null. Free the result with [`loro_tree_free`].
+ */
+struct LoroTree *loro_tree_get_attached(const struct LoroTree *tree);
+
+/**
+ * Returns a new handle to the document this container belongs to, or null if it is
+ * detached. Free the result with `loro_doc_free`.
+ */
+struct LoroDoc *loro_tree_doc(const struct LoroTree *tree);
+
+/**
+ * Subscribes to changes of this tree container. Returns a `LoroSubscription*`, or null if
+ * the container is detached / on a null handle / caught panic. Free it with
+ * `loro_subscription_free` (which unsubscribes).
+ */
+struct LoroSubscription *loro_tree_subscribe(const struct LoroTree *tree,
+                                             struct LoroSubscriber callback);
+
+/**
+ * Writes the op id of the last move of node `target` into `*out` and returns true; returns
+ * false (leaving `*out` untouched) when the node has no recorded move (e.g. never moved or
+ * unknown), or on a null handle / null `out` / caught panic.
+ */
+bool loro_tree_get_last_move_id(const struct LoroTree *tree,
+                                struct LoroTreeID target,
+                                struct LoroId *out);
 
 /**
  * Frees a cursor handle. Passing null is a no-op.

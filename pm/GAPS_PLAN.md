@@ -317,12 +317,12 @@ the end of this section.
 
 ### G6.4 — Per-container uniform set & attribution — all six [container/](loro-c-api/src/container/) files (~36 fns)
 
-- [ ] Uniform set ×6 (map/list/movable_list/text/tree/counter) via `loro::ContainerTrait`:
+- [x] Uniform set ×6 (map/list/movable_list/text/tree/counter) via `loro::ContainerTrait`:
   `_is_deleted`(bool), `_is_attached`(bool), `_get_attached` → `*mut Self` (null on `None`),
   `_doc` → `*mut LoroDoc` (owned clone, null on `None`), `_subscribe(LoroSubscriber)` →
   `*mut LoroSubscription` (null when detached; reuse the shared subscription plumbing —
   cf. the existing `loro_doc_subscribe(doc, cid, …)` by-id path).
-- [ ] Attribution (out-param `*mut u64` + `bool found`): map `_get_last_editor(key)`;
+- [x] Attribution (out-param `*mut u64` + `bool found`): map `_get_last_editor(key)`;
   movable_list `_get_creator_at`/`_get_last_mover_at`/`_get_last_editor_at(pos)`; text
   `_get_editor_at_unicode_pos(pos)`; tree `_get_last_move_id(LoroTreeID, out:*mut LoroId)`→bool.
 

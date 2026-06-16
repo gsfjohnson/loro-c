@@ -903,6 +903,103 @@ static void test_g6_c(void) {
     LoroCommitOptions nopts = {0};
     CHECK(loro_doc_commit_with(NULL, nopts) == LORO_ERR_INVALID_ARG);
 
+    /* --- G6.4: per-container uniform set & attribution --- */
+    LoroDoc* d6 = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(d6, 77) == LORO_OK);
+    LoroText* t6 = loro_doc_get_text(d6, "t", 1);
+    CHECK(t6 != NULL);
+
+    /* Uniform introspection on an attached root container. */
+    CHECK(loro_text_is_attached(t6) == true);
+    CHECK(loro_text_is_deleted(t6) == false);
+    LoroDoc* owner = loro_text_doc(t6);
+    CHECK(owner != NULL);
+    loro_doc_free(owner);
+
+    /* Per-container subscribe fires on commit, then stops once freed. */
+    sub_capture cap6;
+    memset(&cap6, 0, sizeof cap6);
+    LoroSubscriber cb6;
+    cb6.invoke = on_event;
+    cb6.user_data = &cap6;
+    cb6.free_user_data = NULL;
+    LoroSubscription* sub6 = loro_text_subscribe(t6, cb6);
+    CHECK(sub6 != NULL);
+    CHECK(loro_text_insert(t6, 0, "hi", 2) == LORO_OK);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+    CHECK(cap6.calls >= 1);
+    int calls_after = cap6.calls;
+    loro_subscription_free(sub6);
+    CHECK(loro_text_insert(t6, 0, "x", 1) == LORO_OK);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+    CHECK(cap6.calls == calls_after);
+
+    /* Text attribution: editor at a unicode position. */
+    uint64_t tpeer = 0;
+    CHECK(loro_text_get_editor_at_unicode_pos(t6, 0, &tpeer) == true);
+    CHECK(tpeer == 77);
+    CHECK(loro_text_get_editor_at_unicode_pos(t6, 1000, &tpeer) == false);
+
+    /* Map attribution: last editor of a key. */
+    LoroMap* m6 = loro_doc_get_map(d6, "m", 1);
+    CHECK(loro_map_insert(m6, "k", 1, "1", 1) == LORO_OK);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+    CHECK(loro_map_is_attached(m6) == true);
+    uint64_t mpeer = 0;
+    CHECK(loro_map_get_last_editor(m6, "k", 1, &mpeer) == true);
+    CHECK(mpeer == 77);
+    CHECK(loro_map_get_last_editor(m6, "absent", 6, &mpeer) == false);
+
+    /* MovableList attribution: creator / last mover / last editor. */
+    LoroMovableList* ml6 = loro_doc_get_movable_list(d6, "ml", 2);
+    CHECK(loro_movable_list_insert(ml6, 0, "1", 1) == LORO_OK);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+    uint64_t cpeer = 0, vpeer = 0, epeer = 0;
+    CHECK(loro_movable_list_get_creator_at(ml6, 0, &cpeer) == true);
+    CHECK(loro_movable_list_get_last_mover_at(ml6, 0, &vpeer) == true);
+    CHECK(loro_movable_list_get_last_editor_at(ml6, 0, &epeer) == true);
+    CHECK(cpeer == 77 && vpeer == 77 && epeer == 77);
+    /* Out-of-range positional queries clamp in loro's movable list, so use a null handle
+     * for the negative path instead. */
+    CHECK(loro_movable_list_get_creator_at(NULL, 0, &cpeer) == false);
+
+    /* Tree attribution: last move id of a node (creation is the initial move). */
+    LoroTree* tr6 = loro_doc_get_tree(d6, "tr", 2);
+    LoroTreeID node;
+    CHECK(loro_tree_create(tr6, NULL, &node) == LORO_OK);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+    LoroId mid;
+    CHECK(loro_tree_get_last_move_id(tr6, node, &mid) == true);
+    CHECK(mid.peer == 77);
+    LoroTreeID bogus_node = {999999u, 4242};
+    CHECK(loro_tree_get_last_move_id(tr6, bogus_node, &mid) == false);
+
+    /* A detached container: not attached, no doc, no subscription. */
+    LoroContainer* det_c = loro_container_new(LORO_CONTAINER_TEXT);
+    CHECK(det_c != NULL);
+    LoroText* det = loro_container_get_text(det_c);
+    CHECK(det != NULL);
+    CHECK(loro_text_is_attached(det) == false);
+    CHECK(loro_text_doc(det) == NULL);
+    LoroSubscription* det_sub = loro_text_subscribe(det, cb6);
+    CHECK(det_sub == NULL);
+
+    /* Null-handle / out fallbacks for the G6.4 surface. */
+    CHECK(loro_text_is_attached(NULL) == false);
+    CHECK(loro_text_get_attached(NULL) == NULL);
+    CHECK(loro_text_doc(NULL) == NULL);
+    CHECK(loro_text_get_editor_at_unicode_pos(NULL, 0, &tpeer) == false);
+    CHECK(loro_text_get_editor_at_unicode_pos(t6, 0, NULL) == false);
+    CHECK(loro_tree_get_last_move_id(NULL, node, &mid) == false);
+
+    loro_text_free(det);
+    loro_container_free(det_c);
+    loro_tree_free(tr6);
+    loro_movable_list_free(ml6);
+    loro_map_free(m6);
+    loro_text_free(t6);
+    loro_doc_free(d6);
+
     loro_text_free(g3t);
     loro_doc_free(g3);
 }

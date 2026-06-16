@@ -24,6 +24,12 @@ impl LoroDoc {
     pub(crate) fn inner(&self) -> &loro::LoroDoc {
         &self.0
     }
+
+    /// Wraps an owned `loro::LoroDoc` in a handle. Used by the per-container
+    /// `loro_*_doc` accessors, which receive an owned doc clone from `ContainerTrait::doc`.
+    pub(crate) fn from_inner(d: loro::LoroDoc) -> LoroDoc {
+        LoroDoc(d)
+    }
 }
 
 /// Interprets `(ptr, len)` as a UTF-8 string slice, recording an error and returning

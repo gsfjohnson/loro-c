@@ -5,8 +5,12 @@
 //! handle, a `LoroCounter*` is a strong co-owner of the document state (see `doc.rs`) and
 //! may be freed in any order.
 
+use crate::callbacks::CCallback;
+use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
+use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::LoroBytes;
+use std::sync::Arc;
 
 /// Opaque handle to a Loro counter container.
 pub struct LoroCounter(loro::LoroCounter);
@@ -81,5 +85,84 @@ pub extern "C" fn loro_counter_get_value(counter: *const LoroCounter) -> f64 {
     ffi_guard!(0.0f64, {
         let counter = deref_or!(counter, 0.0f64);
         counter.inner().get_value()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.4 — uniform container introspection (via loro::ContainerTrait)
+// ---------------------------------------------------------------------------
+
+/// Returns whether this counter container has been deleted from its document.
+#[no_mangle]
+pub extern "C" fn loro_counter_is_deleted(counter: *const LoroCounter) -> bool {
+    ffi_guard!(false, {
+        let counter = deref_or!(counter, false);
+        loro::ContainerTrait::is_deleted(counter.inner())
+    })
+}
+
+/// Returns whether this counter container is attached to a document.
+#[no_mangle]
+pub extern "C" fn loro_counter_is_attached(counter: *const LoroCounter) -> bool {
+    ffi_guard!(false, {
+        let counter = deref_or!(counter, false);
+        loro::ContainerTrait::is_attached(counter.inner())
+    })
+}
+
+/// If this detached container has an attached counterpart in its document, returns a new
+/// handle to it; otherwise returns null. Free the result with [`loro_counter_free`].
+#[no_mangle]
+pub extern "C" fn loro_counter_get_attached(counter: *const LoroCounter) -> *mut LoroCounter {
+    ffi_guard!(std::ptr::null_mut(), {
+        let counter = deref_or!(counter, std::ptr::null_mut());
+        match loro::ContainerTrait::get_attached(counter.inner()) {
+            Some(c) => Box::into_raw(Box::new(LoroCounter::from_inner(c))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Returns a new handle to the document this container belongs to, or null if it is
+/// detached. Free the result with `loro_doc_free`.
+#[no_mangle]
+pub extern "C" fn loro_counter_doc(counter: *const LoroCounter) -> *mut LoroDoc {
+    ffi_guard!(std::ptr::null_mut(), {
+        let counter = deref_or!(counter, std::ptr::null_mut());
+        match loro::ContainerTrait::doc(counter.inner()) {
+            Some(d) => Box::into_raw(Box::new(LoroDoc::from_inner(d))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Subscribes to changes of this counter container. Returns a `LoroSubscription*`, or null
+/// if the container is detached / on a null handle / caught panic. Free it with
+/// `loro_subscription_free` (which unsubscribes).
+#[no_mangle]
+pub extern "C" fn loro_counter_subscribe(
+    counter: *const LoroCounter,
+    callback: LoroSubscriber,
+) -> *mut LoroSubscription {
+    ffi_guard!(std::ptr::null_mut(), {
+        let counter = deref_or!(counter, std::ptr::null_mut());
+        // Resolve the doc first: a detached container returns null WITHOUT taking ownership
+        // of the callback (the caller frees it), mirroring `loro_doc_subscribe`'s contract.
+        let doc = match loro::ContainerTrait::doc(counter.inner()) {
+            Some(d) => d,
+            None => return std::ptr::null_mut(),
+        };
+        let owner = CCallback {
+            invoke: callback.invoke,
+            user_data: callback.user_data,
+            free_user_data: callback.free_user_data,
+        };
+        let subscriber: loro::event::Subscriber = Arc::new(move |e: loro::event::DiffEvent| {
+            let owner = &owner;
+            let ptr = (&e as *const loro::event::DiffEvent) as *const LoroDiffEvent;
+            (owner.invoke)(ptr, owner.user_data);
+        });
+        let sub = doc.subscribe(&loro::ContainerTrait::id(counter.inner()), subscriber);
+        LoroSubscription::into_raw(sub)
     })
 }

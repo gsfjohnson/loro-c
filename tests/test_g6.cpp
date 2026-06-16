@@ -293,6 +293,137 @@ static void test_find_id_spans_between() {
     CHECK(rev.find("\"1\"") != std::string::npos);
 }
 
+// ---- G6.4: per-container uniform introspection & attribution ----
+
+// Every root container reports itself attached, not deleted, and hands back its doc.
+static void test_g64_attached() {
+    loro::Doc doc;
+
+    loro::Text t = doc.get_text("t");
+    CHECK(t.is_attached());
+    CHECK(!t.is_deleted());
+    CHECK(t.doc().has_value());
+
+    loro::Map m = doc.get_map("m");
+    CHECK(m.is_attached());
+    CHECK(m.doc().has_value());
+
+    loro::List l = doc.get_list("l");
+    CHECK(l.is_attached());
+    CHECK(l.doc().has_value());
+
+    loro::MovableList ml = doc.get_movable_list("ml");
+    CHECK(ml.is_attached());
+    CHECK(ml.doc().has_value());
+
+    loro::Tree tr = doc.get_tree("tr");
+    CHECK(tr.is_attached());
+    CHECK(tr.doc().has_value());
+
+    loro::Counter ct = doc.get_counter("ct");
+    CHECK(ct.is_attached());
+    CHECK(ct.doc().has_value());
+}
+
+// A detached container (built via a Container factory) is not attached, has no doc, and
+// cannot be subscribed to.
+static void test_g64_detached() {
+    loro::Container c = loro::Container::text();
+    loro::Text t = c.as_text();
+    CHECK(!t.is_attached());
+    CHECK(!t.doc().has_value());
+    CHECK(!t.subscribe([](const loro::DiffEvent&) {}).has_value());
+}
+
+// A child container becomes deleted once its key is removed from the parent.
+static void test_g64_deleted() {
+    loro::Doc doc;
+    loro::Map root = doc.get_map("root");
+    loro::Map child = root.insert_container("k", loro::Container::map()).as_map();
+    doc.commit();
+    CHECK(child.is_attached());
+    CHECK(!child.is_deleted());
+
+    root.remove("k");
+    doc.commit();
+    CHECK(child.is_deleted());
+}
+
+// A per-container subscription fires on commit and stops once released.
+static void test_g64_subscribe_fires() {
+    loro::Doc doc;
+    loro::Text t = doc.get_text("text");
+    int count = 0;
+    auto sub = t.subscribe([&](const loro::DiffEvent&) { ++count; });
+    CHECK(sub.has_value());
+
+    t.insert(0, "hello");
+    doc.commit();
+    CHECK(count >= 1);
+
+    int after_first = count;
+    sub.reset();  // releasing the subscription unsubscribes
+    t.insert(0, "x");
+    doc.commit();
+    CHECK(count == after_first);
+}
+
+// Attribution getters return the editing/creating/moving peer; out-of-range returns nullopt.
+static void test_g64_attribution() {
+    // Map: last editor of a key.
+    {
+        loro::Doc doc;
+        doc.set_peer_id(42);
+        loro::Map m = doc.get_map("m");
+        m.insert("k", "1");
+        doc.commit();
+        auto ed = m.get_last_editor("k");
+        CHECK(ed.has_value() && *ed == 42u);
+        CHECK(!m.get_last_editor("absent").has_value());
+    }
+    // Text: editor at a unicode position.
+    {
+        loro::Doc doc;
+        doc.set_peer_id(7);
+        loro::Text t = doc.get_text("t");
+        t.insert(0, "abc");
+        doc.commit();
+        auto e = t.get_editor_at_unicode_pos(0);
+        CHECK(e.has_value() && *e == 7u);
+        CHECK(!t.get_editor_at_unicode_pos(100).has_value());
+    }
+    // MovableList: creator / last mover / last editor of an element.
+    {
+        loro::Doc doc;
+        doc.set_peer_id(9);
+        loro::MovableList ml = doc.get_movable_list("ml");
+        ml.insert(0, "1");
+        doc.commit();
+        auto cr = ml.get_creator_at(0);
+        auto mv = ml.get_last_mover_at(0);
+        auto ed = ml.get_last_editor_at(0);
+        CHECK(cr.has_value() && *cr == 9u);
+        CHECK(mv.has_value() && *mv == 9u);
+        CHECK(ed.has_value() && *ed == 9u);
+        // (Out-of-range positional queries clamp in loro's movable list rather than
+        // returning nullopt, so there is no out-of-range negative assertion here.)
+    }
+    // Tree: last move id of a node (creation counts as the initial move).
+    {
+        loro::Doc doc;
+        doc.set_peer_id(5);
+        loro::Tree tr = doc.get_tree("tr");
+        loro::TreeId a = tr.create();
+        doc.commit();
+        auto mid = tr.get_last_move_id(a);
+        CHECK(mid.has_value());
+        CHECK(mid.has_value() && mid->peer == 5u);
+
+        loro::TreeId bogus{999999u, 12345};
+        CHECK(!tr.get_last_move_id(bogus).has_value());
+    }
+}
+
 int main() {
     test_config_defaults();
     test_config_handle_shares_live_state();
@@ -308,6 +439,11 @@ int main() {
     test_attach_detach();
     test_get_container_and_deep_value();
     test_find_id_spans_between();
+    test_g64_attached();
+    test_g64_detached();
+    test_g64_deleted();
+    test_g64_subscribe_fires();
+    test_g64_attribution();
 
     if (failures == 0) {
         std::puts("test_g6: OK");

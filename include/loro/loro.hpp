@@ -120,6 +120,12 @@ class Counter;
 class Tree;
 class Container;
 class Cursor;
+// G6.4: the per-container doc()/subscribe() accessors couple every container wrapper to
+// Doc / Subscription / DiffEvent, which are defined further below. Forward-declare them so
+// the in-class declarations compile; the definitions are out-of-line once Doc is complete.
+class Doc;
+class DiffEvent;
+class Subscription;
 
 /// The kind of a type-erased loro::Container. Alias of the C ABI enum.
 using ContainerType = ::LoroContainerType;
@@ -311,6 +317,34 @@ public:
     /// position cannot be anchored. Resolve it later with Doc::get_cursor_pos.
     std::optional<Cursor> get_cursor(std::size_t pos, Side side = LORO_SIDE_MIDDLE) const;
 
+    // --- G6.4: container introspection & attribution ---
+
+    /// Whether this container has been deleted from its document.
+    bool is_deleted() const { return loro_text_is_deleted(handle_.get()); }
+
+    /// Whether this container is attached to a document.
+    bool is_attached() const { return loro_text_is_attached(handle_.get()); }
+
+    /// The attached counterpart of this detached container, or std::nullopt if none.
+    std::optional<Text> get_attached() const {
+        LoroText* t = loro_text_get_attached(handle_.get());
+        if (!t) return std::nullopt;
+        return Text(t);
+    }
+
+    /// The document this container belongs to, or std::nullopt if detached.
+    std::optional<Doc> doc() const;
+
+    /// Subscribes to this container's changes; std::nullopt if the container is detached.
+    std::optional<Subscription> subscribe(std::function<void(const DiffEvent&)> cb) const;
+
+    /// The peer id of the last editor at Unicode codepoint `pos`, or std::nullopt.
+    std::optional<std::uint64_t> get_editor_at_unicode_pos(std::size_t pos) const {
+        std::uint64_t out = 0;
+        if (!loro_text_get_editor_at_unicode_pos(handle_.get(), pos, &out)) return std::nullopt;
+        return out;
+    }
+
 private:
     struct Deleter {
         void operator()(LoroText* p) const noexcept { loro_text_free(p); }
@@ -380,6 +414,35 @@ public:
     std::size_t size() const { return loro_map_len(handle_.get()); }
     bool empty() const { return loro_map_is_empty(handle_.get()); }
     void clear() { detail::check(loro_map_clear(handle_.get())); }
+
+    // --- G6.4: container introspection & attribution ---
+
+    /// Whether this container has been deleted from its document.
+    bool is_deleted() const { return loro_map_is_deleted(handle_.get()); }
+
+    /// Whether this container is attached to a document.
+    bool is_attached() const { return loro_map_is_attached(handle_.get()); }
+
+    /// The attached counterpart of this detached container, or std::nullopt if none.
+    std::optional<Map> get_attached() const {
+        LoroMap* m = loro_map_get_attached(handle_.get());
+        if (!m) return std::nullopt;
+        return Map(m);
+    }
+
+    /// The document this container belongs to, or std::nullopt if detached.
+    std::optional<Doc> doc() const;
+
+    /// Subscribes to this container's changes; std::nullopt if the container is detached.
+    std::optional<Subscription> subscribe(std::function<void(const DiffEvent&)> cb) const;
+
+    /// The peer id of the last editor of `key`, or std::nullopt if there is none.
+    std::optional<std::uint64_t> get_last_editor(std::string_view key) const {
+        std::uint64_t out = 0;
+        if (!loro_map_get_last_editor(handle_.get(), key.data(), key.size(), &out))
+            return std::nullopt;
+        return out;
+    }
 
 private:
     struct Deleter {
@@ -459,6 +522,27 @@ public:
     /// A stable cursor anchored at index `pos` (on `side`), or std::nullopt if the position
     /// cannot be anchored. Resolve it later with Doc::get_cursor_pos.
     std::optional<Cursor> get_cursor(std::size_t pos, Side side = LORO_SIDE_MIDDLE) const;
+
+    // --- G6.4: container introspection ---
+
+    /// Whether this container has been deleted from its document.
+    bool is_deleted() const { return loro_list_is_deleted(handle_.get()); }
+
+    /// Whether this container is attached to a document.
+    bool is_attached() const { return loro_list_is_attached(handle_.get()); }
+
+    /// The attached counterpart of this detached container, or std::nullopt if none.
+    std::optional<List> get_attached() const {
+        LoroList* l = loro_list_get_attached(handle_.get());
+        if (!l) return std::nullopt;
+        return List(l);
+    }
+
+    /// The document this container belongs to, or std::nullopt if detached.
+    std::optional<Doc> doc() const;
+
+    /// Subscribes to this container's changes; std::nullopt if the container is detached.
+    std::optional<Subscription> subscribe(std::function<void(const DiffEvent&)> cb) const;
 
 private:
     struct Deleter {
@@ -543,6 +627,48 @@ public:
     /// cannot be anchored. Resolve it later with Doc::get_cursor_pos.
     std::optional<Cursor> get_cursor(std::size_t pos, Side side = LORO_SIDE_MIDDLE) const;
 
+    // --- G6.4: container introspection & attribution ---
+
+    /// Whether this container has been deleted from its document.
+    bool is_deleted() const { return loro_movable_list_is_deleted(handle_.get()); }
+
+    /// Whether this container is attached to a document.
+    bool is_attached() const { return loro_movable_list_is_attached(handle_.get()); }
+
+    /// The attached counterpart of this detached container, or std::nullopt if none.
+    std::optional<MovableList> get_attached() const {
+        LoroMovableList* l = loro_movable_list_get_attached(handle_.get());
+        if (!l) return std::nullopt;
+        return MovableList(l);
+    }
+
+    /// The document this container belongs to, or std::nullopt if detached.
+    std::optional<Doc> doc() const;
+
+    /// Subscribes to this container's changes; std::nullopt if the container is detached.
+    std::optional<Subscription> subscribe(std::function<void(const DiffEvent&)> cb) const;
+
+    /// The peer id that created the element at `pos`, or std::nullopt.
+    std::optional<std::uint64_t> get_creator_at(std::size_t pos) const {
+        std::uint64_t out = 0;
+        if (!loro_movable_list_get_creator_at(handle_.get(), pos, &out)) return std::nullopt;
+        return out;
+    }
+
+    /// The peer id that last moved the element at `pos`, or std::nullopt.
+    std::optional<std::uint64_t> get_last_mover_at(std::size_t pos) const {
+        std::uint64_t out = 0;
+        if (!loro_movable_list_get_last_mover_at(handle_.get(), pos, &out)) return std::nullopt;
+        return out;
+    }
+
+    /// The peer id that last edited the value at `pos`, or std::nullopt.
+    std::optional<std::uint64_t> get_last_editor_at(std::size_t pos) const {
+        std::uint64_t out = 0;
+        if (!loro_movable_list_get_last_editor_at(handle_.get(), pos, &out)) return std::nullopt;
+        return out;
+    }
+
 private:
     struct Deleter {
         void operator()(LoroMovableList* p) const noexcept { loro_movable_list_free(p); }
@@ -574,6 +700,27 @@ public:
 
     /// The counter's current value.
     double value() const { return loro_counter_get_value(handle_.get()); }
+
+    // --- G6.4: container introspection ---
+
+    /// Whether this container has been deleted from its document.
+    bool is_deleted() const { return loro_counter_is_deleted(handle_.get()); }
+
+    /// Whether this container is attached to a document.
+    bool is_attached() const { return loro_counter_is_attached(handle_.get()); }
+
+    /// The attached counterpart of this detached container, or std::nullopt if none.
+    std::optional<Counter> get_attached() const {
+        LoroCounter* c = loro_counter_get_attached(handle_.get());
+        if (!c) return std::nullopt;
+        return Counter(c);
+    }
+
+    /// The document this container belongs to, or std::nullopt if detached.
+    std::optional<Doc> doc() const;
+
+    /// Subscribes to this container's changes; std::nullopt if the container is detached.
+    std::optional<Subscription> subscribe(std::function<void(const DiffEvent&)> cb) const;
 
 private:
     struct Deleter {
@@ -714,6 +861,34 @@ public:
         detail::Bytes b;
         detail::check(loro_tree_to_json(handle_.get(), b.out()));
         return b.to_string();
+    }
+
+    // --- G6.4: container introspection & attribution ---
+
+    /// Whether this container has been deleted from its document.
+    bool is_deleted() const { return loro_tree_is_deleted(handle_.get()); }
+
+    /// Whether this container is attached to a document.
+    bool is_attached() const { return loro_tree_is_attached(handle_.get()); }
+
+    /// The attached counterpart of this detached container, or std::nullopt if none.
+    std::optional<Tree> get_attached() const {
+        LoroTree* t = loro_tree_get_attached(handle_.get());
+        if (!t) return std::nullopt;
+        return Tree(t);
+    }
+
+    /// The document this container belongs to, or std::nullopt if detached.
+    std::optional<Doc> doc() const;
+
+    /// Subscribes to this container's changes; std::nullopt if the container is detached.
+    std::optional<Subscription> subscribe(std::function<void(const DiffEvent&)> cb) const;
+
+    /// The op id of the last move of node `target`, or std::nullopt if it never moved.
+    std::optional<::LoroId> get_last_move_id(TreeId target) const {
+        ::LoroId out{};
+        if (!loro_tree_get_last_move_id(handle_.get(), target, &out)) return std::nullopt;
+        return out;
     }
 
 private:
@@ -2660,6 +2835,86 @@ private:
     };
     std::unique_ptr<LoroDoc, Deleter> handle_;
 };
+
+// --- G6.4: per-container doc() / subscribe() (need the complete Doc & Subscription types) ---
+
+namespace detail {
+// Wraps a container subscribe: builds the C callback triple, returns std::nullopt (deleting
+// the heap callback) when the container is detached, else an owning Subscription.
+template <typename SubFn>
+inline std::optional<Subscription> container_subscribe(SubscriberFn cb, SubFn sub_fn) {
+    auto* fn = new SubscriberFn(std::move(cb));
+    LoroSubscriber c{loro_hpp_subscriber_invoke, fn, loro_hpp_subscriber_free};
+    LoroSubscription* s = sub_fn(c);
+    if (!s) {
+        delete fn;
+        return std::nullopt;
+    }
+    return Subscription(s);
+}
+}  // namespace detail
+
+inline std::optional<Doc> Text::doc() const {
+    LoroDoc* d = loro_text_doc(handle_.get());
+    if (!d) return std::nullopt;
+    return Doc(d);
+}
+inline std::optional<Subscription> Text::subscribe(SubscriberFn cb) const {
+    return detail::container_subscribe(
+        std::move(cb), [this](LoroSubscriber c) { return loro_text_subscribe(handle_.get(), c); });
+}
+
+inline std::optional<Doc> Map::doc() const {
+    LoroDoc* d = loro_map_doc(handle_.get());
+    if (!d) return std::nullopt;
+    return Doc(d);
+}
+inline std::optional<Subscription> Map::subscribe(SubscriberFn cb) const {
+    return detail::container_subscribe(
+        std::move(cb), [this](LoroSubscriber c) { return loro_map_subscribe(handle_.get(), c); });
+}
+
+inline std::optional<Doc> List::doc() const {
+    LoroDoc* d = loro_list_doc(handle_.get());
+    if (!d) return std::nullopt;
+    return Doc(d);
+}
+inline std::optional<Subscription> List::subscribe(SubscriberFn cb) const {
+    return detail::container_subscribe(
+        std::move(cb), [this](LoroSubscriber c) { return loro_list_subscribe(handle_.get(), c); });
+}
+
+inline std::optional<Doc> MovableList::doc() const {
+    LoroDoc* d = loro_movable_list_doc(handle_.get());
+    if (!d) return std::nullopt;
+    return Doc(d);
+}
+inline std::optional<Subscription> MovableList::subscribe(SubscriberFn cb) const {
+    return detail::container_subscribe(std::move(cb), [this](LoroSubscriber c) {
+        return loro_movable_list_subscribe(handle_.get(), c);
+    });
+}
+
+inline std::optional<Doc> Counter::doc() const {
+    LoroDoc* d = loro_counter_doc(handle_.get());
+    if (!d) return std::nullopt;
+    return Doc(d);
+}
+inline std::optional<Subscription> Counter::subscribe(SubscriberFn cb) const {
+    return detail::container_subscribe(std::move(cb), [this](LoroSubscriber c) {
+        return loro_counter_subscribe(handle_.get(), c);
+    });
+}
+
+inline std::optional<Doc> Tree::doc() const {
+    LoroDoc* d = loro_tree_doc(handle_.get());
+    if (!d) return std::nullopt;
+    return Doc(d);
+}
+inline std::optional<Subscription> Tree::subscribe(SubscriberFn cb) const {
+    return detail::container_subscribe(
+        std::move(cb), [this](LoroSubscriber c) { return loro_tree_subscribe(handle_.get(), c); });
+}
 
 /// Version of the underlying loro Rust crate.
 inline std::string version() {

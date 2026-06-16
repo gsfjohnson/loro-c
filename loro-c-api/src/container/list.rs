@@ -9,10 +9,14 @@
 //! Like every container handle, a `LoroList*` is a strong co-owner of the document state
 //! (see `doc.rs`) and may be freed in any order. Free with [`loro_list_free`].
 
+use crate::callbacks::CCallback;
 use crate::container::any::LoroContainer;
+use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
+use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{value_from_json, value_to_json_bytes, LoroBytes};
 use std::os::raw::c_char;
+use std::sync::Arc;
 
 /// Opaque handle to a Loro list container.
 pub struct LoroList(loro::LoroList);
@@ -308,5 +312,84 @@ pub extern "C" fn loro_list_clear(list: *mut LoroList) -> LoroStatus {
             Ok(()) => LoroStatus::LORO_OK,
             Err(e) => record_loro_error(&e),
         }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.4 — uniform container introspection (via loro::ContainerTrait)
+// ---------------------------------------------------------------------------
+
+/// Returns whether this list container has been deleted from its document.
+#[no_mangle]
+pub extern "C" fn loro_list_is_deleted(list: *const LoroList) -> bool {
+    ffi_guard!(false, {
+        let list = deref_or!(list, false);
+        loro::ContainerTrait::is_deleted(list.inner())
+    })
+}
+
+/// Returns whether this list container is attached to a document.
+#[no_mangle]
+pub extern "C" fn loro_list_is_attached(list: *const LoroList) -> bool {
+    ffi_guard!(false, {
+        let list = deref_or!(list, false);
+        loro::ContainerTrait::is_attached(list.inner())
+    })
+}
+
+/// If this detached container has an attached counterpart in its document, returns a new
+/// handle to it; otherwise returns null. Free the result with [`loro_list_free`].
+#[no_mangle]
+pub extern "C" fn loro_list_get_attached(list: *const LoroList) -> *mut LoroList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        match loro::ContainerTrait::get_attached(list.inner()) {
+            Some(l) => Box::into_raw(Box::new(LoroList::from_inner(l))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Returns a new handle to the document this container belongs to, or null if it is
+/// detached. Free the result with `loro_doc_free`.
+#[no_mangle]
+pub extern "C" fn loro_list_doc(list: *const LoroList) -> *mut LoroDoc {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        match loro::ContainerTrait::doc(list.inner()) {
+            Some(d) => Box::into_raw(Box::new(LoroDoc::from_inner(d))),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Subscribes to changes of this list container. Returns a `LoroSubscription*`, or null if
+/// the container is detached / on a null handle / caught panic. Free it with
+/// `loro_subscription_free` (which unsubscribes).
+#[no_mangle]
+pub extern "C" fn loro_list_subscribe(
+    list: *const LoroList,
+    callback: LoroSubscriber,
+) -> *mut LoroSubscription {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        // Resolve the doc first: a detached container returns null WITHOUT taking ownership
+        // of the callback (the caller frees it), mirroring `loro_doc_subscribe`'s contract.
+        let doc = match loro::ContainerTrait::doc(list.inner()) {
+            Some(d) => d,
+            None => return std::ptr::null_mut(),
+        };
+        let owner = CCallback {
+            invoke: callback.invoke,
+            user_data: callback.user_data,
+            free_user_data: callback.free_user_data,
+        };
+        let subscriber: loro::event::Subscriber = Arc::new(move |e: loro::event::DiffEvent| {
+            let owner = &owner;
+            let ptr = (&e as *const loro::event::DiffEvent) as *const LoroDiffEvent;
+            (owner.invoke)(ptr, owner.user_data);
+        });
+        let sub = doc.subscribe(&loro::ContainerTrait::id(list.inner()), subscriber);
+        LoroSubscription::into_raw(sub)
     })
 }

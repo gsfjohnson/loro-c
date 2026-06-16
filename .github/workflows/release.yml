@@ -39,7 +39,7 @@ jobs:
           # stay stable across runs. These mirror ci.yml's matrix.
           - os: ubuntu-22.04
             artifact: linux-x86_64
-          - os: macos-latest
+          - os: macos-15
             artifact: macos-arm64
           # Native MSVC toolchain (default Corrosion path). ABI-incompatible
           # with the gnullvm artifact built by the build-windows-gnullvm job

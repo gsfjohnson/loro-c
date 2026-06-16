@@ -125,6 +125,17 @@ else()
 endif()
 # Space-separated form for the @LORO_SYSTEM_LIBS@ substitution in loroConfig.cmake.in.
 string(JOIN " " LORO_SYSTEM_LIBS ${_loro_sys})
+
+# The build tree links loro -> $<BUILD_INTERFACE:loro_c_api> (line ~84). On the Corrosion
+# path the imported archive target does NOT carry these native-static-libs, so attach them
+# here or downstream examples/tests fail to link (MSVC: unresolved __imp_BCryptGenRandom
+# from getrandom). $<BUILD_INTERFACE:> keeps them out of install(EXPORT) — the install tree
+# gets them via loroConfig.cmake (@LORO_SYSTEM_LIBS@). The manual (non-Corrosion) path
+# already attaches the same libs in cmake/BuildRustStaticlib.cmake.
+if(LORO_USE_CORROSION AND _loro_sys)
+    target_link_libraries(loro INTERFACE "$<BUILD_INTERFACE:${_loro_sys}>")
+endif()
+
 unset(_loro_sys)
 
 # (A) Install the Rust staticlib + the snippet that recreates it as `loro_c_api-static`.

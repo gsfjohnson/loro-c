@@ -106,6 +106,30 @@ typedef enum LoroPosType {
 } LoroPosType;
 
 /**
+ * Classifies the parent of a tree node, mirroring `loro::TreeParentId`. Written by
+ * [`loro_tree_parent`]; for `LORO_TREE_PARENT_NODE` the parent node id is written to the
+ * separate `out_node` out-param.
+ */
+typedef enum LoroTreeParentKind {
+    /**
+     * The node is a root (it has no parent).
+     */
+    LORO_TREE_PARENT_ROOT = 0,
+    /**
+     * The node has been deleted.
+     */
+    LORO_TREE_PARENT_DELETED = 1,
+    /**
+     * The node has a parent node, whose id is written to `out_node`.
+     */
+    LORO_TREE_PARENT_NODE = 2,
+    /**
+     * The node was created in a version not yet checked out (does not exist here).
+     */
+    LORO_TREE_PARENT_UNEXIST = 3,
+} LoroTreeParentKind;
+
+/**
  * Which side of an element a cursor (or resolved position) is anchored to. Mirrors
  * `loro::cursor::Side`. Used both to create a cursor and to report where a deleted anchor
  * resolved to. The numeric values match upstream (`Left = -1`, `Middle = 0`, `Right = 1`).
@@ -1275,6 +1299,55 @@ bool loro_map_get_last_editor(const struct LoroMap *map,
                               uint64_t *out);
 
 /**
+ * Gets or creates a mergeable text container at `(key, key_len)`. Returns null on error
+ * (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_text_free`.
+ */
+struct LoroText *loro_map_ensure_mergeable_text(struct LoroMap *map,
+                                                const char *key,
+                                                uintptr_t key_len);
+
+/**
+ * Gets or creates a mergeable map container at `(key, key_len)`. Returns null on error
+ * (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_map_free`.
+ */
+struct LoroMap *loro_map_ensure_mergeable_map(struct LoroMap *map,
+                                              const char *key,
+                                              uintptr_t key_len);
+
+/**
+ * Gets or creates a mergeable list container at `(key, key_len)`. Returns null on error
+ * (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_list_free`.
+ */
+struct LoroList *loro_map_ensure_mergeable_list(struct LoroMap *map,
+                                                const char *key,
+                                                uintptr_t key_len);
+
+/**
+ * Gets or creates a mergeable movable-list container at `(key, key_len)`. Returns null on
+ * error (bad UTF-8 key, or the key holds a non-mergeable value). Free with
+ * `loro_movable_list_free`.
+ */
+struct LoroMovableList *loro_map_ensure_mergeable_movable_list(struct LoroMap *map,
+                                                               const char *key,
+                                                               uintptr_t key_len);
+
+/**
+ * Gets or creates a mergeable tree container at `(key, key_len)`. Returns null on error
+ * (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_tree_free`.
+ */
+struct LoroTree *loro_map_ensure_mergeable_tree(struct LoroMap *map,
+                                                const char *key,
+                                                uintptr_t key_len);
+
+/**
+ * Gets or creates a mergeable counter container at `(key, key_len)`. Returns null on error
+ * (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_counter_free`.
+ */
+struct LoroCounter *loro_map_ensure_mergeable_counter(struct LoroMap *map,
+                                                      const char *key,
+                                                      uintptr_t key_len);
+
+/**
  * Frees a movable-list handle. Passing null is a no-op. Safe to call before or after the
  * originating `LoroDoc*` is freed.
  */
@@ -1898,6 +1971,52 @@ struct LoroSubscription *loro_tree_subscribe(const struct LoroTree *tree,
 bool loro_tree_get_last_move_id(const struct LoroTree *tree,
                                 struct LoroTreeID target,
                                 struct LoroId *out);
+
+/**
+ * Classifies `target`'s parent into `*out_kind` and returns true; for
+ * `LORO_TREE_PARENT_NODE` the parent node id is also written to `*out_node`. Returns false
+ * (leaving both out-params untouched) when `target` does not exist, or on a null handle /
+ * null out-param / caught panic.
+ */
+bool loro_tree_parent(const struct LoroTree *tree,
+                      struct LoroTreeID target,
+                      enum LoroTreeParentKind *out_kind,
+                      struct LoroTreeID *out_node);
+
+/**
+ * Writes all root nodes as a JSON array of `{peer,counter}` objects into `*out`. `*out` is
+ * only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_tree_roots_json(const struct LoroTree *tree, struct LoroBytes *out);
+
+/**
+ * Writes all nodes (including deleted ones) as a JSON array of `{peer,counter}` objects into
+ * `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_tree_nodes_json(const struct LoroTree *tree, struct LoroBytes *out);
+
+/**
+ * Writes the children of `parent` (null = root) as a JSON array of `{peer,counter}` objects
+ * into `*out`. Returns `LORO_ERR_NOT_FOUND` if `parent` does not exist. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_tree_children_json(const struct LoroTree *tree,
+                                        const struct LoroTreeID *parent,
+                                        struct LoroBytes *out);
+
+/**
+ * Writes the tree's hierarchy with each node's metadata resolved, as a JSON value, into
+ * `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. (For the
+ * plain hierarchy without metadata, use `loro_tree_to_json`.)
+ */
+enum LoroStatus loro_tree_get_value_with_meta_json(const struct LoroTree *tree,
+                                                   struct LoroBytes *out);
+
+/**
+ * Disables the tree's fractional index. After this, positional moves (`mov_to`/`mov_after`/
+ * `mov_before`) and `create_at` are no longer usable.
+ */
+enum LoroStatus loro_tree_disable_fractional_index(struct LoroTree *tree);
 
 /**
  * Frees a cursor handle. Passing null is a no-op.

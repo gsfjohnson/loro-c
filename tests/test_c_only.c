@@ -984,13 +984,89 @@ static void test_g6_c(void) {
     LoroSubscription* det_sub = loro_text_subscribe(det, cb6);
     CHECK(det_sub == NULL);
 
-    /* Null-handle / out fallbacks for the G6.4 surface. */
+    /* --- G6.5: tree extras --- */
+    LoroTreeID child6;
+    CHECK(loro_tree_create(tr6, &node, &child6) == LORO_OK);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+
+    /* parent classification: root vs node vs nonexistent. */
+    LoroTreeParentKind kind6;
+    LoroTreeID pnode6;
+    CHECK(loro_tree_parent(tr6, node, &kind6, &pnode6) == true);
+    CHECK(kind6 == LORO_TREE_PARENT_ROOT);
+    CHECK(loro_tree_parent(tr6, child6, &kind6, &pnode6) == true);
+    CHECK(kind6 == LORO_TREE_PARENT_NODE);
+    CHECK(pnode6.peer == node.peer && pnode6.counter == node.counter);
+    CHECK(loro_tree_parent(tr6, bogus_node, &kind6, &pnode6) == false);
+
+    /* bulk JSON forms emit {peer,counter} objects. */
+    LoroBytes rb = {0};
+    CHECK(loro_tree_roots_json(tr6, &rb) == LORO_OK);
+    CHECK(bytes_contains(&rb, "peer"));
+    loro_bytes_free(rb);
+    LoroBytes nb = {0};
+    CHECK(loro_tree_nodes_json(tr6, &nb) == LORO_OK);
+    CHECK(bytes_contains(&nb, "counter"));
+    loro_bytes_free(nb);
+    LoroBytes cb_kids = {0};
+    CHECK(loro_tree_children_json(tr6, &node, &cb_kids) == LORO_OK);
+    CHECK(bytes_contains(&cb_kids, "peer"));
+    loro_bytes_free(cb_kids);
+    LoroBytes cb_root = {0};
+    CHECK(loro_tree_children_json(tr6, NULL, &cb_root) == LORO_OK);
+    loro_bytes_free(cb_root);
+    LoroBytes cb_bad = {0};
+    CHECK(loro_tree_children_json(tr6, &bogus_node, &cb_bad) == LORO_ERR_NOT_FOUND);
+
+    /* value with metadata, then disable the fractional index. */
+    LoroBytes vm6 = {0};
+    CHECK(loro_tree_get_value_with_meta_json(tr6, &vm6) == LORO_OK);
+    CHECK(vm6.len > 0);
+    loro_bytes_free(vm6);
+    CHECK(loro_tree_disable_fractional_index(tr6) == LORO_OK);
+    CHECK(loro_tree_is_fractional_index_enabled(tr6) == false);
+
+    /* --- G6.5: map ensure_mergeable_* (one per container type) --- */
+    LoroText* mt = loro_map_ensure_mergeable_text(m6, "mt", 2);
+    CHECK(mt != NULL);
+    CHECK(loro_text_insert(mt, 0, "hey", 3) == LORO_OK);
+    LoroMap* mmap = loro_map_ensure_mergeable_map(m6, "mmap", 4);
+    CHECK(mmap != NULL);
+    LoroList* mlist = loro_map_ensure_mergeable_list(m6, "mlist", 5);
+    CHECK(mlist != NULL);
+    LoroMovableList* mmov = loro_map_ensure_mergeable_movable_list(m6, "mmov", 4);
+    CHECK(mmov != NULL);
+    LoroTree* mtree = loro_map_ensure_mergeable_tree(m6, "mtree", 5);
+    CHECK(mtree != NULL);
+    LoroCounter* mctr = loro_map_ensure_mergeable_counter(m6, "mctr", 4);
+    CHECK(mctr != NULL);
+    CHECK(loro_doc_commit(d6) == LORO_OK);
+
+    /* re-requesting the same mergeable key yields a usable handle. */
+    LoroText* mt2 = loro_map_ensure_mergeable_text(m6, "mt", 2);
+    CHECK(mt2 != NULL);
+
+    /* a key holding a plain value is non-mergeable -> null. */
+    CHECK(loro_map_insert(m6, "plainkey", 8, "1", 1) == LORO_OK);
+    CHECK(loro_map_ensure_mergeable_text(m6, "plainkey", 8) == NULL);
+
+    loro_text_free(mt2);
+    loro_counter_free(mctr);
+    loro_tree_free(mtree);
+    loro_movable_list_free(mmov);
+    loro_list_free(mlist);
+    loro_map_free(mmap);
+    loro_text_free(mt);
+
+    /* Null-handle / out fallbacks for the G6.4/G6.5 surface. */
     CHECK(loro_text_is_attached(NULL) == false);
     CHECK(loro_text_get_attached(NULL) == NULL);
     CHECK(loro_text_doc(NULL) == NULL);
     CHECK(loro_text_get_editor_at_unicode_pos(NULL, 0, &tpeer) == false);
     CHECK(loro_text_get_editor_at_unicode_pos(t6, 0, NULL) == false);
     CHECK(loro_tree_get_last_move_id(NULL, node, &mid) == false);
+    CHECK(loro_tree_parent(NULL, node, &kind6, &pnode6) == false);
+    CHECK(loro_map_ensure_mergeable_text(NULL, "x", 1) == NULL);
 
     loro_text_free(det);
     loro_container_free(det_c);

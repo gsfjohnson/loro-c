@@ -133,6 +133,10 @@ using ContainerType = ::LoroContainerType;
 /// Identifies a tree node (`peer`, `counter`). Alias of the C ABI struct.
 using TreeId = ::LoroTreeID;
 
+/// How a tree node's parent is classified (root / deleted / node / unexist). Alias of the C
+/// ABI enum.
+using ParentKind = ::LoroTreeParentKind;
+
 /// Text position coordinate system (bytes / Unicode / UTF-16). Alias of the C ABI enum.
 using PosType = ::LoroPosType;
 
@@ -443,6 +447,25 @@ public:
             return std::nullopt;
         return out;
     }
+
+    // --- G6.5: mergeable child containers ---
+    //
+    // Get-or-create a child container at `key` whose concurrent creations at the same key
+    // *merge* into one container (unlike insert_container, which conflicts). Throws on error
+    // (e.g. the key already holds a non-mergeable value).
+
+    /// Get-or-create a mergeable Text child at `key`.
+    Text ensure_mergeable_text(std::string_view key);
+    /// Get-or-create a mergeable Map child at `key`.
+    Map ensure_mergeable_map(std::string_view key);
+    /// Get-or-create a mergeable List child at `key`.
+    List ensure_mergeable_list(std::string_view key);
+    /// Get-or-create a mergeable MovableList child at `key`.
+    MovableList ensure_mergeable_movable_list(std::string_view key);
+    /// Get-or-create a mergeable Tree child at `key`.
+    Tree ensure_mergeable_tree(std::string_view key);
+    /// Get-or-create a mergeable Counter child at `key`.
+    Counter ensure_mergeable_counter(std::string_view key);
 
 private:
     struct Deleter {
@@ -891,6 +914,60 @@ public:
         return out;
     }
 
+    // --- G6.5: tree extras ---
+
+    /// A node's parent classification (`kind`); `node` carries the parent id only when
+    /// `kind == LORO_TREE_PARENT_NODE`.
+    struct Parent {
+        ParentKind kind;
+        std::optional<TreeId> node;
+    };
+
+    /// The parent classification of `target`, or std::nullopt if `target` does not exist.
+    std::optional<Parent> parent(TreeId target) const {
+        ParentKind kind{};
+        TreeId node{};
+        if (!loro_tree_parent(handle_.get(), target, &kind, &node)) return std::nullopt;
+        Parent out{kind, std::nullopt};
+        if (kind == LORO_TREE_PARENT_NODE) out.node = node;
+        return out;
+    }
+
+    /// All root nodes as a JSON array string of `{peer,counter}` objects.
+    std::string roots_json() const {
+        detail::Bytes b;
+        detail::check(loro_tree_roots_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// All nodes (including deleted) as a JSON array string of `{peer,counter}` objects.
+    std::string nodes_json() const {
+        detail::Bytes b;
+        detail::check(loro_tree_nodes_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// The children of `parent` (nullopt = root) as a JSON array string of `{peer,counter}`
+    /// objects. Throws if `parent` does not exist.
+    std::string children_json(std::optional<TreeId> parent = std::nullopt) const {
+        const LoroTreeID* p = parent ? &parent.value() : nullptr;
+        detail::Bytes b;
+        detail::check(loro_tree_children_json(handle_.get(), p, b.out()));
+        return b.to_string();
+    }
+
+    /// The tree's hierarchy with each node's metadata resolved, as a JSON string.
+    std::string get_value_with_meta_json() const {
+        detail::Bytes b;
+        detail::check(loro_tree_get_value_with_meta_json(handle_.get(), b.out()));
+        return b.to_string();
+    }
+
+    /// Disables the fractional index (positional moves become unavailable afterwards).
+    void disable_fractional_index() {
+        detail::check(loro_tree_disable_fractional_index(handle_.get()));
+    }
+
 private:
     struct Deleter {
         void operator()(LoroTree* p) const noexcept { loro_tree_free(p); }
@@ -985,6 +1062,45 @@ inline Container Map::insert_container(std::string_view key, Container&& child) 
         loro_map_insert_container(handle_.get(), key.data(), key.size(), child.release());
     if (!a) throw Error(LORO_ERR_OTHER, detail::last_error_message());
     return Container(a);
+}
+
+// G6.5: Map mergeable child containers. Defined out-of-line because List/MovableList/Tree/
+// Counter are declared after Map.
+inline Text Map::ensure_mergeable_text(std::string_view key) {
+    LoroText* c = loro_map_ensure_mergeable_text(handle_.get(), key.data(), key.size());
+    if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Text(c);
+}
+
+inline Map Map::ensure_mergeable_map(std::string_view key) {
+    LoroMap* c = loro_map_ensure_mergeable_map(handle_.get(), key.data(), key.size());
+    if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Map(c);
+}
+
+inline List Map::ensure_mergeable_list(std::string_view key) {
+    LoroList* c = loro_map_ensure_mergeable_list(handle_.get(), key.data(), key.size());
+    if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return List(c);
+}
+
+inline MovableList Map::ensure_mergeable_movable_list(std::string_view key) {
+    LoroMovableList* c =
+        loro_map_ensure_mergeable_movable_list(handle_.get(), key.data(), key.size());
+    if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return MovableList(c);
+}
+
+inline Tree Map::ensure_mergeable_tree(std::string_view key) {
+    LoroTree* c = loro_map_ensure_mergeable_tree(handle_.get(), key.data(), key.size());
+    if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Tree(c);
+}
+
+inline Counter Map::ensure_mergeable_counter(std::string_view key) {
+    LoroCounter* c = loro_map_ensure_mergeable_counter(handle_.get(), key.data(), key.size());
+    if (!c) throw Error(LORO_ERR_OTHER, detail::last_error_message());
+    return Counter(c);
 }
 
 inline std::optional<Container> List::get_container(std::size_t index) const {

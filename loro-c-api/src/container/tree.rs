@@ -48,6 +48,47 @@ fn parent_opt(parent: *const LoroTreeID) -> Option<loro::TreeID> {
     unsafe { parent.as_ref() }.map(|p| p.to_loro())
 }
 
+/// Classifies the parent of a tree node, mirroring `loro::TreeParentId`. Written by
+/// [`loro_tree_parent`]; for `LORO_TREE_PARENT_NODE` the parent node id is written to the
+/// separate `out_node` out-param.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoroTreeParentKind {
+    /// The node is a root (it has no parent).
+    LORO_TREE_PARENT_ROOT = 0,
+    /// The node has been deleted.
+    LORO_TREE_PARENT_DELETED = 1,
+    /// The node has a parent node, whose id is written to `out_node`.
+    LORO_TREE_PARENT_NODE = 2,
+    /// The node was created in a version not yet checked out (does not exist here).
+    LORO_TREE_PARENT_UNEXIST = 3,
+}
+
+/// Serializes a slice of tree ids as a JSON array of `{"peer":u64,"counter":i32}` objects,
+/// writing the bytes into `*out` on success.
+fn write_tree_ids_json(ids: &[loro::TreeID], out: *mut LoroBytes) -> LoroStatus {
+    let arr: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "peer": id.peer,
+                "counter": id.counter,
+            })
+        })
+        .collect();
+    match serde_json::to_vec(&arr) {
+        Ok(bytes) => {
+            unsafe { out.write(LoroBytes::from_vec(bytes)) };
+            LoroStatus::LORO_OK
+        }
+        Err(e) => {
+            set_last_error(format!("failed to serialize tree ids to JSON: {e}"));
+            LoroStatus::LORO_ERR_ENCODE
+        }
+    }
+}
+
 /// Opaque handle to a Loro tree container.
 pub struct LoroTree(loro::LoroTree);
 
@@ -550,5 +591,140 @@ pub extern "C" fn loro_tree_get_last_move_id(
             }
             None => false,
         }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.5 — tree extras
+// ---------------------------------------------------------------------------
+
+/// Classifies `target`'s parent into `*out_kind` and returns true; for
+/// `LORO_TREE_PARENT_NODE` the parent node id is also written to `*out_node`. Returns false
+/// (leaving both out-params untouched) when `target` does not exist, or on a null handle /
+/// null out-param / caught panic.
+#[no_mangle]
+pub extern "C" fn loro_tree_parent(
+    tree: *const LoroTree,
+    target: LoroTreeID,
+    out_kind: *mut LoroTreeParentKind,
+    out_node: *mut LoroTreeID,
+) -> bool {
+    ffi_guard!(false, {
+        let tree = deref_or!(tree, false);
+        if out_kind.is_null() || out_node.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        match tree.inner().parent(target.to_loro()) {
+            Some(loro::TreeParentId::Root) => {
+                unsafe { out_kind.write(LoroTreeParentKind::LORO_TREE_PARENT_ROOT) };
+                true
+            }
+            Some(loro::TreeParentId::Deleted) => {
+                unsafe { out_kind.write(LoroTreeParentKind::LORO_TREE_PARENT_DELETED) };
+                true
+            }
+            Some(loro::TreeParentId::Node(id)) => {
+                unsafe {
+                    out_kind.write(LoroTreeParentKind::LORO_TREE_PARENT_NODE);
+                    out_node.write(LoroTreeID::from_loro(id));
+                }
+                true
+            }
+            Some(loro::TreeParentId::Unexist) => {
+                unsafe { out_kind.write(LoroTreeParentKind::LORO_TREE_PARENT_UNEXIST) };
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Writes all root nodes as a JSON array of `{peer,counter}` objects into `*out`. `*out` is
+/// only written on `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_tree_roots_json(tree: *const LoroTree, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        write_tree_ids_json(&tree.inner().roots(), out)
+    })
+}
+
+/// Writes all nodes (including deleted ones) as a JSON array of `{peer,counter}` objects into
+/// `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_tree_nodes_json(tree: *const LoroTree, out: *mut LoroBytes) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        write_tree_ids_json(&tree.inner().nodes(), out)
+    })
+}
+
+/// Writes the children of `parent` (null = root) as a JSON array of `{peer,counter}` objects
+/// into `*out`. Returns `LORO_ERR_NOT_FOUND` if `parent` does not exist. `*out` is only
+/// written on `LORO_OK`; free it with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_tree_children_json(
+    tree: *const LoroTree,
+    parent: *const LoroTreeID,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        match tree.inner().children(parent_opt(parent)) {
+            Some(children) => write_tree_ids_json(&children, out),
+            None => {
+                set_last_error("parent node not found");
+                LoroStatus::LORO_ERR_NOT_FOUND
+            }
+        }
+    })
+}
+
+/// Writes the tree's hierarchy with each node's metadata resolved, as a JSON value, into
+/// `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. (For the
+/// plain hierarchy without metadata, use `loro_tree_to_json`.)
+#[no_mangle]
+pub extern "C" fn loro_tree_get_value_with_meta_json(
+    tree: *const LoroTree,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let value = tree.inner().get_value_with_meta();
+        match value_to_json_bytes(&value) {
+            Some(bytes) => {
+                unsafe { out.write(LoroBytes::from_vec(bytes)) };
+                LoroStatus::LORO_OK
+            }
+            None => LoroStatus::LORO_ERR_ENCODE,
+        }
+    })
+}
+
+/// Disables the tree's fractional index. After this, positional moves (`mov_to`/`mov_after`/
+/// `mov_before`) and `create_at` are no longer usable.
+#[no_mangle]
+pub extern "C" fn loro_tree_disable_fractional_index(tree: *mut LoroTree) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        tree.inner().disable_fractional_index();
+        LoroStatus::LORO_OK
     })
 }

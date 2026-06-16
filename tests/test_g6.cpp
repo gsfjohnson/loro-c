@@ -424,6 +424,126 @@ static void test_g64_attribution() {
     }
 }
 
+// G6.5: tree extras (parent classification, bulk JSON, value-with-meta, disable fractional
+// index) and Map's mergeable child containers.
+static void test_g65() {
+    // --- Tree: parent classification ---
+    {
+        loro::Doc doc;
+        loro::Tree tr = doc.get_tree("tr");
+        loro::TreeId r = tr.create();
+        loro::TreeId c = tr.create(r);
+        doc.commit();
+
+        auto pr = tr.parent(r);
+        CHECK(pr.has_value() && pr->kind == LORO_TREE_PARENT_ROOT);
+        CHECK(pr.has_value() && !pr->node.has_value());
+
+        auto pc = tr.parent(c);
+        CHECK(pc.has_value() && pc->kind == LORO_TREE_PARENT_NODE);
+        CHECK(pc.has_value() && pc->node.has_value());
+        CHECK(pc.has_value() && pc->node.has_value() && pc->node->peer == r.peer &&
+              pc->node->counter == r.counter);
+
+        loro::TreeId bogus{999999u, 4242};
+        CHECK(!tr.parent(bogus).has_value());
+
+        // A deleted node reports DELETED.
+        tr.erase(c);
+        doc.commit();
+        auto pd = tr.parent(c);
+        CHECK(pd.has_value() && pd->kind == LORO_TREE_PARENT_DELETED);
+    }
+
+    // --- Tree: bulk JSON forms ---
+    {
+        loro::Doc doc;
+        loro::Tree tr = doc.get_tree("tr");
+        loro::TreeId r = tr.create();
+        loro::TreeId c = tr.create(r);
+        doc.commit();
+
+        const std::string roots = tr.roots_json();
+        CHECK(roots.find("peer") != std::string::npos);
+        CHECK(roots.find("counter") != std::string::npos);
+
+        const std::string nodes = tr.nodes_json();
+        CHECK(nodes.find(std::to_string(r.counter)) != std::string::npos);
+        CHECK(nodes.find(std::to_string(c.counter)) != std::string::npos);
+
+        const std::string kids = tr.children_json(r);
+        CHECK(kids.find(std::to_string(c.counter)) != std::string::npos);
+
+        const std::string topkids = tr.children_json();  // root level
+        CHECK(topkids.find(std::to_string(r.counter)) != std::string::npos);
+
+        // A nonexistent parent throws (NOT_FOUND).
+        bool threw = false;
+        try {
+            tr.children_json(loro::TreeId{999999u, 4242});
+        } catch (const loro::Error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // --- Tree: value-with-meta + disable fractional index ---
+    {
+        loro::Doc doc;
+        loro::Tree tr = doc.get_tree("tr");
+        loro::TreeId r = tr.create();
+        tr.get_meta(r).insert("color", "\"red\"");
+        doc.commit();
+        const std::string vm = tr.get_value_with_meta_json();
+        CHECK(vm.find("color") != std::string::npos);
+        CHECK(vm.find("red") != std::string::npos);
+
+        tr.enable_fractional_index(0);
+        CHECK(tr.is_fractional_index_enabled());
+        tr.disable_fractional_index();
+        CHECK(!tr.is_fractional_index_enabled());
+    }
+
+    // --- Map: ensure_mergeable_* for each container type ---
+    {
+        loro::Doc doc;
+        loro::Map m = doc.get_map("m");
+
+        loro::Text t = m.ensure_mergeable_text("t");
+        t.insert(0, "hi");
+        loro::Map mm = m.ensure_mergeable_map("mm");
+        mm.insert("k", "1");
+        loro::List l = m.ensure_mergeable_list("l");
+        l.insert(0, "1");
+        loro::MovableList ml = m.ensure_mergeable_movable_list("ml");
+        ml.insert(0, "1");
+        loro::Tree tr = m.ensure_mergeable_tree("tr");
+        tr.create();
+        loro::Counter ct = m.ensure_mergeable_counter("ct");
+        ct.increment(3);
+        doc.commit();
+
+        const std::string j = m.to_json();
+        CHECK(j.find("\"t\"") != std::string::npos);
+        CHECK(j.find("hi") != std::string::npos);
+        CHECK(j.find("\"mm\"") != std::string::npos);
+
+        // Idempotent: re-requesting the same mergeable key yields a usable handle.
+        loro::Text t2 = m.ensure_mergeable_text("t");
+        CHECK(t2.to_string() == "hi");
+
+        // A key holding a plain value is non-mergeable -> throws.
+        m.insert("plain", "1");
+        bool threw = false;
+        try {
+            m.ensure_mergeable_text("plain");
+        } catch (const loro::Error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
 int main() {
     test_config_defaults();
     test_config_handle_shares_live_state();
@@ -444,6 +564,7 @@ int main() {
     test_g64_deleted();
     test_g64_subscribe_fires();
     test_g64_attribution();
+    test_g65();
 
     if (failures == 0) {
         std::puts("test_g6: OK");

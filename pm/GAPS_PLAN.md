@@ -328,11 +328,11 @@ the end of this section.
 
 ### G6.5 — Tree extras & mergeable — [container/tree.rs](loro-c-api/src/container/tree.rs) + [container/map.rs](loro-c-api/src/container/map.rs) (12 fns)
 
-- [ ] Tree: `LoroTreeParentKind` enum + `_parent(LoroTreeID, out_kind, out_node)`→bool;
+- [x] Tree: `LoroTreeParentKind` enum + `_parent(LoroTreeID, out_kind, out_node)`→bool;
   JSON-array bulk forms `_roots_json`, `_nodes_json`, `_children_json(parent*)` (TreeID
   `{peer,counter}`); `_get_value_with_meta_json` (JSON); `_disable_fractional_index`.
   (`get_value` is covered by the existing `loro_tree_to_json` — omit.)
-- [ ] Map mergeable — upstream `ensure_mergeable_*` lives on **`LoroMap` only**, arg `key:&str`,
+- [x] Map mergeable — upstream `ensure_mergeable_*` lives on **`LoroMap` only**, arg `key:&str`,
   returns the matching typed handle (null on Err):
   `_ensure_mergeable_{text,map,list,movable_list,tree,counter}`. (The plan's earlier
   "map/list/movable_list" was inaccurate — list/movable_list have no such method.) Distinct from

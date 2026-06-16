@@ -11,6 +11,11 @@
 
 use crate::callbacks::CCallback;
 use crate::container::any::LoroContainer;
+use crate::container::counter::LoroCounter;
+use crate::container::list::LoroList;
+use crate::container::movable_list::LoroMovableList;
+use crate::container::text::LoroText;
+use crate::container::tree::LoroTree;
 use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
@@ -389,6 +394,160 @@ pub extern "C" fn loro_map_get_last_editor(
                 true
             }
             None => false,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// G6.5 — mergeable child containers
+// ---------------------------------------------------------------------------
+//
+// `ensure_mergeable_*` gets (or creates) a child container at `key` whose concurrent
+// creations at the same key *merge* into one container, rather than conflicting as the
+// generic `loro_map_insert_container` path does. Each returns a typed handle (null on error,
+// e.g. the key already holds a non-mergeable value); free it with the matching `loro_*_free`.
+
+/// Gets or creates a mergeable text container at `(key, key_len)`. Returns null on error
+/// (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_text_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_ensure_mergeable_text(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroText {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().ensure_mergeable_text(key) {
+            Ok(c) => Box::into_raw(Box::new(LoroText::from_inner(c))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Gets or creates a mergeable map container at `(key, key_len)`. Returns null on error
+/// (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_map_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_ensure_mergeable_map(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroMap {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().ensure_mergeable_map(key) {
+            Ok(c) => Box::into_raw(Box::new(LoroMap::from_inner(c))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Gets or creates a mergeable list container at `(key, key_len)`. Returns null on error
+/// (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_list_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_ensure_mergeable_list(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().ensure_mergeable_list(key) {
+            Ok(c) => Box::into_raw(Box::new(LoroList::from_inner(c))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Gets or creates a mergeable movable-list container at `(key, key_len)`. Returns null on
+/// error (bad UTF-8 key, or the key holds a non-mergeable value). Free with
+/// `loro_movable_list_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_ensure_mergeable_movable_list(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroMovableList {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().ensure_mergeable_movable_list(key) {
+            Ok(c) => Box::into_raw(Box::new(LoroMovableList::from_inner(c))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Gets or creates a mergeable tree container at `(key, key_len)`. Returns null on error
+/// (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_tree_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_ensure_mergeable_tree(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroTree {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().ensure_mergeable_tree(key) {
+            Ok(c) => Box::into_raw(Box::new(LoroTree::from_inner(c))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Gets or creates a mergeable counter container at `(key, key_len)`. Returns null on error
+/// (bad UTF-8 key, or the key holds a non-mergeable value). Free with `loro_counter_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_ensure_mergeable_counter(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroCounter {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().ensure_mergeable_counter(key) {
+            Ok(c) => Box::into_raw(Box::new(LoroCounter::from_inner(c))),
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
         }
     })
 }

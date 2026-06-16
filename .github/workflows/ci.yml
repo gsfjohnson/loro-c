@@ -74,6 +74,112 @@ jobs:
             $(pkg-config --libs --static loro) -o consumer_pc
           ./consumer_pc
 
+  # MSYS2/CLANG64 gnullvm path — the local dev-box toolchain and the ABI-compatible
+  # mingw/clang artifact. The build-test job above covers only MSVC/Corrosion, so without
+  # this the manual cargo->CMake path (LORO_USE_CORROSION=OFF, see
+  # cmake/BuildRustStaticlib.cmake) would be exercised only at release time. This job runs
+  # it on every push/PR so a regression in that path (or the gnullvm system-lib list)
+  # surfaces here rather than during a release. Separate job (not a matrix entry on
+  # build-test) because the shell, toolchain setup, and path handling diverge wholesale
+  # from the native jobs. Mirrors release.yml's build-windows-gnullvm job, minus the
+  # packaging/upload/release steps; Release-only because the manual path always builds the
+  # Rust staticlib in release (a Debug variant would only re-run the thin C/C++ test layer).
+  build-windows-gnullvm:
+    name: windows-2022 (gnullvm)
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        shell: 'msys2 {0}'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # path-type: inherit appends the Windows PATH after MSYS2's, so the shell can see
+      # rustup's ~/.cargo/bin (added to the Windows PATH via $GITHUB_PATH in "Expose rustup"
+      # below). cmake/ninja come from the MSYS2 *base* repo (msys/cmake, msys/ninja): that
+      # build reports CMAKE_HOST_SYSTEM_NAME == "MSYS" and consumes POSIX paths, which is
+      # what the manual build path expects. clang/pkgconf come from CLANG64 for the C/C++
+      # layer + tests.
+      - name: Setup MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          path-type: inherit
+          install: >-
+            git
+            cmake
+            ninja
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-pkgconf
+
+      # Installs rustup + stable and puts ~/.cargo/bin on the Windows PATH.
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+
+      # The rustup toolchain isn't on the MSYS2 PATH by default. cygpath -u converts
+      # $USERPROFILE (C:\Users\…) to MSYS form (/c/Users/…); embedding the raw Windows path
+      # breaks $PATH because the drive-letter colon reads as a PATH separator.
+      - name: Expose rustup to MSYS2
+        run: |
+          CARGO_BIN="$(cygpath -u "$USERPROFILE")/.cargo/bin"
+          echo "$CARGO_BIN" >> "$GITHUB_PATH"
+          export PATH="$CARGO_BIN:$PATH"
+          rustc --version
+          cargo --version
+
+      # The runner's default toolchain is msvc-host; install the gnullvm-host toolchain that
+      # the manual build pins via LORO_RUST_TOOLCHAIN. With a gnullvm host the build target
+      # == host, so std is present and linking goes through gnullvm (clang/lld) rather than
+      # MSVC link.exe.
+      - name: Install gnullvm Rust toolchain
+        run: rustup toolchain install --no-self-update stable-x86_64-pc-windows-gnullvm
+
+      # MSYS2-base cmake does not treat D:\… (or D:/…) as absolute and would double-nest the
+      # install tree; convert $GITHUB_WORKSPACE to MSYS form so cmake sees /d/a/….
+      - name: Compute workspace paths
+        run: echo "INSTALL_DIR=$(cygpath -u "${GITHUB_WORKSPACE}")/install" >> "${GITHUB_ENV}"
+
+      # Manual path: gnullvm target + the gnullvm toolchain. cmake auto-detects the CLANG64
+      # clang/clang++ from PATH for the C/C++ layer and tests.
+      - name: Configure (Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DLORO_BUILD_EXAMPLES=ON \
+            -DLORO_USE_CORROSION=OFF \
+            -DLORO_CARGO_TARGET=x86_64-pc-windows-gnullvm \
+            -DLORO_RUST_TOOLCHAIN=stable-x86_64-pc-windows-gnullvm \
+            -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install
+        run: cmake --install build
+
+      # find_package against the install tree exercises loro-manual-targets.cmake (the
+      # relocatable IMPORTED archive) + the baked gnullvm system-lib list (incl. libunwind).
+      # This is the real check that the packaged tree links.
+      - name: Consumer find_package smoke test
+        run: |
+          cmake -S tests/consumer -B build-consumer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.INSTALL_DIR }}"
+          cmake --build build-consumer --parallel
+          ctest --test-dir build-consumer --output-on-failure
+
   # Guarantee the committed C header matches the Rust source: regenerate with the pinned
   # cbindgen CLI and fail on any diff (Cargo build scripts must never mutate the source tree,
   # so the header is committed and verified here instead).

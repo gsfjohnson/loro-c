@@ -1207,11 +1207,19 @@ struct LoroText {
     void insert(uint32_t pos, const std::string &s) {
         detail::check(loro_text_insert(raw_, pos, s.data(), s.size()));
     }
+    /// Like `insert`, but `pos` is a UTF-8 **byte** offset (not a codepoint index).
+    void insert_utf8(uint32_t pos, const std::string &s) {
+        detail::check(loro_text_insert_utf8(raw_, pos, s.data(), s.size()));
+    }
     void push_str(const std::string &s) {
         detail::check(loro_text_push_str(raw_, s.data(), s.size()));
     }
     void delete_(uint32_t pos, uint32_t len) {
         detail::check(loro_text_delete(raw_, pos, len));
+    }
+    /// Like `delete_`, but `pos`/`len` are UTF-8 **byte** offsets/lengths.
+    void delete_utf8(uint32_t pos, uint32_t len) {
+        detail::check(loro_text_delete_utf8(raw_, pos, len));
     }
     std::string splice(uint32_t pos, uint32_t len, const std::string &s) {
         detail::Bytes removed;
@@ -1245,6 +1253,14 @@ struct LoroText {
         std::string json = detail::value_to_json(v);
         detail::check(loro_text_mark(raw_, from, to, key.data(), key.size(), json.data(),
                                      json.size()));
+    }
+    /// Like `mark`, but `from`/`to` are UTF-8 **byte** indices.
+    void mark_utf8(uint32_t from, uint32_t to, const std::string &key,
+                   const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        std::string json = detail::value_to_json(v);
+        detail::check(loro_text_mark_utf8(raw_, from, to, key.data(), key.size(), json.data(),
+                                          json.size()));
     }
     void unmark(uint32_t from, uint32_t to, const std::string &key) {
         detail::check(loro_text_unmark(raw_, from, to, key.data(), key.size()));

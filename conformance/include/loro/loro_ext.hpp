@@ -16,6 +16,7 @@
 #include <loro.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -329,6 +330,110 @@ inline std::shared_ptr<C> set_container(LoroMovableList &parent, uint32_t pos,
 template <class C>
 inline std::shared_ptr<C> set_container(LoroMovableList &parent, uint32_t pos) {
     return container_traits<C>::mlist_set(parent, pos, container_traits<C>::create());
+}
+
+// ============================================================================
+// Subscriptions (RESHAPE Phase 3)
+// ============================================================================
+//
+// Lambda → callback-interface adapters and `subscribe_*` shortcuts, ported from
+// ../loro-cpp/include/loro/loro_ext.hpp. Each adapter wraps a std::function in a one-off
+// subclass of the matching pure-virtual interface (idiom shared with `value_like`).
+
+inline std::shared_ptr<Subscriber> on_diff(std::function<void(const DiffEvent &)> fn) {
+    struct Impl : public Subscriber {
+        std::function<void(const DiffEvent &)> fn;
+        explicit Impl(std::function<void(const DiffEvent &)> f) : fn(std::move(f)) {}
+        void on_diff(const DiffEvent &diff) override {
+            if (fn) fn(diff);
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
+inline std::shared_ptr<LocalUpdateCallback> on_local_update(
+    std::function<void(const std::vector<uint8_t> &)> fn) {
+    struct Impl : public LocalUpdateCallback {
+        std::function<void(const std::vector<uint8_t> &)> fn;
+        explicit Impl(std::function<void(const std::vector<uint8_t> &)> f) : fn(std::move(f)) {}
+        void on_local_update(const std::vector<uint8_t> &update) override {
+            if (fn) fn(update);
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
+inline std::shared_ptr<FirstCommitFromPeerCallback> on_first_commit_from_peer(
+    std::function<void(const FirstCommitFromPeerPayload &)> fn) {
+    struct Impl : public FirstCommitFromPeerCallback {
+        std::function<void(const FirstCommitFromPeerPayload &)> fn;
+        explicit Impl(std::function<void(const FirstCommitFromPeerPayload &)> f)
+            : fn(std::move(f)) {}
+        void on_first_commit_from_peer(const FirstCommitFromPeerPayload &p) override {
+            if (fn) fn(p);
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
+inline std::shared_ptr<PreCommitCallback> on_pre_commit(
+    std::function<void(const PreCommitCallbackPayload &)> fn) {
+    struct Impl : public PreCommitCallback {
+        std::function<void(const PreCommitCallbackPayload &)> fn;
+        explicit Impl(std::function<void(const PreCommitCallbackPayload &)> f) : fn(std::move(f)) {}
+        void on_pre_commit(const PreCommitCallbackPayload &p) override {
+            if (fn) fn(p);
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
+// subscribe_* shortcuts on LoroDoc.
+inline std::shared_ptr<Subscription> subscribe_root(LoroDoc &doc,
+                                                    std::function<void(const DiffEvent &)> fn) {
+    return doc.subscribe_root(on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe(LoroDoc &doc, ContainerId cid,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return doc.subscribe(std::move(cid), on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe_local_update(
+    LoroDoc &doc, std::function<void(const std::vector<uint8_t> &)> fn) {
+    return doc.subscribe_local_update(on_local_update(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe_first_commit_from_peer(
+    LoroDoc &doc, std::function<void(const FirstCommitFromPeerPayload &)> fn) {
+    return doc.subscribe_first_commit_from_peer(on_first_commit_from_peer(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe_pre_commit(
+    LoroDoc &doc, std::function<void(const PreCommitCallbackPayload &)> fn) {
+    return doc.subscribe_pre_commit(on_pre_commit(std::move(fn)));
+}
+
+// Per-container subscribe shortcuts (every container exposes `subscribe(shared_ptr<Subscriber>)`).
+inline std::shared_ptr<Subscription> subscribe(LoroText &c,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return c.subscribe(on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe(LoroMap &c,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return c.subscribe(on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe(LoroList &c,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return c.subscribe(on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe(LoroMovableList &c,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return c.subscribe(on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe(LoroTree &c,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return c.subscribe(on_diff(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe(LoroCounter &c,
+                                               std::function<void(const DiffEvent &)> fn) {
+    return c.subscribe(on_diff(std::move(fn)));
 }
 
 }  // namespace ext

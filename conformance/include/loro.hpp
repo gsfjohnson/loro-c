@@ -79,8 +79,20 @@ struct EphemeralSubscriber;
 struct VersionVector;
 struct Frontiers;
 
+// RESHAPE Phase 3 — subscriptions / events / commit hooks.
+struct Subscriber;
+struct LocalUpdateCallback;
+struct FirstCommitFromPeerCallback;
+struct PreCommitCallback;
+struct ChangeMeta;
+struct ChangeModifier;
+struct PreCommitCallbackPayload;
+
 namespace detail {
 struct Factory;  // privileged construction helper; defined after the wrapper classes.
+struct FrontiersFactory;          // builds a Frontiers from an owned ::LoroFrontiers* (Phase 3).
+struct SubscriptionFactory;       // builds a Subscription from a ::LoroSubscription* (Phase 3).
+struct PreCommitPayloadBuilder;   // builds a ChangeModifier from a callback-scoped payload (Phase 3).
 }
 
 // --------------------------------------------------------- enums & POD types
@@ -96,6 +108,25 @@ enum class Side : int32_t {
     kLeft = 1,
     kMiddle = 2,
     kRight = 3,
+};
+
+/// How a diff event was triggered (loro-cpp `EventTriggerKind`). Mirrors the C ABI
+/// `LoroEventTriggerKind`.
+enum class EventTriggerKind : int32_t {
+    kLocal = 0,
+    kImport = 1,
+    kCheckout = 2,
+};
+
+/// The kind of a container diff (loro-cpp `Diff` union tag). Mirrors the C ABI `LoroDiffKind`.
+/// Phase 3 ships the kind only; the typed `Diff` payload is deferred (see [`ContainerDiff`]).
+enum class DiffKind : int32_t {
+    kList = 0,
+    kText = 1,
+    kMap = 2,
+    kTree = 3,
+    kCounter = 4,
+    kUnknown = 5,
 };
 
 struct ContainerType {
@@ -144,6 +175,13 @@ private:
     std::variant<kRoot, kNormal> variant;
 };
 
+/// An operation id (loro-cpp `Id`). Mirrors the C ABI `LoroId`. Brace-initialisable as
+/// `loro::Id{peer, counter}`.
+struct Id {
+    uint64_t peer;
+    int32_t counter;
+};
+
 /// A tree node id (uniffi `TreeID`).
 struct TreeId {
     uint64_t peer;
@@ -170,6 +208,34 @@ private:
     std::variant<kNode, kRoot, kDeleted, kUnexist> variant;
 };
 
+/// One step in a diff [`PathItem`] (uniffi `Index`): a map key, a list index (uniffi quirk
+/// `kSeq`), or a tree node.
+struct Index {
+    struct kKey {
+        std::string key;
+    };
+    struct kSeq {
+        uint32_t index;
+    };
+    struct kNode {
+        TreeId target;
+    };
+    Index(kKey variant) : variant(std::move(variant)) {}
+    Index(kSeq variant) : variant(variant) {}
+    Index(kNode variant) : variant(variant) {}
+
+    const std::variant<kKey, kSeq, kNode> &get_variant() const { return variant; }
+
+private:
+    std::variant<kKey, kSeq, kNode> variant;
+};
+
+/// A single hop on the path from the root to a changed container (uniffi `PathItem`).
+struct PathItem {
+    ContainerId container;
+    Index index;
+};
+
 struct CounterSpan {
     int32_t start;
     int32_t end;
@@ -187,6 +253,34 @@ struct StyleConfig {
 struct AbsolutePosition {
     uint32_t pos;
     Side side;
+};
+
+/// The peer of a first-commit-from-peer event (loro-cpp `FirstCommitFromPeerPayload`).
+struct FirstCommitFromPeerPayload {
+    uint64_t peer;
+};
+
+/// One container's diff within a [`DiffEvent`] (loro-cpp `ContainerDiff`).
+///
+/// Phase 3 ships the *envelope*: the changed container (`target`), the path from the root
+/// (`path`), whether the container type is unknown (`is_unknown`), and the diff `kind`. The
+/// typed `Diff` payload (the list/text/map/tree delta items with values) is deferred per
+/// RESHAPE.md (gated on an audit of the app's `on_diff` handlers); a caller needing it today
+/// can read the C ABI `loro_container_diff_to_json`.
+struct ContainerDiff {
+    ContainerId target;
+    std::vector<PathItem> path;
+    bool is_unknown;
+    DiffKind kind;
+};
+
+/// An owned diff event (loro-cpp `DiffEvent`). Unlike loro-c's callback-scoped C view, this is a
+/// fully-owned value the subscriber may stash beyond the callback (e.g. `current_target`).
+struct DiffEvent {
+    EventTriggerKind triggered_by;
+    std::string origin;
+    std::optional<ContainerId> current_target;
+    std::vector<ContainerDiff> events;
 };
 
 // ------------------------------------------------------------- typed values
@@ -279,6 +373,34 @@ struct ContainerIdLike {
 struct LoroValueLike {
     virtual ~LoroValueLike() {}
     virtual LoroValue as_loro_value() = 0;
+};
+
+// ----------------------------------------------- subscription callback interfaces
+
+/// Diff subscriber (loro-cpp `Subscriber`). `on_diff` receives an owned [`DiffEvent`].
+struct Subscriber {
+    virtual ~Subscriber() {}
+    virtual void on_diff(const DiffEvent &diff) = 0;
+};
+
+/// Local-update subscriber (loro-cpp `LocalUpdateCallback`): the raw update bytes of each local
+/// commit.
+struct LocalUpdateCallback {
+    virtual ~LocalUpdateCallback() {}
+    virtual void on_local_update(const std::vector<uint8_t> &update) = 0;
+};
+
+/// First-commit-from-peer subscriber (loro-cpp `FirstCommitFromPeerCallback`).
+struct FirstCommitFromPeerCallback {
+    virtual ~FirstCommitFromPeerCallback() {}
+    virtual void on_first_commit_from_peer(const FirstCommitFromPeerPayload &payload) = 0;
+};
+
+/// Pre-commit hook (loro-cpp `PreCommitCallback`); may rewrite the commit's message/timestamp
+/// via the payload's [`ChangeModifier`].
+struct PreCommitCallback {
+    virtual ~PreCommitCallback() {}
+    virtual void on_pre_commit(const PreCommitCallbackPayload &payload) = 0;
 };
 
 struct PosQueryResult {
@@ -1004,6 +1126,9 @@ struct LoroText {
     bool is_attached() { return raw_ ? loro_text_is_attached(raw_) : false; }
     bool is_empty() { return loro_text_is_empty(raw_); }
 
+    std::shared_ptr<Subscription> subscribe(
+        const std::shared_ptr<Subscriber> &subscriber);  // out-of-line
+
     ~LoroText() {
         if (raw_) loro_text_free(raw_);
         else if (container_) loro_container_free(container_);
@@ -1097,6 +1222,9 @@ struct LoroMap {
                                                            std::shared_ptr<LoroTree> c);
     std::shared_ptr<LoroCounter> get_or_create_counter_container(
         const std::string &k, std::shared_ptr<LoroCounter> c);
+
+    std::shared_ptr<Subscription> subscribe(
+        const std::shared_ptr<Subscriber> &subscriber);  // out-of-line
 
     ~LoroMap() {
         if (raw_) loro_map_free(raw_);
@@ -1196,6 +1324,9 @@ struct LoroList {
     std::shared_ptr<LoroTree> insert_tree_container(uint32_t pos, std::shared_ptr<LoroTree> c);
     std::shared_ptr<LoroCounter> insert_counter_container(uint32_t pos,
                                                           std::shared_ptr<LoroCounter> c);
+
+    std::shared_ptr<Subscription> subscribe(
+        const std::shared_ptr<Subscriber> &subscriber);  // out-of-line
 
     ~LoroList() {
         if (raw_) loro_list_free(raw_);
@@ -1300,6 +1431,9 @@ struct LoroMovableList {
     std::shared_ptr<LoroTree> set_tree_container(uint32_t pos, std::shared_ptr<LoroTree> c);
     std::shared_ptr<LoroCounter> set_counter_container(uint32_t pos,
                                                        std::shared_ptr<LoroCounter> c);
+
+    std::shared_ptr<Subscription> subscribe(
+        const std::shared_ptr<Subscriber> &subscriber);  // out-of-line
 
     ~LoroMovableList() {
         if (raw_) loro_movable_list_free(raw_);
@@ -1468,6 +1602,9 @@ struct LoroTree {
         return detail::cid_string_to_container_id(b.to_string());
     }
 
+    std::shared_ptr<Subscription> subscribe(
+        const std::shared_ptr<Subscriber> &subscriber);  // out-of-line
+
     ~LoroTree() {
         if (raw_) loro_tree_free(raw_);
         else if (container_) loro_container_free(container_);
@@ -1521,6 +1658,9 @@ struct LoroCounter {
         detail::check(loro_counter_id(counter(), b.out()));
         return detail::cid_string_to_container_id(b.to_string());
     }
+
+    std::shared_ptr<Subscription> subscribe(
+        const std::shared_ptr<Subscriber> &subscriber);  // out-of-line
 
     ~LoroCounter() {
         if (raw_) loro_counter_free(raw_);
@@ -1960,7 +2100,90 @@ private:
     explicit Frontiers(::LoroFrontiers *raw) : raw_(raw) {}
     ::LoroFrontiers *raw_;
     friend struct LoroDoc;
+    friend struct detail::FrontiersFactory;
 };
+
+namespace detail {
+/// Adopts an owned `::LoroFrontiers*` (e.g. from `loro_change_meta_deps`) as a [`Frontiers`].
+struct FrontiersFactory {
+    static std::shared_ptr<Frontiers> adopt(::LoroFrontiers *raw) {
+        return std::shared_ptr<Frontiers>(new Frontiers(raw));
+    }
+};
+}  // namespace detail
+
+// ------------------------------------------------------- change metadata / hooks
+
+/// Metadata for one change (loro-cpp `ChangeMeta`). `deps` owns its [`Frontiers`].
+struct ChangeMeta {
+    uint32_t lamport;
+    Id id;
+    int64_t timestamp;
+    std::optional<std::string> message;
+    std::shared_ptr<Frontiers> deps;
+    uint32_t len;
+};
+
+/// Rewrites the message / timestamp of the commit being processed (loro-cpp `ChangeModifier`).
+///
+/// **Lifetime:** borrows the callback-scoped `const LoroPreCommitPayload*` and is valid **only**
+/// for the duration of `PreCommitCallback::on_pre_commit`. Do not store it and call it later.
+struct ChangeModifier {
+    void set_message(const std::string &msg) {
+        detail::check(loro_pre_commit_payload_set_message(payload_, msg.data(), msg.size()));
+    }
+    void set_timestamp(int64_t timestamp) {
+        detail::check(loro_pre_commit_payload_set_timestamp(payload_, timestamp));
+    }
+
+    ChangeModifier(const ChangeModifier &) = delete;
+    ChangeModifier &operator=(const ChangeModifier &) = delete;
+
+private:
+    explicit ChangeModifier(const ::LoroPreCommitPayload *payload) : payload_(payload) {}
+    const ::LoroPreCommitPayload *payload_;
+    friend struct detail::PreCommitPayloadBuilder;
+};
+
+namespace detail {
+/// Builds a callback-scoped [`ChangeModifier`] over a borrowed pre-commit payload.
+struct PreCommitPayloadBuilder {
+    static std::shared_ptr<ChangeModifier> modifier(const ::LoroPreCommitPayload *payload) {
+        return std::shared_ptr<ChangeModifier>(new ChangeModifier(payload));
+    }
+};
+}  // namespace detail
+
+/// Payload of a pre-commit hook (loro-cpp `PreCommitCallbackPayload`).
+struct PreCommitCallbackPayload {
+    ChangeMeta change_meta;
+    std::string origin;
+    std::shared_ptr<ChangeModifier> modifier;
+};
+
+namespace detail {
+/// Copies a callback-scoped `const LoroChangeMeta*` into an owned [`ChangeMeta`]. `deps` is
+/// rebuilt from the change's own owned `loro_change_meta_deps`, so the result outlives the C
+/// handle. An empty C message becomes `std::nullopt` (the C ABI gives no Some("") signal here).
+inline ChangeMeta change_meta_from_c(const ::LoroChangeMeta *cm) {
+    ChangeMeta m;
+    ::LoroId cid = loro_change_meta_id(cm);
+    m.id = Id{cid.peer, cid.counter};
+    m.lamport = loro_change_meta_lamport(cm);
+    m.timestamp = loro_change_meta_timestamp(cm);
+    m.len = static_cast<uint32_t>(loro_change_meta_len(cm));
+    Bytes msg;
+    if (loro_change_meta_message(cm, msg.out()) == LORO_OK) {
+        std::string s = msg.to_string();
+        m.message = s.empty() ? std::nullopt : std::optional<std::string>(std::move(s));
+    } else {
+        m.message = std::nullopt;
+    }
+    ::LoroFrontiers *deps = loro_change_meta_deps(cm);  // owned
+    m.deps = deps ? FrontiersFactory::adopt(deps) : Frontiers::init();
+    return m;
+}
+}  // namespace detail
 
 // ------------------------------------------------------------- style config map
 
@@ -2170,6 +2393,47 @@ struct LoroDoc {
         return r;
     }
 
+    // ---- change introspection / commit config (RESHAPE Phase 3) ----
+
+    void set_record_timestamp(bool record) { loro_doc_set_record_timestamp(raw_, record); }
+
+    uint64_t len_changes() { return static_cast<uint64_t>(loro_doc_len_changes(raw_)); }
+
+    std::optional<ChangeMeta> get_change(const Id &id) {
+        ::LoroId cid{id.peer, id.counter};
+        ::LoroChangeMetaOwned *owned = nullptr;
+        LoroStatus s = loro_doc_get_change(raw_, cid, &owned);
+        if (s == LORO_ERR_NOT_FOUND) return std::nullopt;
+        detail::check(s);
+        if (!owned) return std::nullopt;
+        ChangeMeta m = detail::change_meta_from_c(loro_change_meta_owned_as_ref(owned));
+        loro_change_meta_owned_free(owned);
+        return m;
+    }
+
+    std::vector<ContainerId> get_changed_containers_in(const Id &id, uint32_t len) {
+        ::LoroId cid{id.peer, id.counter};
+        detail::Bytes b;
+        detail::check(loro_doc_get_changed_containers_in(raw_, cid, len, b.out()));
+        std::vector<ContainerId> out;
+        for (const auto &s : detail::parse_string_array(b.to_string())) {
+            out.push_back(detail::cid_string_to_container_id(s));
+        }
+        return out;
+    }
+
+    // ---- subscriptions (RESHAPE Phase 3) — defined out-of-line after Subscription ----
+
+    std::shared_ptr<Subscription> subscribe(const ContainerId &cid,
+                                            const std::shared_ptr<Subscriber> &subscriber);
+    std::shared_ptr<Subscription> subscribe_root(const std::shared_ptr<Subscriber> &subscriber);
+    std::shared_ptr<Subscription> subscribe_local_update(
+        const std::shared_ptr<LocalUpdateCallback> &callback);
+    std::shared_ptr<Subscription> subscribe_first_commit_from_peer(
+        const std::shared_ptr<FirstCommitFromPeerCallback> &callback);
+    std::shared_ptr<Subscription> subscribe_pre_commit(
+        const std::shared_ptr<PreCommitCallback> &callback);
+
     ~LoroDoc() { loro_doc_free(raw_); }
     LoroDoc(const LoroDoc &) = delete;
     LoroDoc &operator=(const LoroDoc &) = delete;
@@ -2207,7 +2471,331 @@ private:
     explicit Subscription(::LoroSubscription *raw) : raw_(raw) {}
     ::LoroSubscription *raw_;
     friend struct EphemeralStore;
+    friend struct detail::SubscriptionFactory;
 };
+
+namespace detail {
+/// Wraps a `::LoroSubscription*` (from any `*_subscribe`) as a [`Subscription`].
+struct SubscriptionFactory {
+    static std::shared_ptr<Subscription> make(::LoroSubscription *raw) {
+        return std::shared_ptr<Subscription>(new Subscription(raw));
+    }
+};
+}  // namespace detail
+
+// ----------------------------------------------- DiffEvent envelope construction
+
+namespace detail {
+
+inline EventTriggerKind trigger_from_c(LoroEventTriggerKind k) {
+    switch (k) {
+        case LORO_EVENT_TRIGGER_LOCAL: return EventTriggerKind::kLocal;
+        case LORO_EVENT_TRIGGER_IMPORT: return EventTriggerKind::kImport;
+        case LORO_EVENT_TRIGGER_CHECKOUT: return EventTriggerKind::kCheckout;
+    }
+    return EventTriggerKind::kLocal;
+}
+
+inline DiffKind diff_kind_from_c(LoroDiffKind k) {
+    switch (k) {
+        case LORO_DIFF_LIST: return DiffKind::kList;
+        case LORO_DIFF_TEXT: return DiffKind::kText;
+        case LORO_DIFF_MAP: return DiffKind::kMap;
+        case LORO_DIFF_TREE: return DiffKind::kTree;
+        case LORO_DIFF_COUNTER: return DiffKind::kCounter;
+        case LORO_DIFF_UNKNOWN: return DiffKind::kUnknown;
+    }
+    return DiffKind::kUnknown;
+}
+
+/// Parses a path JSON array (`[{"cid":..,"index":{"key"|"seq"|"node":..}}]`, as produced by
+/// `loro_container_diff_path_json`) into a vector of [`PathItem`].
+inline std::vector<PathItem> path_items_from_json(const std::string &json) {
+    std::vector<PathItem> out;
+    if (json.empty()) return out;
+    JsonValue root = parse_json(json);
+    if (root.kind != JsonValue::Kind::Array) return out;
+    for (const auto &step : root.arr) {
+        if (step.kind != JsonValue::Kind::Object) continue;
+        const JsonValue *cidv = step.find("cid");
+        if (!cidv || cidv->kind != JsonValue::Kind::String) continue;
+        ContainerId container = cid_string_to_container_id(cidv->s);
+        const JsonValue *idxv = step.find("index");
+        const JsonValue *k = idxv ? idxv->find("key") : nullptr;
+        const JsonValue *s = idxv ? idxv->find("seq") : nullptr;
+        const JsonValue *n = idxv ? idxv->find("node") : nullptr;
+        if (k && k->kind == JsonValue::Kind::String) {
+            out.push_back(PathItem{std::move(container), Index(Index::kKey{k->s})});
+        } else if (s) {
+            uint32_t idx = static_cast<uint32_t>(
+                s->kind == JsonValue::Kind::Int ? s->i : static_cast<int64_t>(s->d));
+            out.push_back(PathItem{std::move(container), Index(Index::kSeq{idx})});
+        } else if (n && n->kind == JsonValue::Kind::Object) {
+            const JsonValue *peer = n->find("peer");
+            const JsonValue *counter = n->find("counter");
+            TreeId tid{peer ? static_cast<uint64_t>(peer->i) : 0,
+                       counter ? static_cast<int32_t>(counter->i) : 0};
+            out.push_back(PathItem{std::move(container), Index(Index::kNode{tid})});
+        }
+    }
+    return out;
+}
+
+/// Builds an owned [`DiffEvent`] from a callback-scoped `const LoroDiffEvent*`. The result owns
+/// all of its data (value types only — no live handles), so a subscriber may stash it.
+inline DiffEvent diff_event_from_c(const ::LoroDiffEvent *ev) {
+    DiffEvent e;
+    e.triggered_by = trigger_from_c(loro_diff_event_triggered_by(ev));
+    Bytes origin;
+    if (loro_diff_event_origin(ev, origin.out()) == LORO_OK) e.origin = origin.to_string();
+    Bytes target;
+    // NOT_FOUND (e.g. a root subscription) leaves current_target as std::nullopt — not an error.
+    if (loro_diff_event_current_target(ev, target.out()) == LORO_OK) {
+        e.current_target = cid_string_to_container_id(target.to_string());
+    }
+    uintptr_t count = loro_diff_event_count(ev);
+    e.events.reserve(count);
+    for (uintptr_t i = 0; i < count; ++i) {
+        const ::LoroContainerDiff *cd = loro_diff_event_get(ev, i);
+        if (!cd) continue;
+        Bytes ctgt;
+        if (loro_container_diff_target(cd, ctgt.out()) != LORO_OK) continue;
+        ContainerId ctarget = cid_string_to_container_id(ctgt.to_string());
+        bool unknown = loro_container_diff_is_unknown(cd);
+        DiffKind kind = diff_kind_from_c(loro_container_diff_kind(cd));
+        ContainerDiff d{std::move(ctarget), {}, unknown, kind};
+        Bytes pj;
+        if (loro_container_diff_path_json(cd, pj.out()) == LORO_OK) {
+            d.path = path_items_from_json(pj.to_string());
+        }
+        e.events.push_back(std::move(d));
+    }
+    return e;
+}
+
+// Heap-held owners of a C++ subscriber, passed as `user_data` to the C callback structs.
+struct SubscriberHolder {
+    std::shared_ptr<Subscriber> sub;
+};
+struct LocalUpdateHolder {
+    std::shared_ptr<LocalUpdateCallback> cb;
+};
+struct PreCommitHolder {
+    std::shared_ptr<PreCommitCallback> cb;
+};
+struct FirstCommitHolder {
+    std::shared_ptr<FirstCommitFromPeerCallback> cb;
+};
+
+}  // namespace detail
+
+// ------------------------------------------------------- subscription trampolines
+//
+// One invoke/free pair per callback kind, mirroring the EphemeralStore pattern. Invoke builds
+// the owned C++ payload from the callback-scoped C view and dispatches; it never lets a C++
+// exception unwind across the C ABI. The bool-returning trampolines return `true` (stay
+// subscribed) even after a caught exception — `false` would auto-unsubscribe.
+
+extern "C" inline void loro_conf_subscriber_invoke(const ::LoroDiffEvent *ev, void *user_data) {
+    auto *holder = static_cast<detail::SubscriberHolder *>(user_data);
+    if (!holder || !holder->sub) return;
+    try {
+        holder->sub->on_diff(detail::diff_event_from_c(ev));
+    } catch (...) {
+    }
+}
+extern "C" inline void loro_conf_subscriber_free(void *user_data) {
+    delete static_cast<detail::SubscriberHolder *>(user_data);
+}
+
+extern "C" inline bool loro_conf_local_update_invoke(const uint8_t *data, uintptr_t len,
+                                                     void *user_data) {
+    auto *holder = static_cast<detail::LocalUpdateHolder *>(user_data);
+    if (!holder || !holder->cb) return true;
+    try {
+        std::vector<uint8_t> bytes(data, data + len);
+        holder->cb->on_local_update(bytes);
+    } catch (...) {
+    }
+    return true;
+}
+extern "C" inline void loro_conf_local_update_free(void *user_data) {
+    delete static_cast<detail::LocalUpdateHolder *>(user_data);
+}
+
+extern "C" inline bool loro_conf_pre_commit_invoke(const ::LoroPreCommitPayload *payload,
+                                                   void *user_data) {
+    auto *holder = static_cast<detail::PreCommitHolder *>(user_data);
+    if (!holder || !holder->cb) return true;
+    try {
+        PreCommitCallbackPayload pl{
+            detail::change_meta_from_c(loro_pre_commit_payload_change_meta(payload)),
+            std::string(),
+            detail::PreCommitPayloadBuilder::modifier(payload),
+        };
+        detail::Bytes origin;
+        if (loro_pre_commit_payload_origin(payload, origin.out()) == LORO_OK) {
+            pl.origin = origin.to_string();
+        }
+        holder->cb->on_pre_commit(pl);
+    } catch (...) {
+    }
+    return true;
+}
+extern "C" inline void loro_conf_pre_commit_free(void *user_data) {
+    delete static_cast<detail::PreCommitHolder *>(user_data);
+}
+
+extern "C" inline bool loro_conf_first_commit_invoke(uint64_t peer, void *user_data) {
+    auto *holder = static_cast<detail::FirstCommitHolder *>(user_data);
+    if (!holder || !holder->cb) return true;
+    try {
+        holder->cb->on_first_commit_from_peer(FirstCommitFromPeerPayload{peer});
+    } catch (...) {
+    }
+    return true;
+}
+extern "C" inline void loro_conf_first_commit_free(void *user_data) {
+    delete static_cast<detail::FirstCommitHolder *>(user_data);
+}
+
+// ----------------------------------------------- LoroDoc subscription definitions
+
+inline std::shared_ptr<Subscription> LoroDoc::subscribe(
+    const ContainerId &cid, const std::shared_ptr<Subscriber> &subscriber) {
+    std::string cs = detail::container_id_to_cid_string(cid);
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    // On a null return loro-c has already run free_user_data (freeing `holder`); don't free again.
+    ::LoroSubscription *s = loro_doc_subscribe(raw_, cs.data(), cs.size(), cb);
+    if (!s) throw LoroError("loro_doc_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroDoc::subscribe_root(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_doc_subscribe_root(raw_, cb);
+    if (!s) throw LoroError("loro_doc_subscribe_root returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroDoc::subscribe_local_update(
+    const std::shared_ptr<LocalUpdateCallback> &callback) {
+    auto *holder = new detail::LocalUpdateHolder{callback};
+    ::LoroLocalUpdateCallback cb;
+    cb.invoke = &loro_conf_local_update_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_local_update_free;
+    ::LoroSubscription *s = loro_doc_subscribe_local_update(raw_, cb);
+    if (!s) throw LoroError("loro_doc_subscribe_local_update returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroDoc::subscribe_first_commit_from_peer(
+    const std::shared_ptr<FirstCommitFromPeerCallback> &callback) {
+    auto *holder = new detail::FirstCommitHolder{callback};
+    ::LoroFirstCommitFromPeerCallback cb;
+    cb.invoke = &loro_conf_first_commit_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_first_commit_free;
+    ::LoroSubscription *s = loro_doc_subscribe_first_commit_from_peer(raw_, cb);
+    if (!s) throw LoroError("loro_doc_subscribe_first_commit_from_peer returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroDoc::subscribe_pre_commit(
+    const std::shared_ptr<PreCommitCallback> &callback) {
+    auto *holder = new detail::PreCommitHolder{callback};
+    ::LoroPreCommitCallback cb;
+    cb.invoke = &loro_conf_pre_commit_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_pre_commit_free;
+    ::LoroSubscription *s = loro_doc_subscribe_pre_commit(raw_, cb);
+    if (!s) throw LoroError("loro_doc_subscribe_pre_commit returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+// ----------------------------------------- per-container subscription definitions
+
+inline std::shared_ptr<Subscription> LoroText::subscribe(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_text_subscribe(raw_, cb);
+    if (!s) throw LoroError("loro_text_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroMap::subscribe(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_map_subscribe(map(), cb);
+    if (!s) throw LoroError("loro_map_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroList::subscribe(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_list_subscribe(list(), cb);
+    if (!s) throw LoroError("loro_list_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroMovableList::subscribe(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_movable_list_subscribe(list(), cb);
+    if (!s) throw LoroError("loro_movable_list_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroTree::subscribe(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_tree_subscribe(tree(), cb);
+    if (!s) throw LoroError("loro_tree_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
+
+inline std::shared_ptr<Subscription> LoroCounter::subscribe(
+    const std::shared_ptr<Subscriber> &subscriber) {
+    auto *holder = new detail::SubscriberHolder{subscriber};
+    ::LoroSubscriber cb;
+    cb.invoke = &loro_conf_subscriber_invoke;
+    cb.user_data = holder;
+    cb.free_user_data = &loro_conf_subscriber_free;
+    ::LoroSubscription *s = loro_counter_subscribe(counter(), cb);
+    if (!s) throw LoroError("loro_counter_subscribe returned null");
+    return detail::SubscriptionFactory::make(s);
+}
 
 // ----------------------------------------------------------- ephemeral store
 

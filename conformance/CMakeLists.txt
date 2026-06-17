@@ -25,9 +25,13 @@ message(STATUS "loro-c conformance spike: building loro-cpp tests from ${LORO_CP
 # Phase 2 (containers + accessors): the four remaining container types plus the LoroDoc /
 # VersionVector / Frontiers surface test_doc needs. All #include <loro.hpp> — resolved to the
 # spike header.
+# Phase 3 (subscriptions): test_subscriptions exercises the diff/event envelope + commit hooks
+# (subscribe / subscribe_root / subscribe_local_update / subscribe_pre_commit /
+# subscribe_first_commit_from_peer, ChangeModifier, get_change).
 set(_loro_conformance_tests
     test_smoke test_text test_map test_ephemeral_store
-    test_list test_movable_list test_tree test_counter test_doc)
+    test_list test_movable_list test_tree test_counter test_doc
+    test_subscriptions)
 
 foreach(_t IN LISTS _loro_conformance_tests)
     add_executable(conformance_${_t} "${LORO_CPP_DIR}/tests/${_t}.cpp")
@@ -57,8 +61,8 @@ if(TARGET loro_cargo_build)
 endif()
 
 # Phase 2 ext test (loro-c-authored): the container slice of loro-cpp's test_ext.cpp
-# (test_container_id_helpers + test_insert_container_template). The subscription / undo slices
-# of test_ext.cpp are gated in Phases 3–4, so the full file cannot compile standalone yet.
+# (test_container_id_helpers + test_insert_container_template). The undo slice of test_ext.cpp is
+# gated in Phase 4, so the full file cannot compile standalone yet.
 add_executable(conformance_test_ext_containers
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ext_containers.cpp")
 target_link_libraries(conformance_test_ext_containers PRIVATE loro::loro)
@@ -68,4 +72,17 @@ target_include_directories(conformance_test_ext_containers PRIVATE
 add_test(NAME conformance_test_ext_containers COMMAND conformance_test_ext_containers)
 if(TARGET loro_cargo_build)
     add_dependencies(conformance_test_ext_containers loro_cargo_build)
+endif()
+
+# Phase 3 ext test (loro-c-authored): the subscription slice of loro-cpp's test_ext.cpp
+# (test_subscribe_lambdas) — exercises the loro::ext lambda adapters + subscribe_* shortcuts.
+add_executable(conformance_test_ext_subscriptions
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ext_subscriptions.cpp")
+target_link_libraries(conformance_test_ext_subscriptions PRIVATE loro::loro)
+target_include_directories(conformance_test_ext_subscriptions PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp> / <loro/loro_ext.hpp>
+    ${LORO_CPP_DIR}/tests)                 # test_helpers.hpp
+add_test(NAME conformance_test_ext_subscriptions COMMAND conformance_test_ext_subscriptions)
+if(TARGET loro_cargo_build)
+    add_dependencies(conformance_test_ext_subscriptions loro_cargo_build)
 endif()

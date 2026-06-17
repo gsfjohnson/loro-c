@@ -30,10 +30,14 @@ message(STATUS "loro-c conformance spike: building loro-cpp tests from ${LORO_CP
 # subscribe_first_commit_from_peer, ChangeModifier, get_change).
 # Phase 4 (undo + commit hooks): test_undo exercises UndoManager (init / record_new_checkpoint /
 # undo / redo / can_* / undo_count / set_max_undo_steps).
+# Phase 5 (versions / frontiers / cursors / jsonpath / fractional index): test_version_vector
+# (VersionVector + Frontiers algebra), test_fractional_index (FractionalIndex + tree positions),
+# test_jsonpath (jsonpath / get_by_path / get_by_str_path).
 set(_loro_conformance_tests
     test_smoke test_text test_map test_ephemeral_store
     test_list test_movable_list test_tree test_counter test_doc
-    test_subscriptions test_undo)
+    test_subscriptions test_undo
+    test_version_vector test_fractional_index test_jsonpath)
 
 foreach(_t IN LISTS _loro_conformance_tests)
     add_executable(conformance_${_t} "${LORO_CPP_DIR}/tests/${_t}.cpp")
@@ -101,4 +105,18 @@ target_include_directories(conformance_test_ext_undo PRIVATE
 add_test(NAME conformance_test_ext_undo COMMAND conformance_test_ext_undo)
 if(TARGET loro_cargo_build)
     add_dependencies(conformance_test_ext_undo loro_cargo_build)
+endif()
+
+# Phase 5 cursor test (loro-c-authored): loro-cpp ships no test_cursor.cpp, so this covers the
+# fleshed-out Cursor surface — get_cursor, encode/decode, get_cursor_pos (current + update via
+# the new loro_doc_get_cursor_pos_full), and Cursor::init (via the new loro_cursor_new).
+add_executable(conformance_test_cursor
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cursor.cpp")
+target_link_libraries(conformance_test_cursor PRIVATE loro::loro)
+target_include_directories(conformance_test_cursor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp> / <loro/loro_ext.hpp>
+    ${LORO_CPP_DIR}/tests)                 # test_helpers.hpp
+add_test(NAME conformance_test_cursor COMMAND conformance_test_cursor)
+if(TARGET loro_cargo_build)
+    add_dependencies(conformance_test_cursor loro_cargo_build)
 endif()

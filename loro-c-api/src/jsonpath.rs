@@ -16,6 +16,7 @@ use crate::doc::LoroDoc;
 use crate::error::{set_last_error, LoroStatus};
 use crate::event::LoroSubscription;
 use crate::value::{str_from_raw, LoroBytes};
+use crate::value_or_container::LoroValueOrContainer;
 use loro::ValueOrContainer;
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
@@ -130,6 +131,30 @@ pub extern "C" fn loro_jsonpath_results_get_value_json(
             None => {
                 set_last_error("jsonpath result index out of range");
                 LoroStatus::LORO_ERR_NOT_FOUND
+            }
+        }
+    })
+}
+
+/// Recovers the result at `index` as an owned, typed [`LoroValueOrContainer`] — the same
+/// value/container bridge returned by `loro_doc_get_by_path`. Unlike
+/// [`loro_jsonpath_results_get_value_json`] this preserves the exact value type across the
+/// boundary (binary stays binary, integer-valued doubles like `2.0` stay doubles), so callers
+/// that need faithful values should use this and read it with `loro_value_or_container_get_value`.
+/// Returns null if `index` is out of range. Release the returned handle with
+/// `loro_value_or_container_free`.
+#[no_mangle]
+pub extern "C" fn loro_jsonpath_results_get_value_or_container(
+    results: *const LoroJsonPathResults,
+    index: usize,
+) -> *mut LoroValueOrContainer {
+    ffi_guard!(std::ptr::null_mut(), {
+        let results = deref_or!(results, std::ptr::null_mut());
+        match results.0.get(index) {
+            Some(voc) => Box::into_raw(Box::new(LoroValueOrContainer::from_inner(voc.clone()))),
+            None => {
+                set_last_error("jsonpath result index out of range");
+                std::ptr::null_mut()
             }
         }
     })

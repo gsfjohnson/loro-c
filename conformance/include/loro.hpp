@@ -58,6 +58,26 @@ struct LoroError : std::runtime_error {
     ~LoroError() override = default;
 };
 
+/// A JSONPath query failure (loro-cpp `JsonPathError`). Standalone (like loro-cpp) so app code
+/// `catch (loro::JsonPathError &)` resolves. The C ABI does not report which uniffi variant
+/// failed, so [`LoroDoc::jsonpath`] throws the base type.
+struct JsonPathError : std::runtime_error {
+    JsonPathError() : std::runtime_error("") {}
+    explicit JsonPathError(const std::string &what_arg) : std::runtime_error(what_arg) {}
+    ~JsonPathError() override = default;
+};
+
+namespace json_path_error {
+/// The path string was not valid JSONPath (loro-cpp `json_path_error::InvalidJsonPath`).
+struct InvalidJsonPath : JsonPathError {
+    using JsonPathError::JsonPathError;
+};
+/// The path was valid but could not be evaluated (loro-cpp `json_path_error::EvaluationError`).
+struct EvaluationError : JsonPathError {
+    using JsonPathError::JsonPathError;
+};
+}  // namespace json_path_error
+
 // ----------------------------------------------------- forward declarations
 
 struct LoroDoc;
@@ -115,6 +135,15 @@ enum class Side : int32_t {
     kLeft = 1,
     kMiddle = 2,
     kRight = 3,
+};
+
+/// The causal ordering of two version vectors (loro-cpp `Ordering`). GOTCHA: values are 1/2/3 —
+/// the C ABI `loro_version_vector_compare` writes -1/0/1, so map (see
+/// [`VersionVector::partial_cmp`]), never cast.
+enum class Ordering : int32_t {
+    kLess = 1,
+    kEqual = 2,
+    kGreater = 3,
 };
 
 /// Whether a pushed/popped undo item belongs to the undo or the redo stack (loro-cpp
@@ -254,6 +283,20 @@ struct PathItem {
 struct CounterSpan {
     int32_t start;
     int32_t end;
+};
+
+/// A contiguous span of one peer's ops (uniffi `IdSpan`). NOTE: `counter` is a nested
+/// [`CounterSpan`] — NOT the flat `counter_start`/`counter_end` the C ABI `LoroIdSpan` uses.
+struct IdSpan {
+    uint64_t peer;
+    CounterSpan counter;
+};
+
+/// The two-way delta between version vectors (uniffi `VersionVectorDiff`): the spans to add when
+/// moving right-to-left (`retreat`) and left-to-right (`forward`).
+struct VersionVectorDiff {
+    std::unordered_map<uint64_t, CounterSpan> retreat;
+    std::unordered_map<uint64_t, CounterSpan> forward;
 };
 
 struct ImportStatus {
@@ -604,6 +647,15 @@ inline ::LoroTreeID to_c_tree_id(const TreeId &id) {
 }
 
 inline TreeId from_c_tree_id(const ::LoroTreeID &c) { return TreeId{c.peer, c.counter}; }
+
+inline ::LoroId to_c_id(const Id &id) { return ::LoroId{id.peer, id.counter}; }
+
+inline Id from_c_id(const ::LoroId &c) { return Id{c.peer, c.counter}; }
+
+/// Flattens the nested loro-cpp [`IdSpan`] into the C ABI's flat `LoroIdSpan`.
+inline ::LoroIdSpan to_c_id_span(const IdSpan &s) {
+    return ::LoroIdSpan{s.peer, s.counter.start, s.counter.end};
+}
 
 // ---- minimal JSON support (rich-text delta round-trip) ----------------------
 
@@ -1093,6 +1145,34 @@ inline ImportStatus import_status_from_c(::LoroImportStatus *st) {
 // -------------------------------------------------------------- reference types
 
 struct Cursor {
+    /// Builds a cursor from its parts (loro-cpp `Cursor::init`): the optional anchor element `id`
+    /// (`std::nullopt` = a stable start/end anchor), the `container` it lives in, the `side` to
+    /// anchor on, and the `origin_pos` at build time.
+    static std::shared_ptr<Cursor> init(std::optional<Id> id, ContainerId container,
+                                        const Side &side, uint32_t origin_pos) {
+        std::string cid = detail::container_id_to_cid_string(container);
+        ::LoroId anchor;
+        const ::LoroId *idp = nullptr;
+        if (id) {
+            anchor = detail::to_c_id(*id);
+            idp = &anchor;
+        }
+        ::LoroCursor *c =
+            loro_cursor_new(idp, cid.data(), cid.size(), detail::to_c_side(side), origin_pos);
+        if (!c) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Cursor>(new Cursor(c));
+    }
+    static std::shared_ptr<Cursor> decode(const std::vector<uint8_t> &data) {
+        ::LoroCursor *c = loro_cursor_decode(data.data(), data.size());
+        if (!c) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Cursor>(new Cursor(c));
+    }
+    std::vector<uint8_t> encode() {
+        detail::Bytes b;
+        detail::check(loro_cursor_encode(raw_, b.out()));
+        return b.to_vector();
+    }
+
     ~Cursor() { loro_cursor_free(raw_); }
     Cursor(const Cursor &) = delete;
     Cursor &operator=(const Cursor &) = delete;
@@ -1101,6 +1181,8 @@ private:
     explicit Cursor(::LoroCursor *raw) : raw_(raw) {}
     ::LoroCursor *raw_;
     friend struct LoroText;
+    friend struct LoroList;
+    friend struct LoroMovableList;
     friend struct LoroDoc;
 };
 
@@ -1378,6 +1460,12 @@ struct LoroList {
     bool is_empty() { return loro_list_is_empty(list()); }
     void clear() { detail::check(loro_list_clear(list())); }
 
+    std::shared_ptr<Cursor> get_cursor(uint32_t pos, const Side &side) {
+        ::LoroCursor *c = loro_list_get_cursor(list(), pos, detail::to_c_side(side));
+        if (!c) return nullptr;
+        return std::shared_ptr<Cursor>(new Cursor(c));
+    }
+
     std::vector<LoroValue> to_vec() {
         ::LoroValue *cv = loro_list_get_value(list());
         if (!cv) throw LoroError(detail::last_error_message());
@@ -1475,6 +1563,12 @@ struct LoroMovableList {
     uint32_t len() { return static_cast<uint32_t>(loro_movable_list_len(list())); }
     bool is_empty() { return loro_movable_list_is_empty(list()); }
     void clear() { detail::check(loro_movable_list_clear(list())); }
+
+    std::shared_ptr<Cursor> get_cursor(uint32_t pos, const Side &side) {
+        ::LoroCursor *c = loro_movable_list_get_cursor(list(), pos, detail::to_c_side(side));
+        if (!c) return nullptr;
+        return std::shared_ptr<Cursor>(new Cursor(c));
+    }
 
     std::vector<LoroValue> to_vec() {
         ::LoroValue *cv = loro_movable_list_get_value(list());
@@ -2144,6 +2238,109 @@ struct VersionVector {
         return loro_version_vector_compare(raw_, other->raw_, &cmp) == LORO_OK && cmp == 0;
     }
 
+    std::optional<int32_t> get_last(uint64_t peer) {
+        int32_t out = 0;
+        LoroStatus s = loro_version_vector_get_last(raw_, peer, &out);
+        if (s == LORO_ERR_NOT_FOUND) return std::nullopt;
+        detail::check(s);
+        return out;
+    }
+
+    /// Causal partial order. Returns `std::nullopt` when the two are concurrent (incomparable).
+    std::optional<Ordering> partial_cmp(const std::shared_ptr<VersionVector> &other) {
+        int32_t cmp = 0;
+        LoroStatus s = loro_version_vector_compare(raw_, other->raw_, &cmp);
+        if (s == LORO_ERR_NOT_FOUND) return std::nullopt;
+        detail::check(s);
+        if (cmp < 0) return Ordering::kLess;
+        if (cmp > 0) return Ordering::kGreater;
+        return Ordering::kEqual;
+    }
+
+    bool includes_id(const Id &id) {
+        return loro_version_vector_includes_id(raw_, detail::to_c_id(id));
+    }
+    bool includes_vv(const std::shared_ptr<VersionVector> &other) {
+        return loro_version_vector_includes_vv(raw_, other->raw_);
+    }
+    void merge(const std::shared_ptr<VersionVector> &other) {
+        detail::check(loro_version_vector_merge(raw_, other->raw_));
+    }
+    void extend_to_include_vv(const std::shared_ptr<VersionVector> &other) {
+        detail::check(loro_version_vector_extend_to_include_vv(raw_, other->raw_));
+    }
+    void set_last(const Id &id) {
+        detail::check(loro_version_vector_set_last(raw_, detail::to_c_id(id)));
+    }
+    void set_end(const Id &id) {
+        detail::check(loro_version_vector_set_end(raw_, detail::to_c_id(id)));
+    }
+    bool try_update_last(const Id &id) {
+        bool updated = false;
+        detail::check(loro_version_vector_try_update_last(raw_, detail::to_c_id(id), &updated));
+        return updated;
+    }
+
+    /// The spans in `target` this vector is missing. NOTE: peers cross as JSON numbers here, so
+    /// very large peer ids beyond `int64_t` lose precision (a conformance-parser limit; the gate
+    /// uses small peers).
+    std::vector<IdSpan> get_missing_span(const std::shared_ptr<VersionVector> &target) {
+        detail::Bytes b;
+        detail::check(loro_version_vector_get_missing_span(raw_, target->raw_, b.out()));
+        detail::JsonValue root = detail::parse_json(b.to_string());
+        std::vector<IdSpan> out;
+        for (const auto &e : root.arr) {
+            const auto *peer = e.find("peer");
+            const auto *cs = e.find("counter_start");
+            const auto *ce = e.find("counter_end");
+            if (!peer || !cs || !ce) continue;
+            out.push_back(IdSpan{static_cast<uint64_t>(peer->i),
+                                 CounterSpan{static_cast<int32_t>(cs->i),
+                                             static_cast<int32_t>(ce->i)}});
+        }
+        return out;
+    }
+
+    std::optional<CounterSpan> intersect_span(const IdSpan &target) {
+        ::LoroCounterSpan out;
+        if (!loro_version_vector_intersect_span(raw_, detail::to_c_id_span(target), &out))
+            return std::nullopt;
+        return CounterSpan{out.start, out.end};
+    }
+
+    std::unordered_map<uint64_t, int32_t> to_hashmap() {
+        detail::Bytes b;
+        detail::check(loro_version_vector_to_json(raw_, b.out()));
+        detail::JsonValue root = detail::parse_json(b.to_string());
+        std::unordered_map<uint64_t, int32_t> out;
+        for (const auto &kv : root.obj) {
+            out[static_cast<uint64_t>(std::stoull(kv.first))] = static_cast<int32_t>(kv.second.i);
+        }
+        return out;
+    }
+
+    VersionVectorDiff diff(const std::shared_ptr<VersionVector> &rhs) {
+        detail::Bytes b;
+        detail::check(loro_version_vector_diff(raw_, rhs->raw_, b.out()));
+        detail::JsonValue root = detail::parse_json(b.to_string());
+        VersionVectorDiff out;
+        auto fill = [](const detail::JsonValue *arr,
+                       std::unordered_map<uint64_t, CounterSpan> &m) {
+            if (!arr) return;
+            for (const auto &e : arr->arr) {
+                const auto *peer = e.find("peer");
+                const auto *cs = e.find("counter_start");
+                const auto *ce = e.find("counter_end");
+                if (!peer || !cs || !ce) continue;
+                m[static_cast<uint64_t>(peer->i)] =
+                    CounterSpan{static_cast<int32_t>(cs->i), static_cast<int32_t>(ce->i)};
+            }
+        };
+        fill(root.find("retreat"), out.retreat);
+        fill(root.find("forward"), out.forward);
+        return out;
+    }
+
     ~VersionVector() { loro_version_vector_free(raw_); }
     VersionVector(const VersionVector &) = delete;
     VersionVector &operator=(const VersionVector &) = delete;
@@ -2176,6 +2373,29 @@ struct Frontiers {
     /// binary encodings (the conformance tests use eq only for round-trip checks).
     bool eq(const std::shared_ptr<Frontiers> &other) { return encode() == other->encode(); }
 
+    static std::shared_ptr<Frontiers> from_ids(const std::vector<Id> &ids) {
+        std::vector<::LoroId> cids;
+        cids.reserve(ids.size());
+        for (const auto &id : ids) cids.push_back(detail::to_c_id(id));
+        ::LoroFrontiers *f = loro_frontiers_from_ids(cids.data(), cids.size());
+        if (!f) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Frontiers>(new Frontiers(f));
+    }
+    static std::shared_ptr<Frontiers> from_id(const Id &id) {
+        return from_ids(std::vector<Id>{id});
+    }
+    std::vector<Id> to_vec() {
+        std::vector<Id> out;
+        std::size_t n = loro_frontiers_len(raw_);
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            ::LoroId c;
+            detail::check(loro_frontiers_get(raw_, i, &c));
+            out.push_back(detail::from_c_id(c));
+        }
+        return out;
+    }
+
     ~Frontiers() { loro_frontiers_free(raw_); }
     Frontiers(const Frontiers &) = delete;
     Frontiers &operator=(const Frontiers &) = delete;
@@ -2195,6 +2415,35 @@ struct FrontiersFactory {
     }
 };
 }  // namespace detail
+
+/// A position label for ordering tree siblings (loro-cpp `FractionalIndex`). Free with
+/// `loro_fractional_index_free`. Obtain one from `LoroTree::fractional_index` (the hex string) +
+/// `from_hex_string`, or directly from raw bytes.
+struct FractionalIndex {
+    static std::shared_ptr<FractionalIndex> from_bytes(const std::vector<uint8_t> &bytes) {
+        ::LoroFractionalIndex *fi = loro_fractional_index_from_bytes(bytes.data(), bytes.size());
+        if (!fi) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<FractionalIndex>(new FractionalIndex(fi));
+    }
+    static std::shared_ptr<FractionalIndex> from_hex_string(const std::string &str) {
+        ::LoroFractionalIndex *fi = loro_fractional_index_from_string(str.data(), str.size());
+        if (!fi) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<FractionalIndex>(new FractionalIndex(fi));
+    }
+    std::string to_string() const {
+        detail::Bytes b;
+        detail::check(loro_fractional_index_to_string(raw_, b.out()));
+        return b.to_string();
+    }
+
+    ~FractionalIndex() { loro_fractional_index_free(raw_); }
+    FractionalIndex(const FractionalIndex &) = delete;
+    FractionalIndex &operator=(const FractionalIndex &) = delete;
+
+private:
+    explicit FractionalIndex(::LoroFractionalIndex *raw) : raw_(raw) {}
+    ::LoroFractionalIndex *raw_;
+};
 
 // ------------------------------------------------------- change metadata / hooks
 
@@ -2491,12 +2740,75 @@ struct LoroDoc {
 
     PosQueryResult get_cursor_pos(const std::shared_ptr<Cursor> &cursor) {
         LoroPosQueryResult out;
-        detail::check(loro_doc_get_cursor_pos(raw_, cursor->raw_, &out));
+        ::LoroCursor *update = nullptr;
+        detail::check(loro_doc_get_cursor_pos_full(raw_, cursor->raw_, &out, &update));
         PosQueryResult r;
-        r.update = nullptr;  // loro-c does not return an updated cursor; the tests don't read it.
+        r.update = update ? std::shared_ptr<Cursor>(new Cursor(update)) : nullptr;
         r.current =
             AbsolutePosition{static_cast<uint32_t>(out.abs_pos), detail::from_c_side(out.side)};
         return r;
+    }
+
+    // ---- path / jsonpath queries (RESHAPE Phase 5) ----
+    // Defined inline: this LoroDoc body sits after detail::Factory, so Factory::voc is visible.
+
+    std::shared_ptr<ValueOrContainer> get_by_str_path(const std::string &path) {
+        ::LoroValueOrContainer *voc = loro_doc_get_by_str_path(raw_, path.data(), path.size());
+        if (!voc) throw LoroError(detail::last_error_message());
+        return detail::Factory::voc(voc);
+    }
+
+    std::shared_ptr<ValueOrContainer> get_by_path(const std::vector<Index> &path) {
+        // Own the key strings: LoroPathComponent.key is borrowed for the duration of the call.
+        std::vector<std::string> keys;
+        keys.reserve(path.size());
+        for (const auto &step : path) {
+            if (auto *k = std::get_if<Index::kKey>(&step.get_variant()))
+                keys.push_back(k->key);
+            else
+                keys.emplace_back();
+        }
+        std::vector<::LoroPathComponent> comps;
+        comps.reserve(path.size());
+        for (std::size_t i = 0; i < path.size(); ++i) {
+            const auto &v = path[i].get_variant();
+            ::LoroPathComponent c{};
+            if (std::holds_alternative<Index::kKey>(v)) {
+                c.kind = LORO_PATH_KEY;
+                c.key = keys[i].data();
+                c.key_len = keys[i].size();
+            } else if (auto *s = std::get_if<Index::kSeq>(&v)) {
+                c.kind = LORO_PATH_SEQ;
+                c.seq = s->index;
+            } else {
+                c.kind = LORO_PATH_NODE;
+                c.node = detail::to_c_tree_id(std::get<Index::kNode>(v).target);
+            }
+            comps.push_back(c);
+        }
+        ::LoroValueOrContainer *voc = loro_doc_get_by_path(raw_, comps.data(), comps.size());
+        if (!voc) throw LoroError(detail::last_error_message());
+        return detail::Factory::voc(voc);
+    }
+
+    std::vector<std::shared_ptr<ValueOrContainer>> jsonpath(const std::string &path) {
+        ::LoroJsonPathResults *r = loro_doc_jsonpath(raw_, path.data(), path.size());
+        if (!r) throw JsonPathError(detail::last_error_message());
+        std::vector<std::shared_ptr<ValueOrContainer>> out;
+        try {
+            std::size_t n = loro_jsonpath_results_len(r);
+            out.reserve(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                ::LoroValueOrContainer *voc = loro_jsonpath_results_get_value_or_container(r, i);
+                if (!voc) throw LoroError(detail::last_error_message());
+                out.push_back(detail::Factory::voc(voc));
+            }
+        } catch (...) {
+            loro_jsonpath_results_free(r);
+            throw;
+        }
+        loro_jsonpath_results_free(r);
+        return out;
     }
 
     // ---- change introspection / commit config (RESHAPE Phase 3) ----

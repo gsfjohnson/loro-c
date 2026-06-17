@@ -15,8 +15,11 @@ use crate::container::movable_list::LoroMovableList;
 use crate::container::text::LoroText;
 use crate::doc::LoroDoc;
 use crate::error::{set_last_error, LoroStatus};
-use crate::value::LoroBytes;
+use crate::value::{str_from_raw, LoroBytes};
+use crate::version::LoroId;
 use loro::cursor::{Cursor, Side};
+use loro::{ContainerID, ID};
+use std::os::raw::c_char;
 
 /// Which side of an element a cursor (or resolved position) is anchored to. Mirrors
 /// `loro::cursor::Side`. Used both to create a cursor and to report where a deleted anchor
@@ -121,6 +124,41 @@ pub extern "C" fn loro_cursor_decode(data: *const u8, len: usize) -> *mut LoroCu
     })
 }
 
+/// Constructs a cursor from its parts (the loro-cpp `Cursor::init` shape): the optional anchor
+/// element id `id` (pass null for "none" — a stable cursor at the very start/end), the container
+/// identified by its `cid:` string `(container_id, container_id_len)`, the `side` to anchor on,
+/// and the `origin_pos` at construction time. Returns null on an invalid container id or string.
+/// Release the returned handle with [`loro_cursor_free`].
+#[no_mangle]
+pub extern "C" fn loro_cursor_new(
+    id: *const LoroId,
+    container_id: *const c_char,
+    container_id_len: usize,
+    side: LoroSide,
+    origin_pos: u32,
+) -> *mut LoroCursor {
+    ffi_guard!(std::ptr::null_mut(), {
+        let cid_str = match str_from_raw(container_id, container_id_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        let container = match ContainerID::try_from(cid_str) {
+            Ok(c) => c,
+            Err(_) => {
+                set_last_error(format!("invalid container id: {cid_str}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let anchor: Option<ID> = if id.is_null() {
+            None
+        } else {
+            Some(unsafe { (*id).to_loro() })
+        };
+        let cursor = Cursor::new(anchor, container, to_side(side), origin_pos as usize);
+        Box::into_raw(Box::new(LoroCursor(cursor)))
+    })
+}
+
 /// Returns a cursor anchored at codepoint index `pos` (on `side`) of the text container, or
 /// null if the position cannot be anchored (e.g. an empty container with `pos` out of range).
 /// Release the returned handle with [`loro_cursor_free`].
@@ -207,6 +245,48 @@ pub extern "C" fn loro_doc_get_cursor_pos(
                         abs_pos: result.current.pos,
                     })
                 };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => {
+                set_last_error(e.to_string());
+                LoroStatus::LORO_ERR_NOT_FOUND
+            }
+        }
+    })
+}
+
+/// Like [`loro_doc_get_cursor_pos`] but also yields the *updated* cursor (loro-cpp
+/// `PosQueryResult.update`): the resolved absolute position goes into `*out_pos`, and `*out_update`
+/// receives a fresh, independent `LoroCursor*` (free it separately with [`loro_cursor_free`]) or
+/// null when there is no update. `*out_pos` and `*out_update` are only written on `LORO_OK`.
+/// Returns `LORO_ERR_NOT_FOUND` if the relative position cannot be located.
+#[no_mangle]
+pub extern "C" fn loro_doc_get_cursor_pos_full(
+    doc: *const LoroDoc,
+    cursor: *const LoroCursor,
+    out_pos: *mut LoroPosQueryResult,
+    out_update: *mut *mut LoroCursor,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let cursor = deref_or!(cursor, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out_pos.is_null() || out_update.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        match doc.inner().get_cursor_pos(cursor.inner()) {
+            Ok(result) => {
+                let update = match result.update {
+                    Some(c) => Box::into_raw(Box::new(LoroCursor(c))),
+                    None => std::ptr::null_mut(),
+                };
+                unsafe {
+                    out_pos.write(LoroPosQueryResult {
+                        side: from_side(result.current.side),
+                        abs_pos: result.current.pos,
+                    });
+                    out_update.write(update);
+                }
                 LoroStatus::LORO_OK
             }
             Err(e) => {

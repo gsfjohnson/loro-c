@@ -199,6 +199,35 @@ bool test_undo_meta_value_fidelity() {
     return true;
 }
 
+// RESHAPE Phase 5: jsonpath / get_by_path values cross via the TYPED ABI
+// (loro_jsonpath_results_get_value_or_container), not the lossy get_value_json, so binary stays
+// binary and 2.0 stays a double — the corruption loro-cpp's own test_jsonpath (i64 + string only)
+// would never catch.
+bool test_jsonpath_value_fidelity() {
+    using loro::LoroValue;
+    auto doc = loro::LoroDoc::init();
+    auto map = doc->get_map(root("m"));
+    std::vector<uint8_t> bytes{0x00, 0x01, 0xff, 0x7f, 0x80};
+    map->insert("d", ext::value_like_from(2.0));
+    map->insert("b", ext::value_like_from(bytes));
+
+    auto d = doc->jsonpath("$.m.d");
+    if (d.size() != 1) return fail("jsonpath $.m.d size != 1");
+    auto dv = d.front()->as_value();
+    if (!dv.has_value() || !std::holds_alternative<LoroValue::kDouble>(dv->get_variant()))
+        return fail("jsonpath 2.0 did not round-trip as kDouble (lossy bridge!)");
+    if (ext::value_as_double(*dv).value_or(0.0) != 2.0) return fail("jsonpath double value wrong");
+
+    auto bvoc = doc->get_by_path(std::vector<loro::Index>{
+        loro::Index(loro::Index::kKey{"m"}), loro::Index(loro::Index::kKey{"b"})});
+    auto bv = bvoc->as_value();
+    if (!bv.has_value() || !std::holds_alternative<LoroValue::kBinary>(bv->get_variant()))
+        return fail("get_by_path binary did not round-trip as kBinary (lossy bridge!)");
+    auto got = ext::value_as_binary(*bv);
+    if (!got.has_value() || *got != bytes) return fail("get_by_path binary bytes wrong");
+    return true;
+}
+
 bool run() {
     if (!test_value_helpers()) return false;
     if (!test_double_fidelity()) return false;
@@ -207,6 +236,7 @@ bool run() {
     if (!test_import_status_success()) return false;
     if (!test_import_status_pending()) return false;
     if (!test_undo_meta_value_fidelity()) return false;
+    if (!test_jsonpath_value_fidelity()) return false;
     return true;
 }
 

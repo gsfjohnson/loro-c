@@ -2228,6 +2228,19 @@ enum LoroStatus loro_cursor_encode(const struct LoroCursor *cursor, struct LoroB
 struct LoroCursor *loro_cursor_decode(const uint8_t *data, uintptr_t len);
 
 /**
+ * Constructs a cursor from its parts (the loro-cpp `Cursor::init` shape): the optional anchor
+ * element id `id` (pass null for "none" — a stable cursor at the very start/end), the container
+ * identified by its `cid:` string `(container_id, container_id_len)`, the `side` to anchor on,
+ * and the `origin_pos` at construction time. Returns null on an invalid container id or string.
+ * Release the returned handle with [`loro_cursor_free`].
+ */
+struct LoroCursor *loro_cursor_new(const struct LoroId *id,
+                                   const char *container_id,
+                                   uintptr_t container_id_len,
+                                   enum LoroSide side,
+                                   uint32_t origin_pos);
+
+/**
  * Returns a cursor anchored at codepoint index `pos` (on `side`) of the text container, or
  * null if the position cannot be anchored (e.g. an empty container with `pos` out of range).
  * Release the returned handle with [`loro_cursor_free`].
@@ -2261,6 +2274,18 @@ struct LoroCursor *loro_movable_list_get_cursor(const struct LoroMovableList *li
 enum LoroStatus loro_doc_get_cursor_pos(const struct LoroDoc *doc,
                                         const struct LoroCursor *cursor,
                                         struct LoroPosQueryResult *out);
+
+/**
+ * Like [`loro_doc_get_cursor_pos`] but also yields the *updated* cursor (loro-cpp
+ * `PosQueryResult.update`): the resolved absolute position goes into `*out_pos`, and `*out_update`
+ * receives a fresh, independent `LoroCursor*` (free it separately with [`loro_cursor_free`]) or
+ * null when there is no update. `*out_pos` and `*out_update` are only written on `LORO_OK`.
+ * Returns `LORO_ERR_NOT_FOUND` if the relative position cannot be located.
+ */
+enum LoroStatus loro_doc_get_cursor_pos_full(const struct LoroDoc *doc,
+                                             const struct LoroCursor *cursor,
+                                             struct LoroPosQueryResult *out_pos,
+                                             struct LoroCursor **out_update);
 
 /**
  * Frees a diff-batch handle. Passing null is a no-op.
@@ -3037,6 +3062,18 @@ enum LoroStatus loro_jsonpath_results_is_container(const struct LoroJsonPathResu
 enum LoroStatus loro_jsonpath_results_get_value_json(const struct LoroJsonPathResults *results,
                                                      uintptr_t index,
                                                      struct LoroBytes *out);
+
+/**
+ * Recovers the result at `index` as an owned, typed [`LoroValueOrContainer`] — the same
+ * value/container bridge returned by `loro_doc_get_by_path`. Unlike
+ * [`loro_jsonpath_results_get_value_json`] this preserves the exact value type across the
+ * boundary (binary stays binary, integer-valued doubles like `2.0` stay doubles), so callers
+ * that need faithful values should use this and read it with `loro_value_or_container_get_value`.
+ * Returns null if `index` is out of range. Release the returned handle with
+ * `loro_value_or_container_free`.
+ */
+struct LoroValueOrContainer *loro_jsonpath_results_get_value_or_container(const struct LoroJsonPathResults *results,
+                                                                          uintptr_t index);
 
 /**
  * Recovers the result at `index` as a type-erased `LoroContainer*`, or null if `index` is

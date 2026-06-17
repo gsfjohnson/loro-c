@@ -19,15 +19,16 @@ endif()
 
 message(STATUS "loro-c conformance spike: building loro-cpp tests from ${LORO_CPP_DIR}/tests")
 
-# test_smoke is self-contained; test_text additionally includes test_helpers.hpp from
-# loro-cpp's tests dir. Both #include <loro.hpp> — resolved to the spike header below.
-set(_loro_conformance_tests test_smoke test_text)
+# Phase 0: test_smoke (self-contained) + test_text (includes test_helpers.hpp).
+# Phase 1 (typed value core): test_map + test_ephemeral_store exercise the typed LoroValue
+# bridge through real loro-cpp tests. All #include <loro.hpp> — resolved to the spike header.
+set(_loro_conformance_tests test_smoke test_text test_map test_ephemeral_store)
 
 foreach(_t IN LISTS _loro_conformance_tests)
     add_executable(conformance_${_t} "${LORO_CPP_DIR}/tests/${_t}.cpp")
     target_link_libraries(conformance_${_t} PRIVATE loro::loro)
     target_include_directories(conformance_${_t} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp>
+        ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp> / <loro/loro_ext.hpp>
         ${LORO_CPP_DIR}/tests)                 # test_helpers.hpp
     add_test(NAME conformance_${_t} COMMAND conformance_${_t})
     # Manual (non-Corrosion) mode: wait for the cargo staticlib, like the main test suite.
@@ -35,3 +36,17 @@ foreach(_t IN LISTS _loro_conformance_tests)
         add_dependencies(conformance_${_t} loro_cargo_build)
     endif()
 endforeach()
+
+# Phase 1 fidelity test (loro-c-authored): covers the JSON-bridge blind spots the loro-cpp
+# tests miss — kDouble{2.0}, kBinary — plus the loro::ext value helpers (the value-helper
+# portion of loro-cpp's test_ext, which can't compile standalone until later phases).
+add_executable(conformance_test_value_fidelity
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_value_fidelity.cpp")
+target_link_libraries(conformance_test_value_fidelity PRIVATE loro::loro)
+target_include_directories(conformance_test_value_fidelity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp> / <loro/loro_ext.hpp>
+    ${LORO_CPP_DIR}/tests)                 # test_helpers.hpp
+add_test(NAME conformance_test_value_fidelity COMMAND conformance_test_value_fidelity)
+if(TARGET loro_cargo_build)
+    add_dependencies(conformance_test_value_fidelity loro_cargo_build)
+endif()

@@ -378,6 +378,52 @@ pub extern "C" fn loro_ephemeral_store_get(
     })
 }
 
+/// Sets `key` to a *clone* of the typed `value` (no JSON). Borrows `value` (the caller still
+/// owns it). The typed counterpart to [`loro_ephemeral_store_set`].
+#[no_mangle]
+pub extern "C" fn loro_ephemeral_store_set_value(
+    store: *const LoroEphemeralStore,
+    key: *const c_char,
+    key_len: usize,
+    value: *const crate::value_typed::LoroValue,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let store = deref_or!(store, LoroStatus::LORO_ERR_INVALID_ARG);
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        store.0.set(key, value.inner().clone());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns the value at `key` as an owned typed `LoroValue*` (no JSON), or null if `key` is
+/// absent (or expired). Free the result with `loro_value_free`. The typed counterpart to
+/// [`loro_ephemeral_store_get`].
+#[no_mangle]
+pub extern "C" fn loro_ephemeral_store_get_value(
+    store: *const LoroEphemeralStore,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut crate::value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let store = deref_or!(store, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match store.0.get(key) {
+            Some(v) => crate::value_typed::into_raw(v),
+            None => {
+                set_last_error("no ephemeral value for key");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
 /// Deletes `key` from the store.
 #[no_mangle]
 pub extern "C" fn loro_ephemeral_store_delete(

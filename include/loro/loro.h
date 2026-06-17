@@ -231,6 +231,21 @@ typedef enum LoroPathComponentKind {
 } LoroPathComponentKind;
 
 /**
+ * The dynamic kind of a [`LoroValue`]. Mirrors the variants of `loro::LoroValue`.
+ */
+typedef enum LoroValueType {
+    LORO_VALUE_NULL = 0,
+    LORO_VALUE_BOOL = 1,
+    LORO_VALUE_DOUBLE = 2,
+    LORO_VALUE_I64 = 3,
+    LORO_VALUE_BINARY = 4,
+    LORO_VALUE_STRING = 5,
+    LORO_VALUE_LIST = 6,
+    LORO_VALUE_MAP = 7,
+    LORO_VALUE_CONTAINER = 8,
+} LoroValueType;
+
+/**
  * Opaque handle to a [`loro::awareness::Awareness`]. Free with [`loro_awareness_free`].
  */
 typedef struct LoroAwareness LoroAwareness;
@@ -393,6 +408,12 @@ typedef struct LoroUndoManager LoroUndoManager;
  * on_pop callbacks. A `*mut LoroUndoMeta` always points to a real `loro::UndoItemMeta`.
  */
 typedef struct LoroUndoMeta LoroUndoMeta;
+
+/**
+ * Opaque, owned typed value handle wrapping a `loro::LoroValue`. Free with
+ * [`loro_value_free`].
+ */
+typedef struct LoroValue LoroValue;
 
 /**
  * Opaque, owned result of [`loro_doc_get_by_path`] / [`loro_doc_get_by_str_path`]: either a
@@ -764,6 +785,24 @@ enum LoroStatus loro_ephemeral_store_get(const struct LoroEphemeralStore *store,
                                          const char *key,
                                          uintptr_t key_len,
                                          struct LoroBytes *out);
+
+/**
+ * Sets `key` to a *clone* of the typed `value` (no JSON). Borrows `value` (the caller still
+ * owns it). The typed counterpart to [`loro_ephemeral_store_set`].
+ */
+enum LoroStatus loro_ephemeral_store_set_value(const struct LoroEphemeralStore *store,
+                                               const char *key,
+                                               uintptr_t key_len,
+                                               const struct LoroValue *value);
+
+/**
+ * Returns the value at `key` as an owned typed `LoroValue*` (no JSON), or null if `key` is
+ * absent (or expired). Free the result with `loro_value_free`. The typed counterpart to
+ * [`loro_ephemeral_store_get`].
+ */
+struct LoroValue *loro_ephemeral_store_get_value(const struct LoroEphemeralStore *store,
+                                                 const char *key,
+                                                 uintptr_t key_len);
 
 /**
  * Deletes `key` from the store.
@@ -1205,6 +1244,31 @@ enum LoroStatus loro_map_get(const struct LoroMap *map,
                              const char *key,
                              uintptr_t key_len,
                              struct LoroBytes *out);
+
+/**
+ * Inserts a *clone* of the typed `value` under UTF-8 key `(key, key_len)`. Unlike the
+ * JSON [`loro_map_insert`], this preserves binary, integer-valued doubles, and the
+ * value/container distinction. Borrows `value` (the caller still owns it).
+ */
+enum LoroStatus loro_map_insert_value(struct LoroMap *map,
+                                      const char *key,
+                                      uintptr_t key_len,
+                                      const struct LoroValue *value);
+
+/**
+ * Returns the entry at `(key, key_len)` as an owned `LoroValueOrContainer*` (a plain value
+ * or a live child container), or null if the key is absent. Free the result with
+ * `loro_value_or_container_free`. This is the typed counterpart to [`loro_map_get`].
+ */
+struct LoroValueOrContainer *loro_map_get_value_or_container(const struct LoroMap *map,
+                                                             const char *key,
+                                                             uintptr_t key_len);
+
+/**
+ * Returns the map's full recursive state as an owned typed `LoroValue*` (a `Map` value
+ * with nested containers resolved to their deep values). Free with `loro_value_free`.
+ */
+struct LoroValue *loro_map_get_deep_value(const struct LoroMap *map);
 
 /**
  * Returns the child container stored at `(key, key_len)` as a type-erased
@@ -3000,9 +3064,159 @@ enum LoroStatus loro_value_or_container_get_value_json(const struct LoroValueOrC
                                                        struct LoroBytes *out);
 
 /**
+ * Recovers the result as a typed, owned `LoroValue*` (no JSON), or null (with an error
+ * recorded) if it holds a live container. Free the returned value with `loro_value_free`.
+ * The source `LoroValueOrContainer*` is unaffected. Unlike
+ * [`loro_value_or_container_get_value_json`], this preserves binary, integer-valued
+ * doubles, and the value/container distinction.
+ */
+struct LoroValue *loro_value_or_container_get_value(const struct LoroValueOrContainer *voc);
+
+/**
  * Frees a value-or-container handle. Passing null is a no-op.
  */
 void loro_value_or_container_free(struct LoroValueOrContainer *voc);
+
+/**
+ * Creates a `null` value. Free with [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_null(void);
+
+/**
+ * Creates a boolean value. Free with [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_bool(bool value);
+
+/**
+ * Creates a double (f64) value. Free with [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_double(double value);
+
+/**
+ * Creates a 64-bit signed integer value. Free with [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_i64(int64_t value);
+
+/**
+ * Creates a string value from UTF-8 `(data, len)`. Returns null on invalid UTF-8. Free
+ * with [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_string(const char *data, uintptr_t len);
+
+/**
+ * Creates a binary value from `(data, len)`. A null `data` is allowed only when `len == 0`.
+ * Free with [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_binary(const uint8_t *data, uintptr_t len);
+
+/**
+ * Creates an empty list value. Append children with [`loro_value_list_push`]. Free with
+ * [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_list(void);
+
+/**
+ * Appends a *clone* of `child` to the list `value`. The caller still owns `child`. Returns
+ * `LORO_ERR_INVALID_ARG` if `value` is not a list.
+ */
+enum LoroStatus loro_value_list_push(struct LoroValue *value, const struct LoroValue *child);
+
+/**
+ * Creates an empty map value. Insert entries with [`loro_value_map_insert`]. Free with
+ * [`loro_value_free`].
+ */
+struct LoroValue *loro_value_new_map(void);
+
+/**
+ * Inserts a *clone* of `child` under UTF-8 key `(key, key_len)` in the map `value`. The
+ * caller still owns `child`. Returns `LORO_ERR_INVALID_ARG` if `value` is not a map and
+ * `LORO_ERR_UTF8` on a bad key.
+ */
+enum LoroStatus loro_value_map_insert(struct LoroValue *value,
+                                      const char *key,
+                                      uintptr_t key_len,
+                                      const struct LoroValue *child);
+
+/**
+ * Returns the dynamic kind of `value`. Returns `LORO_VALUE_NULL` on a null handle.
+ */
+enum LoroValueType loro_value_get_type(const struct LoroValue *value);
+
+/**
+ * Writes the boolean payload into `*out` and returns true; returns false (leaving `*out`
+ * untouched) if `value` is not a boolean or any pointer is null.
+ */
+bool loro_value_as_bool(const struct LoroValue *value, bool *out);
+
+/**
+ * Writes the double payload into `*out` and returns true; returns false otherwise. Does NOT
+ * coerce an `I64` to a double — that distinction is the whole point of the typed ABI.
+ */
+bool loro_value_as_double(const struct LoroValue *value, double *out);
+
+/**
+ * Writes the i64 payload into `*out` and returns true; returns false otherwise.
+ */
+bool loro_value_as_i64(const struct LoroValue *value, int64_t *out);
+
+/**
+ * Writes the string payload (UTF-8, not nul-terminated) into `*out`. Returns
+ * `LORO_ERR_INVALID_ARG` if `value` is not a string. `*out` is only written on `LORO_OK`;
+ * free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_value_as_string(const struct LoroValue *value, struct LoroBytes *out);
+
+/**
+ * Writes the binary payload into `*out`. Returns `LORO_ERR_INVALID_ARG` if `value` is not
+ * binary. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_value_as_binary(const struct LoroValue *value, struct LoroBytes *out);
+
+/**
+ * Returns the number of elements in a list value, or 0 if `value` is not a list / is null.
+ */
+uintptr_t loro_value_list_len(const struct LoroValue *value);
+
+/**
+ * Returns a *clone* of the list element at `index` as a new owned `LoroValue*`, or null if
+ * `value` is not a list or `index` is out of bounds. Free the result with
+ * [`loro_value_free`].
+ */
+struct LoroValue *loro_value_list_get(const struct LoroValue *value, uintptr_t index);
+
+/**
+ * Returns the number of entries in a map value, or 0 if `value` is not a map / is null.
+ */
+uintptr_t loro_value_map_len(const struct LoroValue *value);
+
+/**
+ * Writes the map's keys as a JSON array of strings into `*out` (keys are always strings, so
+ * this is lossless). Returns `LORO_ERR_INVALID_ARG` if `value` is not a map. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_value_map_keys(const struct LoroValue *value, struct LoroBytes *out);
+
+/**
+ * Returns a *clone* of the map entry at `(key, key_len)` as a new owned `LoroValue*`, or
+ * null if `value` is not a map or the key is absent. Free the result with
+ * [`loro_value_free`].
+ */
+struct LoroValue *loro_value_map_get(const struct LoroValue *value,
+                                     const char *key,
+                                     uintptr_t key_len);
+
+/**
+ * Writes the container id (a `cid:...` string) of a container-valued `LoroValue` into
+ * `*out`. Returns `LORO_ERR_INVALID_ARG` if `value` is not a container. `*out` is only
+ * written on `LORO_OK`; free it with `loro_bytes_free`.
+ */
+enum LoroStatus loro_value_as_container(const struct LoroValue *value, struct LoroBytes *out);
+
+/**
+ * Frees a `LoroValue` handle (recursively dropping any list/map subtree it owns). Passing
+ * null is a no-op. Must be called at most once per handle.
+ */
+void loro_value_free(struct LoroValue *value);
 
 /**
  * Creates a new, empty version vector. Release with [`loro_version_vector_free`].

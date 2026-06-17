@@ -30,6 +30,7 @@ pub mod style;
 pub mod undo;
 pub mod value;
 pub mod value_or_container;
+pub mod value_typed;
 pub mod version;
 
 use std::os::raw::c_char;

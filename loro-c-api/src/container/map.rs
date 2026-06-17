@@ -20,6 +20,8 @@ use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{str_from_raw, value_from_json, value_to_json_bytes, LoroBytes};
+use crate::value_or_container::LoroValueOrContainer;
+use crate::value_typed::LoroValue;
 use std::os::raw::c_char;
 use std::sync::Arc;
 
@@ -129,6 +131,65 @@ pub extern "C" fn loro_map_get(
                 LoroStatus::LORO_ERR_NOT_FOUND
             }
         }
+    })
+}
+
+/// Inserts a *clone* of the typed `value` under UTF-8 key `(key, key_len)`. Unlike the
+/// JSON [`loro_map_insert`], this preserves binary, integer-valued doubles, and the
+/// value/container distinction. Borrows `value` (the caller still owns it).
+#[no_mangle]
+pub extern "C" fn loro_map_insert_value(
+    map: *mut LoroMap,
+    key: *const c_char,
+    key_len: usize,
+    value: *const LoroValue,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let map = deref_or!(map, LoroStatus::LORO_ERR_INVALID_ARG);
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return LoroStatus::LORO_ERR_UTF8,
+        };
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        match map.inner().insert(key, value.inner().clone()) {
+            Ok(()) => LoroStatus::LORO_OK,
+            Err(e) => record_loro_error(&e),
+        }
+    })
+}
+
+/// Returns the entry at `(key, key_len)` as an owned `LoroValueOrContainer*` (a plain value
+/// or a live child container), or null if the key is absent. Free the result with
+/// `loro_value_or_container_free`. This is the typed counterpart to [`loro_map_get`].
+#[no_mangle]
+pub extern "C" fn loro_map_get_value_or_container(
+    map: *const LoroMap,
+    key: *const c_char,
+    key_len: usize,
+) -> *mut LoroValueOrContainer {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        let key = match str_from_raw(key, key_len) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
+        match map.inner().get(key) {
+            Some(voc) => Box::into_raw(Box::new(LoroValueOrContainer::from_inner(voc))),
+            None => {
+                set_last_error("key not found in map");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Returns the map's full recursive state as an owned typed `LoroValue*` (a `Map` value
+/// with nested containers resolved to their deep values). Free with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_get_deep_value(map: *const LoroMap) -> *mut LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        crate::value_typed::into_raw(map.inner().get_deep_value())
     })
 }
 

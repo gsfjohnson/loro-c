@@ -58,6 +58,11 @@ struct Cursor;
 struct StyleConfigMap;
 struct LoroValue;
 struct ContainerId;
+struct ValueOrContainer;
+struct Subscription;
+struct EphemeralStore;
+struct EphemeralStoreEvent;
+struct EphemeralSubscriber;
 
 // --------------------------------------------------------- enums & POD types
 
@@ -623,6 +628,141 @@ inline std::string value_to_json(const LoroValue &v) {
         v.get_variant());
 }
 
+// ---- typed-value bridge (Phase 1) -------------------------------------------
+//
+// Translates between the C++ typed `loro::LoroValue` variant and the opaque C
+// `::LoroValue` handle from <loro/loro.h>, so values cross the FFI boundary WITHOUT JSON
+// (binary stays binary; integer-valued doubles stay doubles). Replaces the lossy Phase 0
+// JSON value path for map / ephemeral values.
+
+/// RAII owner for a `::LoroValue*` returned by / built for the C ABI; frees on scope exit.
+class CValue {
+public:
+    explicit CValue(::LoroValue *v) : v_(v) {}
+    ~CValue() { loro_value_free(v_); }
+    CValue(const CValue &) = delete;
+    CValue &operator=(const CValue &) = delete;
+    ::LoroValue *get() const { return v_; }
+
+private:
+    ::LoroValue *v_;
+};
+
+/// Parses a JSON array-of-strings (as produced by `loro_*_keys`) into a vector.
+inline std::vector<std::string> parse_string_array(const std::string &json) {
+    std::vector<std::string> out;
+    if (json.empty()) return out;
+    JsonValue root = parse_json(json);
+    if (root.kind != JsonValue::Kind::Array) return out;
+    for (const auto &e : root.arr) {
+        if (e.kind == JsonValue::Kind::String) out.push_back(e.s);
+    }
+    return out;
+}
+
+/// Builds an owned `::LoroValue*` from a typed `loro::LoroValue` (no JSON). Caller frees the
+/// result with `loro_value_free` (or via [`CValue`]).
+inline ::LoroValue *to_c_value(const LoroValue &v) {
+    return std::visit(
+        [](auto &&alt) -> ::LoroValue * {
+            using T = std::decay_t<decltype(alt)>;
+            if constexpr (std::is_same_v<T, LoroValue::kNull>) {
+                return loro_value_new_null();
+            } else if constexpr (std::is_same_v<T, LoroValue::kBool>) {
+                return loro_value_new_bool(alt.value);
+            } else if constexpr (std::is_same_v<T, LoroValue::kDouble>) {
+                return loro_value_new_double(alt.value);
+            } else if constexpr (std::is_same_v<T, LoroValue::kI64>) {
+                return loro_value_new_i64(alt.value);
+            } else if constexpr (std::is_same_v<T, LoroValue::kString>) {
+                return loro_value_new_string(alt.value.data(), alt.value.size());
+            } else if constexpr (std::is_same_v<T, LoroValue::kBinary>) {
+                return loro_value_new_binary(alt.value.data(), alt.value.size());
+            } else if constexpr (std::is_same_v<T, LoroValue::kList>) {
+                ::LoroValue *list = loro_value_new_list();
+                if (!list) throw LoroError("loro_value_new_list returned null");
+                for (const auto &el : alt.value) {
+                    CValue child(to_c_value(el));
+                    check(loro_value_list_push(list, child.get()));
+                }
+                return list;
+            } else if constexpr (std::is_same_v<T, LoroValue::kMap>) {
+                ::LoroValue *map = loro_value_new_map();
+                if (!map) throw LoroError("loro_value_new_map returned null");
+                for (const auto &kv : alt.value) {
+                    CValue child(to_c_value(kv.second));
+                    check(loro_value_map_insert(map, kv.first.data(), kv.first.size(),
+                                                child.get()));
+                }
+                return map;
+            } else {  // kContainer
+                throw LoroError("Phase 1: container-valued LoroValue cannot be sent to loro-c");
+            }
+        },
+        v.get_variant());
+}
+
+/// Reconstructs a typed `loro::LoroValue` from an owned `::LoroValue*` (no JSON). Does not
+/// take ownership of `cv` (the caller frees it).
+inline LoroValue from_c_value(const ::LoroValue *cv) {
+    switch (loro_value_get_type(cv)) {
+        case LORO_VALUE_NULL:
+            return LoroValue(LoroValue::kNull{});
+        case LORO_VALUE_BOOL: {
+            bool b = false;
+            loro_value_as_bool(cv, &b);
+            return LoroValue(LoroValue::kBool{b});
+        }
+        case LORO_VALUE_DOUBLE: {
+            double d = 0.0;
+            loro_value_as_double(cv, &d);
+            return LoroValue(LoroValue::kDouble{d});
+        }
+        case LORO_VALUE_I64: {
+            int64_t i = 0;
+            loro_value_as_i64(cv, &i);
+            return LoroValue(LoroValue::kI64{i});
+        }
+        case LORO_VALUE_STRING: {
+            Bytes b;
+            check(loro_value_as_string(cv, b.out()));
+            return LoroValue(LoroValue::kString{b.to_string()});
+        }
+        case LORO_VALUE_BINARY: {
+            Bytes b;
+            check(loro_value_as_binary(cv, b.out()));
+            return LoroValue(LoroValue::kBinary{b.to_vector()});
+        }
+        case LORO_VALUE_LIST: {
+            std::vector<LoroValue> out;
+            size_t n = loro_value_list_len(cv);
+            out.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                ::LoroValue *el = loro_value_list_get(cv, i);
+                if (!el) throw LoroError("loro_value_list_get returned null");
+                CValue g(el);
+                out.push_back(from_c_value(el));
+            }
+            return LoroValue(LoroValue::kList{std::move(out)});
+        }
+        case LORO_VALUE_MAP: {
+            std::unordered_map<std::string, LoroValue> out;
+            Bytes kb;
+            check(loro_value_map_keys(cv, kb.out()));
+            for (const auto &key : parse_string_array(kb.to_string())) {
+                ::LoroValue *mv = loro_value_map_get(cv, key.data(), key.size());
+                if (!mv) throw LoroError("loro_value_map_get returned null");
+                CValue g(mv);
+                out.emplace(key, from_c_value(mv));
+            }
+            return LoroValue(LoroValue::kMap{std::move(out)});
+        }
+        case LORO_VALUE_CONTAINER:
+        default:
+            throw LoroError("Phase 1: container-valued LoroValue reconstruction is deferred");
+    }
+}
+
 }  // namespace detail
 
 // -------------------------------------------------------------- reference types
@@ -640,9 +780,13 @@ private:
 };
 
 struct LoroText {
-    /// Detached text construction has no C-ABI constructor in loro-c; unused by Phase 0 tests.
+    /// Constructs a *detached* text container (loro-c: `loro_container_new`). Attach it by
+    /// passing it to `LoroMap::insert_text_container` (etc.), which consumes it and returns
+    /// the attached handle. A detached text is not editable until attached.
     static std::shared_ptr<LoroText> init() {
-        throw LoroError("Phase 0 spike: LoroText::init() (detached) is not supported");
+        ::LoroContainer *c = loro_container_new(LORO_CONTAINER_TEXT);
+        if (!c) throw LoroError("loro_container_new(Text) returned null");
+        return std::shared_ptr<LoroText>(new LoroText(c));
     }
 
     void insert(uint32_t pos, const std::string &s) {
@@ -735,30 +879,185 @@ struct LoroText {
     bool is_attached() { return loro_text_is_attached(raw_); }
     bool is_empty() { return loro_text_is_empty(raw_); }
 
-    ~LoroText() { loro_text_free(raw_); }
+    ~LoroText() {
+        if (raw_) loro_text_free(raw_);
+        else if (container_) loro_container_free(container_);
+    }
     LoroText(const LoroText &) = delete;
     LoroText &operator=(const LoroText &) = delete;
 
 private:
-    explicit LoroText(::LoroText *raw) : raw_(raw) {}
-    ::LoroText *raw_;
+    explicit LoroText(::LoroText *raw) : raw_(raw) {}        // attached
+    explicit LoroText(::LoroContainer *c) : container_(c) {}  // detached (from init())
+
+    /// Releases the detached container for attachment (nulls it so the destructor won't free
+    /// it). Throws if this text is not a detached container.
+    ::LoroContainer *take_container() {
+        if (!container_) throw LoroError("LoroText is not a detached container");
+        ::LoroContainer *c = container_;
+        container_ = nullptr;
+        return c;
+    }
+
+    ::LoroText *raw_ = nullptr;            // attached editing handle
+    ::LoroContainer *container_ = nullptr;  // detached container awaiting attach
     friend struct LoroDoc;
+    friend struct LoroMap;
+    friend struct ValueOrContainer;
 };
 
 struct LoroMap {
-    /// Detached map construction has no C-ABI constructor in loro-c; unused by Phase 0 tests.
+    /// Constructs a *detached* map container (loro-c: `loro_container_new`). Attach it by
+    /// passing it to `LoroMap::insert_map_container` (etc.), which consumes it and returns
+    /// the attached handle.
     static std::shared_ptr<LoroMap> init() {
-        throw LoroError("Phase 0 spike: LoroMap::init() (detached) is not supported");
+        ::LoroContainer *c = loro_container_new(LORO_CONTAINER_MAP);
+        if (!c) throw LoroError("loro_container_new(Map) returned null");
+        return std::shared_ptr<LoroMap>(new LoroMap(c));
     }
-    ~LoroMap() { loro_map_free(raw_); }
+
+    void insert(const std::string &key, const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_map_insert_value(map(), key.data(), key.size(), cv.get()));
+    }
+
+    /// Returns the entry at `key` (a value or a live child container). Declared here, defined
+    /// out-of-line once `ValueOrContainer` is complete.
+    std::shared_ptr<ValueOrContainer> get(const std::string &key);
+
+    void delete_(const std::string &key) {
+        detail::check(loro_map_delete(map(), key.data(), key.size()));
+    }
+
+    uint32_t len() { return static_cast<uint32_t>(loro_map_len(map())); }
+    bool is_empty() { return loro_map_is_empty(map()); }
+
+    std::vector<std::string> keys() {
+        detail::Bytes b;
+        detail::check(loro_map_keys(map(), b.out()));
+        return detail::parse_string_array(b.to_string());
+    }
+
+    /// loro-cpp returns one `ValueOrContainer` per entry; here it is keys() + get() per key
+    /// (the conformance test only checks the count). Defined out-of-line.
+    std::vector<std::shared_ptr<ValueOrContainer>> values();
+
+    LoroValue get_deep_value() {
+        ::LoroValue *cv = loro_map_get_deep_value(map());
+        if (!cv) throw LoroError("loro_map_get_deep_value returned null");
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    std::shared_ptr<LoroText> insert_text_container(const std::string &key,
+                                                    const std::shared_ptr<LoroText> &child) {
+        ::LoroContainer *attached =
+            loro_map_insert_container(map(), key.data(), key.size(), child->take_container());
+        if (!attached) throw LoroError(detail::last_error_message());
+        ::LoroText *t = loro_container_get_text(attached);
+        loro_container_free(attached);
+        if (!t) throw LoroError("attached container is not a text");
+        return std::shared_ptr<LoroText>(new LoroText(t));
+    }
+
+    std::shared_ptr<LoroMap> insert_map_container(const std::string &key,
+                                                  const std::shared_ptr<LoroMap> &child) {
+        ::LoroContainer *attached =
+            loro_map_insert_container(map(), key.data(), key.size(), child->take_container());
+        if (!attached) throw LoroError(detail::last_error_message());
+        ::LoroMap *m = loro_container_get_map(attached);
+        loro_container_free(attached);
+        if (!m) throw LoroError("attached container is not a map");
+        return std::shared_ptr<LoroMap>(new LoroMap(m));
+    }
+
+    ~LoroMap() {
+        if (raw_) loro_map_free(raw_);
+        else if (container_) loro_container_free(container_);
+    }
     LoroMap(const LoroMap &) = delete;
     LoroMap &operator=(const LoroMap &) = delete;
 
 private:
-    explicit LoroMap(::LoroMap *raw) : raw_(raw) {}
-    ::LoroMap *raw_;
+    explicit LoroMap(::LoroMap *raw) : raw_(raw) {}          // attached
+    explicit LoroMap(::LoroContainer *c) : container_(c) {}  // detached (from init())
+
+    /// The attached editing handle, or throws if this map is a detached container.
+    ::LoroMap *map() const {
+        if (!raw_) throw LoroError("LoroMap is detached (not attached to a document)");
+        return raw_;
+    }
+
+    /// Releases the detached container for attachment (nulls it). Throws if not detached.
+    ::LoroContainer *take_container() {
+        if (!container_) throw LoroError("LoroMap is not a detached container");
+        ::LoroContainer *c = container_;
+        container_ = nullptr;
+        return c;
+    }
+
+    ::LoroMap *raw_ = nullptr;             // attached handle
+    ::LoroContainer *container_ = nullptr;  // detached container awaiting attach
     friend struct LoroDoc;
+    friend struct ValueOrContainer;
 };
+
+// --------------------------------------------------------- value-or-container
+
+/// Result of `LoroMap::get` / value navigation: either a plain typed value or a live child
+/// container. Built over the C `LoroValueOrContainer` handle.
+struct ValueOrContainer {
+    bool is_container() { return loro_value_or_container_is_container(raw_); }
+
+    std::optional<LoroValue> as_value() {
+        if (loro_value_or_container_is_container(raw_)) return std::nullopt;
+        ::LoroValue *cv = loro_value_or_container_get_value(raw_);
+        if (!cv) return std::nullopt;
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    std::shared_ptr<LoroText> as_loro_text() {
+        ::LoroContainer *c = loro_value_or_container_get_container(raw_);
+        if (!c) throw LoroError(detail::last_error_message());
+        ::LoroText *t = loro_container_get_text(c);
+        loro_container_free(c);
+        if (!t) throw LoroError("value-or-container is not a text container");
+        return std::shared_ptr<LoroText>(new LoroText(t));
+    }
+
+    std::shared_ptr<LoroMap> as_loro_map() {
+        ::LoroContainer *c = loro_value_or_container_get_container(raw_);
+        if (!c) throw LoroError(detail::last_error_message());
+        ::LoroMap *m = loro_container_get_map(c);
+        loro_container_free(c);
+        if (!m) throw LoroError("value-or-container is not a map container");
+        return std::shared_ptr<LoroMap>(new LoroMap(m));
+    }
+
+    ~ValueOrContainer() { loro_value_or_container_free(raw_); }
+    ValueOrContainer(const ValueOrContainer &) = delete;
+    ValueOrContainer &operator=(const ValueOrContainer &) = delete;
+
+private:
+    explicit ValueOrContainer(::LoroValueOrContainer *raw) : raw_(raw) {}
+    ::LoroValueOrContainer *raw_;
+    friend struct LoroMap;
+};
+
+inline std::shared_ptr<ValueOrContainer> LoroMap::get(const std::string &key) {
+    ::LoroValueOrContainer *voc =
+        loro_map_get_value_or_container(map(), key.data(), key.size());
+    if (!voc) throw LoroError(detail::last_error_message());
+    return std::shared_ptr<ValueOrContainer>(new ValueOrContainer(voc));
+}
+
+inline std::vector<std::shared_ptr<ValueOrContainer>> LoroMap::values() {
+    std::vector<std::shared_ptr<ValueOrContainer>> out;
+    for (const auto &key : keys()) out.push_back(get(key));
+    return out;
+}
 
 struct StyleConfigMap {
     static std::shared_ptr<StyleConfigMap> init() {
@@ -857,6 +1156,149 @@ struct LoroDoc {
 private:
     explicit LoroDoc(::LoroDoc *raw) : raw_(raw) {}
     ::LoroDoc *raw_;
+};
+
+// -------------------------------------------------------------- subscriptions
+
+/// Opaque subscription handle. `unsubscribe()` stops the callback (and frees it); the
+/// destructor does the same if still active.
+struct Subscription {
+    void unsubscribe() {
+        if (raw_) {
+            loro_subscription_free(raw_);
+            raw_ = nullptr;
+        }
+    }
+    void detach() {
+        if (raw_) {
+            loro_subscription_detach(raw_);
+            raw_ = nullptr;
+        }
+    }
+
+    ~Subscription() {
+        if (raw_) loro_subscription_free(raw_);
+    }
+    Subscription(const Subscription &) = delete;
+    Subscription &operator=(const Subscription &) = delete;
+
+private:
+    explicit Subscription(::LoroSubscription *raw) : raw_(raw) {}
+    ::LoroSubscription *raw_;
+    friend struct EphemeralStore;
+};
+
+// ----------------------------------------------------------- ephemeral store
+
+/// The added/updated/removed keys reported to an [`EphemeralSubscriber`].
+struct EphemeralStoreEvent {
+    std::vector<std::string> added;
+    std::vector<std::string> updated;
+    std::vector<std::string> removed;
+};
+
+/// Callback interface for [`EphemeralStore::subscribe`].
+struct EphemeralSubscriber {
+    virtual ~EphemeralSubscriber() {}
+    virtual void on_ephemeral_event(const EphemeralStoreEvent &event) = 0;
+};
+
+namespace detail {
+/// Heap-held owner of a C++ subscriber, passed as `user_data` to the C callback.
+struct EphemeralSubscriberHolder {
+    std::shared_ptr<EphemeralSubscriber> sub;
+};
+}  // namespace detail
+
+/// Trampoline: turns the C `LoroEphemeralStoreEvent*` into an [`EphemeralStoreEvent`] and
+/// dispatches to the C++ subscriber. Never lets a C++ exception unwind back into Rust.
+extern "C" inline void loro_conf_ephemeral_invoke(const ::LoroEphemeralStoreEvent *ev,
+                                                  void *user_data) {
+    auto *holder = static_cast<detail::EphemeralSubscriberHolder *>(user_data);
+    if (!holder || !holder->sub) return;
+    try {
+        EphemeralStoreEvent e;
+        detail::Bytes added;
+        detail::Bytes updated;
+        detail::Bytes removed;
+        if (loro_ephemeral_event_added(ev, added.out()) == LORO_OK)
+            e.added = detail::parse_string_array(added.to_string());
+        if (loro_ephemeral_event_updated(ev, updated.out()) == LORO_OK)
+            e.updated = detail::parse_string_array(updated.to_string());
+        if (loro_ephemeral_event_removed(ev, removed.out()) == LORO_OK)
+            e.removed = detail::parse_string_array(removed.to_string());
+        holder->sub->on_ephemeral_event(e);
+    } catch (...) {
+        // Swallow: unwinding across the C ABI boundary is undefined behaviour.
+    }
+}
+
+/// Trampoline: releases the heap-held subscriber when the subscription is dropped.
+extern "C" inline void loro_conf_ephemeral_free(void *user_data) {
+    delete static_cast<detail::EphemeralSubscriberHolder *>(user_data);
+}
+
+/// Out-of-document, last-write-wins keyed state (cursors, presence, …) with change events.
+struct EphemeralStore {
+    static std::shared_ptr<EphemeralStore> init(int64_t timeout_ms) {
+        ::LoroEphemeralStore *s = loro_ephemeral_store_new(timeout_ms);
+        if (!s) throw LoroError("loro_ephemeral_store_new returned null");
+        return std::shared_ptr<EphemeralStore>(new EphemeralStore(s));
+    }
+
+    void set(const std::string &key, const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_ephemeral_store_set_value(raw_, key.data(), key.size(), cv.get()));
+    }
+
+    std::optional<LoroValue> get(const std::string &key) {
+        ::LoroValue *cv = loro_ephemeral_store_get_value(raw_, key.data(), key.size());
+        if (!cv) return std::nullopt;
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    std::vector<std::string> keys() {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_store_keys(raw_, b.out()));
+        return detail::parse_string_array(b.to_string());
+    }
+
+    void delete_(const std::string &key) {
+        detail::check(loro_ephemeral_store_delete(raw_, key.data(), key.size()));
+    }
+
+    std::vector<uint8_t> encode_all() {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_store_encode_all(raw_, b.out()));
+        return b.to_vector();
+    }
+
+    void apply(const std::vector<uint8_t> &data) {
+        detail::check(loro_ephemeral_store_apply(raw_, data.data(), data.size()));
+    }
+
+    std::shared_ptr<Subscription> subscribe(const std::shared_ptr<EphemeralSubscriber> &sub) {
+        auto *holder = new detail::EphemeralSubscriberHolder{sub};
+        ::LoroEphemeralSubscriber cb;
+        cb.invoke = &loro_conf_ephemeral_invoke;
+        cb.user_data = holder;
+        cb.free_user_data = &loro_conf_ephemeral_free;
+        // On error loro-c drops the callback (running free_user_data, freeing `holder`);
+        // do NOT free it again here.
+        ::LoroSubscription *s = loro_ephemeral_store_subscribe(raw_, cb);
+        if (!s) throw LoroError("loro_ephemeral_store_subscribe returned null");
+        return std::shared_ptr<Subscription>(new Subscription(s));
+    }
+
+    ~EphemeralStore() { loro_ephemeral_store_free(raw_); }
+    EphemeralStore(const EphemeralStore &) = delete;
+    EphemeralStore &operator=(const EphemeralStore &) = delete;
+
+private:
+    explicit EphemeralStore(::LoroEphemeralStore *raw) : raw_(raw) {}
+    ::LoroEphemeralStore *raw_;
 };
 
 }  // namespace loro

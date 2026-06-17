@@ -58,6 +58,14 @@ pub struct LoroPathComponent {
 /// [`loro_value_or_container_free`].
 pub struct LoroValueOrContainer(ValueOrContainer);
 
+impl LoroValueOrContainer {
+    /// Wraps an owned `loro::ValueOrContainer` (e.g. from `LoroMap::get`) into the opaque
+    /// handle. Shared with the container modules.
+    pub(crate) fn from_inner(voc: ValueOrContainer) -> LoroValueOrContainer {
+        LoroValueOrContainer(voc)
+    }
+}
+
 /// Resolves the document path `(path, count)` to a value or live container, or returns null if a
 /// component is invalid UTF-8 or the path does not resolve (see `loro_last_error_message`).
 /// Release the returned handle with [`loro_value_or_container_free`].
@@ -197,6 +205,27 @@ pub extern "C" fn loro_value_or_container_get_value_json(
                 LoroStatus::LORO_OK
             }
             None => LoroStatus::LORO_ERR_ENCODE,
+        }
+    })
+}
+
+/// Recovers the result as a typed, owned `LoroValue*` (no JSON), or null (with an error
+/// recorded) if it holds a live container. Free the returned value with `loro_value_free`.
+/// The source `LoroValueOrContainer*` is unaffected. Unlike
+/// [`loro_value_or_container_get_value_json`], this preserves binary, integer-valued
+/// doubles, and the value/container distinction.
+#[no_mangle]
+pub extern "C" fn loro_value_or_container_get_value(
+    voc: *const LoroValueOrContainer,
+) -> *mut crate::value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let voc = deref_or!(voc, std::ptr::null_mut());
+        match &voc.0 {
+            ValueOrContainer::Value(v) => crate::value_typed::into_raw(v.clone()),
+            ValueOrContainer::Container(_) => {
+                set_last_error("value-or-container holds a container, not a value");
+                std::ptr::null_mut()
+            }
         }
     })
 }

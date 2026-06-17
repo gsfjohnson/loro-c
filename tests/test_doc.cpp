@@ -76,7 +76,7 @@ bool run() {
     auto deep = doc->get_deep_value();
     auto *deep_map = std::get_if<loro::LoroValue::kMap>(&deep.get_variant());
     if (!deep_map) return fail("get_deep_value should return a map");
-    if (deep_map->value.find("body") == deep_map->value.end()) {
+    if (deep_map->value->find("body") == deep_map->value->end()) {
         return fail("deep value missing root container 'body'");
     }
 

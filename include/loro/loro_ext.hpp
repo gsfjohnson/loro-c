@@ -57,10 +57,11 @@ inline LoroValue value_from(std::vector<uint8_t> v) {
     return LoroValue(LoroValue::kBinary{std::move(v)});
 }
 inline LoroValue value_from(std::vector<LoroValue> v) {
-    return LoroValue(LoroValue::kList{std::move(v)});
+    return LoroValue(LoroValue::kList{std::make_shared<std::vector<LoroValue>>(std::move(v))});
 }
 inline LoroValue value_from(std::unordered_map<std::string, LoroValue> v) {
-    return LoroValue(LoroValue::kMap{std::move(v)});
+    return LoroValue(LoroValue::kMap{
+        std::make_shared<std::unordered_map<std::string, LoroValue>>(std::move(v))});
 }
 inline LoroValue value_from(ContainerId v) {
     return LoroValue(LoroValue::kContainer{std::move(v)});
@@ -111,12 +112,12 @@ inline std::optional<std::vector<uint8_t>> value_as_binary(const LoroValue &v) {
     return std::nullopt;
 }
 inline std::optional<std::vector<LoroValue>> value_as_list(const LoroValue &v) {
-    if (auto *p = std::get_if<LoroValue::kList>(&v.get_variant())) return p->value;
+    if (auto *p = std::get_if<LoroValue::kList>(&v.get_variant())) return *p->value;
     return std::nullopt;
 }
 inline std::optional<std::unordered_map<std::string, LoroValue>>
 value_as_map(const LoroValue &v) {
-    if (auto *p = std::get_if<LoroValue::kMap>(&v.get_variant())) return p->value;
+    if (auto *p = std::get_if<LoroValue::kMap>(&v.get_variant())) return *p->value;
     return std::nullopt;
 }
 inline std::optional<ContainerId> value_as_container(const LoroValue &v) {
@@ -159,7 +160,7 @@ inline std::string value_to_string(const LoroValue &v) {
     } else if (auto *l = std::get_if<LoroValue::kList>(&var)) {
         os << '[';
         bool first = true;
-        for (const auto &el : l->value) {
+        for (const auto &el : *l->value) {
             if (!first) os << ", ";
             first = false;
             os << value_to_string(el);
@@ -168,7 +169,7 @@ inline std::string value_to_string(const LoroValue &v) {
     } else if (auto *m = std::get_if<LoroValue::kMap>(&var)) {
         os << '{';
         bool first = true;
-        for (const auto &kv : m->value) {
+        for (const auto &kv : *m->value) {
             if (!first) os << ", ";
             first = false;
             os << '"' << kv.first << "\": " << value_to_string(kv.second);

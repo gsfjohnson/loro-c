@@ -63,8 +63,8 @@ bool run() {
     auto deep = map->get_deep_value();
     auto *deep_map = std::get_if<loro::LoroValue::kMap>(&deep.get_variant());
     if (!deep_map) return fail("get_deep_value should be a map");
-    auto inner_it = deep_map->value.find("inner");
-    if (inner_it == deep_map->value.end()) return fail("deep value missing 'inner'");
+    auto inner_it = deep_map->value->find("inner");
+    if (inner_it == deep_map->value->end()) return fail("deep value missing 'inner'");
 
     return true;
 }

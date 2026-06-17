@@ -359,10 +359,16 @@ struct LoroValue {
         std::string value;
     };
     struct kList {
-        std::vector<LoroValue> value;
+        // Reference-counted indirection mirrors loro's `Arc<Vec<LoroValue>>` (O(1) clone) and
+        // breaks the recursive instantiation: a `std::shared_ptr<X>` member permits an incomplete
+        // `X`, so the `std::vector`/`std::unordered_map` is only instantiated at the `make_shared`
+        // call sites (where `LoroValue` is complete). A direct container member would force the
+        // container's instantiation here, where `LoroValue` is still incomplete — which libstdc++
+        // rejects (libc++/MSVC tolerate it).
+        std::shared_ptr<std::vector<LoroValue>> value;
     };
     struct kMap {
-        std::unordered_map<std::string, LoroValue> value;
+        std::shared_ptr<std::unordered_map<std::string, LoroValue>> value;
     };
     struct kContainer {
         ContainerId value;
@@ -901,12 +907,14 @@ inline LoroValue json_to_value(const JsonValue &j) {
             std::vector<LoroValue> out;
             out.reserve(j.arr.size());
             for (const auto &e : j.arr) out.push_back(json_to_value(e));
-            return LoroValue(LoroValue::kList{std::move(out)});
+            return LoroValue(
+                LoroValue::kList{std::make_shared<std::vector<LoroValue>>(std::move(out))});
         }
         case K::Object: {
             std::unordered_map<std::string, LoroValue> out;
             for (const auto &kv : j.obj) out.emplace(kv.first, json_to_value(kv.second));
-            return LoroValue(LoroValue::kMap{std::move(out)});
+            return LoroValue(LoroValue::kMap{
+                std::make_shared<std::unordered_map<std::string, LoroValue>>(std::move(out))});
         }
     }
     return LoroValue(LoroValue::kNull{});
@@ -1013,7 +1021,7 @@ inline ::LoroValue *to_c_value(const LoroValue &v) {
             } else if constexpr (std::is_same_v<T, LoroValue::kList>) {
                 ::LoroValue *list = loro_value_new_list();
                 if (!list) throw LoroError("loro_value_new_list returned null");
-                for (const auto &el : alt.value) {
+                for (const auto &el : *alt.value) {
                     CValue child(to_c_value(el));
                     check(loro_value_list_push(list, child.get()));
                 }
@@ -1021,7 +1029,7 @@ inline ::LoroValue *to_c_value(const LoroValue &v) {
             } else if constexpr (std::is_same_v<T, LoroValue::kMap>) {
                 ::LoroValue *map = loro_value_new_map();
                 if (!map) throw LoroError("loro_value_new_map returned null");
-                for (const auto &kv : alt.value) {
+                for (const auto &kv : *alt.value) {
                     CValue child(to_c_value(kv.second));
                     check(loro_value_map_insert(map, kv.first.data(), kv.first.size(),
                                                 child.get()));
@@ -1076,7 +1084,8 @@ inline LoroValue from_c_value(const ::LoroValue *cv) {
                 CValue g(el);
                 out.push_back(from_c_value(el));
             }
-            return LoroValue(LoroValue::kList{std::move(out)});
+            return LoroValue(
+                LoroValue::kList{std::make_shared<std::vector<LoroValue>>(std::move(out))});
         }
         case LORO_VALUE_MAP: {
             std::unordered_map<std::string, LoroValue> out;
@@ -1088,7 +1097,8 @@ inline LoroValue from_c_value(const ::LoroValue *cv) {
                 CValue g(mv);
                 out.emplace(key, from_c_value(mv));
             }
-            return LoroValue(LoroValue::kMap{std::move(out)});
+            return LoroValue(LoroValue::kMap{
+                std::make_shared<std::unordered_map<std::string, LoroValue>>(std::move(out))});
         }
         case LORO_VALUE_CONTAINER: {
             Bytes b;
@@ -1469,7 +1479,7 @@ struct LoroList {
         if (!cv) throw LoroError(detail::last_error_message());
         detail::CValue g(cv);
         LoroValue v = detail::from_c_value(cv);
-        if (auto *l = std::get_if<LoroValue::kList>(&v.get_variant())) return l->value;
+        if (auto *l = std::get_if<LoroValue::kList>(&v.get_variant())) return *l->value;
         throw LoroError("loro_list_get_value did not return a list");
     }
 
@@ -1573,7 +1583,7 @@ struct LoroMovableList {
         if (!cv) throw LoroError(detail::last_error_message());
         detail::CValue g(cv);
         LoroValue v = detail::from_c_value(cv);
-        if (auto *l = std::get_if<LoroValue::kList>(&v.get_variant())) return l->value;
+        if (auto *l = std::get_if<LoroValue::kList>(&v.get_variant())) return *l->value;
         throw LoroError("loro_movable_list_get_value did not return a list");
     }
 

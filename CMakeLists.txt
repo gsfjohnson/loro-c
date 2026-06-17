@@ -8,6 +8,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(BUILD_TESTING "Build the loro-c test suite" ON)
 option(LORO_BUILD_EXAMPLES "Build the loro-c examples" OFF)
+option(LORO_BUILD_CONFORMANCE
+    "Build the Phase 0 conformance spike: compile loro-cpp's tests against the new \
+loro-cpp-shaped <loro.hpp>. Requires a loro-cpp checkout (see -DLORO_CPP_DIR)." OFF)
 option(LORO_USE_CORROSION
     "Build the Rust crate with Corrosion (recommended; used by the CI matrix). Disable on \
 toolchains where the only available CMake is a POSIX build driving a native-Windows cargo \
@@ -196,4 +199,11 @@ endif()
 if(BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# Phase 0 conformance spike (opt-in). enable_testing() is idempotent, so this works whether or
+# not BUILD_TESTING is on.
+if(LORO_BUILD_CONFORMANCE)
+    enable_testing()
+    add_subdirectory(conformance)
 endif()

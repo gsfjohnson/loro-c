@@ -421,6 +421,20 @@ pub extern "C" fn loro_doc_get_deep_value_json(
     })
 }
 
+/// Returns the entire document state (resolving nested containers) as an owned typed
+/// `LoroValue*` (a `Map` value), or null on error. Free with `loro_value_free`. Typed
+/// counterpart to [`loro_doc_get_deep_value_json`]; preserves binary, integer-valued
+/// doubles, and the value/container distinction (RESHAPE Phase 2).
+#[no_mangle]
+pub extern "C" fn loro_doc_get_deep_value(
+    doc: *const LoroDoc,
+) -> *mut crate::value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let doc = deref_or!(doc, std::ptr::null_mut());
+        crate::value_typed::into_raw(doc.inner().get_deep_value())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // G3 — JSON-update sync
 //

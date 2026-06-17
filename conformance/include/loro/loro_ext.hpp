@@ -1,11 +1,14 @@
 /*
- * loro/loro_ext.hpp — loro-cpp-shaped ergonomics layer (Phase 1 subset: value helpers).
+ * loro/loro_ext.hpp — loro-cpp-shaped ergonomics layer (Phases 1–2 subset).
  *
- * Ported near-verbatim from ../loro-cpp/include/loro/loro_ext.hpp. Phase 1 ships only the
- * `loro::ext` LoroValue construction / inspection helpers — pure C++ over the typed
- * `loro::LoroValue` from <loro.hpp>, no C ABI of their own. The lambda→callback adapters,
- * subscribe_* shortcuts, insert_container<T> templates, Result/try_call, and undo helpers
- * are added in later phases (they need container / subscription / undo surface).
+ * Ported near-verbatim from ../loro-cpp/include/loro/loro_ext.hpp. Pure C++ over the typed
+ * `loro::LoroValue` / container wrappers from <loro.hpp>, with no C ABI of their own.
+ *   Phase 1: LoroValue construction / inspection / formatting helpers.
+ *   Phase 2: ContainerId / ContainerIdLike factories (root_*, container_id_like) and the
+ *            templated container insertion helpers (insert_container<T> /
+ *            get_or_create_container<T> / set_container<T>) over the new container surface.
+ * The lambda→callback adapters, subscribe_* shortcuts, Result/try_call, and undo helpers are
+ * added in later phases (they need the subscription / undo surface).
  */
 #ifndef LORO_CONFORMANCE_LORO_EXT_HPP
 #define LORO_CONFORMANCE_LORO_EXT_HPP
@@ -19,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace loro {
@@ -179,6 +183,152 @@ inline std::string value_to_string(const LoroValue &v) {
         }
     }
     return os.str();
+}
+
+// ============================================================================
+// ContainerId / ContainerIdLike helpers
+// ============================================================================
+
+inline ContainerId root_id(std::string name, ContainerType ty) {
+    return ContainerId(ContainerId::kRoot{std::move(name), std::move(ty)});
+}
+inline ContainerId root_text(std::string name) {
+    return root_id(std::move(name), ContainerType(ContainerType::kText{}));
+}
+inline ContainerId root_map(std::string name) {
+    return root_id(std::move(name), ContainerType(ContainerType::kMap{}));
+}
+inline ContainerId root_list(std::string name) {
+    return root_id(std::move(name), ContainerType(ContainerType::kList{}));
+}
+inline ContainerId root_movable_list(std::string name) {
+    return root_id(std::move(name), ContainerType(ContainerType::kMovableList{}));
+}
+inline ContainerId root_tree(std::string name) {
+    return root_id(std::move(name), ContainerType(ContainerType::kTree{}));
+}
+inline ContainerId root_counter(std::string name) {
+    return root_id(std::move(name), ContainerType(ContainerType::kCounter{}));
+}
+
+// `LoroDoc::get_text` etc. take a ContainerIdLike that composes the full ContainerId once
+// loro reports the container type. For "root container by name", this adapter echoes the
+// requested type, so one instance works for get_text / get_map / get_list / ...
+inline std::shared_ptr<ContainerIdLike> root(std::string name) {
+    struct Impl : public ContainerIdLike {
+        std::string name;
+        explicit Impl(std::string n) : name(std::move(n)) {}
+        ContainerId as_container_id(ContainerType ty) override {
+            return ContainerId(ContainerId::kRoot{name, std::move(ty)});
+        }
+    };
+    return std::make_shared<Impl>(std::move(name));
+}
+
+// Adapter for callers that already hold a fully-resolved ContainerId.
+inline std::shared_ptr<ContainerIdLike> container_id_like(ContainerId cid) {
+    struct Impl : public ContainerIdLike {
+        ContainerId cid;
+        explicit Impl(ContainerId c) : cid(std::move(c)) {}
+        ContainerId as_container_id(ContainerType /*ty*/) override { return cid; }
+    };
+    return std::make_shared<Impl>(std::move(cid));
+}
+
+// ============================================================================
+// Templated container insertion
+// ============================================================================
+//
+// The wrappers expose per-type methods (`insert_text_container`, `insert_map_container`, ...).
+// The traits below dispatch on the child type so callers can write
+// `insert_container<LoroText>(map, "title")` once.
+
+template <class C>
+struct container_traits;
+
+#define LORO_EXT_CONTAINER_TRAITS(Type, suffix)                                       \
+    template <>                                                                       \
+    struct container_traits<Type> {                                                   \
+        static std::shared_ptr<Type> create() { return Type::init(); }                \
+        static std::shared_ptr<Type> map_insert(LoroMap &m, const std::string &k,     \
+                                                std::shared_ptr<Type> child) {        \
+            return m.insert_##suffix##_container(k, std::move(child));                \
+        }                                                                             \
+        static std::shared_ptr<Type> map_get_or_create(LoroMap &m, const std::string &k, \
+                                                       std::shared_ptr<Type> child) { \
+            return m.get_or_create_##suffix##_container(k, std::move(child));         \
+        }                                                                             \
+        static std::shared_ptr<Type> list_insert(LoroList &l, uint32_t pos,           \
+                                                 std::shared_ptr<Type> child) {       \
+            return l.insert_##suffix##_container(pos, std::move(child));              \
+        }                                                                             \
+        static std::shared_ptr<Type> mlist_insert(LoroMovableList &l, uint32_t pos,   \
+                                                  std::shared_ptr<Type> child) {      \
+            return l.insert_##suffix##_container(pos, std::move(child));              \
+        }                                                                             \
+        static std::shared_ptr<Type> mlist_set(LoroMovableList &l, uint32_t pos,      \
+                                               std::shared_ptr<Type> child) {         \
+            return l.set_##suffix##_container(pos, std::move(child));                 \
+        }                                                                             \
+    };
+
+LORO_EXT_CONTAINER_TRAITS(LoroText, text)
+LORO_EXT_CONTAINER_TRAITS(LoroMap, map)
+LORO_EXT_CONTAINER_TRAITS(LoroList, list)
+LORO_EXT_CONTAINER_TRAITS(LoroMovableList, movable_list)
+LORO_EXT_CONTAINER_TRAITS(LoroTree, tree)
+LORO_EXT_CONTAINER_TRAITS(LoroCounter, counter)
+
+#undef LORO_EXT_CONTAINER_TRAITS
+
+template <class C>
+inline std::shared_ptr<C> insert_container(LoroMap &parent, const std::string &key,
+                                           std::shared_ptr<C> child) {
+    return container_traits<C>::map_insert(parent, key, std::move(child));
+}
+template <class C>
+inline std::shared_ptr<C> insert_container(LoroMap &parent, const std::string &key) {
+    return container_traits<C>::map_insert(parent, key, container_traits<C>::create());
+}
+
+template <class C>
+inline std::shared_ptr<C> get_or_create_container(LoroMap &parent, const std::string &key,
+                                                  std::shared_ptr<C> child) {
+    return container_traits<C>::map_get_or_create(parent, key, std::move(child));
+}
+template <class C>
+inline std::shared_ptr<C> get_or_create_container(LoroMap &parent, const std::string &key) {
+    return container_traits<C>::map_get_or_create(parent, key, container_traits<C>::create());
+}
+
+template <class C>
+inline std::shared_ptr<C> insert_container(LoroList &parent, uint32_t pos,
+                                           std::shared_ptr<C> child) {
+    return container_traits<C>::list_insert(parent, pos, std::move(child));
+}
+template <class C>
+inline std::shared_ptr<C> insert_container(LoroList &parent, uint32_t pos) {
+    return container_traits<C>::list_insert(parent, pos, container_traits<C>::create());
+}
+
+template <class C>
+inline std::shared_ptr<C> insert_container(LoroMovableList &parent, uint32_t pos,
+                                           std::shared_ptr<C> child) {
+    return container_traits<C>::mlist_insert(parent, pos, std::move(child));
+}
+template <class C>
+inline std::shared_ptr<C> insert_container(LoroMovableList &parent, uint32_t pos) {
+    return container_traits<C>::mlist_insert(parent, pos, container_traits<C>::create());
+}
+
+template <class C>
+inline std::shared_ptr<C> set_container(LoroMovableList &parent, uint32_t pos,
+                                        std::shared_ptr<C> child) {
+    return container_traits<C>::mlist_set(parent, pos, std::move(child));
+}
+template <class C>
+inline std::shared_ptr<C> set_container(LoroMovableList &parent, uint32_t pos) {
+    return container_traits<C>::mlist_set(parent, pos, container_traits<C>::create());
 }
 
 }  // namespace ext

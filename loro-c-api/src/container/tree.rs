@@ -374,6 +374,43 @@ pub extern "C" fn loro_tree_root_at(
     })
 }
 
+/// Returns the number of nodes (including deleted ones). Returns 0 on a null handle. The
+/// indexed counterpart to [`loro_tree_nodes_json`], for the C++ `nodes()` accessor.
+#[no_mangle]
+pub extern "C" fn loro_tree_nodes_len(tree: *const LoroTree) -> usize {
+    ffi_guard!(0usize, {
+        let tree = deref_or!(tree, 0usize);
+        tree.inner().nodes().len()
+    })
+}
+
+/// Writes the node at `index` (over all nodes, including deleted ones) into `*out`. Returns
+/// `LORO_ERR_NOT_FOUND` if `index` is out of range.
+#[no_mangle]
+pub extern "C" fn loro_tree_node_at(
+    tree: *const LoroTree,
+    index: usize,
+    out: *mut LoroTreeID,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let tree = deref_or!(tree, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        match tree.inner().nodes().get(index) {
+            Some(id) => {
+                unsafe { out.write(LoroTreeID::from_loro(*id)) };
+                LoroStatus::LORO_OK
+            }
+            None => {
+                set_last_error("node index out of range");
+                LoroStatus::LORO_ERR_NOT_FOUND
+            }
+        }
+    })
+}
+
 /// Writes the number of children of `parent` (null = root) into `*out`. Returns
 /// `LORO_ERR_NOT_FOUND` if `parent` does not exist.
 #[no_mangle]

@@ -1,24 +1,33 @@
 /*
- * loro.hpp — Phase 0 conformance spike.
+ * loro.hpp — conformance spike (RESHAPE Phases 0–2).
  *
  * A loro-cpp-SHAPED C++ API (namespace `loro`, shared_ptr ownership, typed `LoroValue`,
  * `init()` factories, callback interfaces) implemented as a thin wrapper over loro-c's
- * existing C ABI in <loro/loro.h>. Its sole purpose for Phase 0 is to compile, link and pass
- * loro-cpp's own tests/test_smoke.cpp and tests/test_text.cpp, proving the API *shape* and the
- * build wiring before the full RESHAPE rewrite is undertaken.
+ * existing C ABI in <loro/loro.h>. Its purpose is to compile, link and pass loro-cpp's own
+ * tests/test_*.cpp against this header, proving the API *shape* and the build wiring before
+ * the full RESHAPE in-place rewrite is undertaken.
  *
- * Scope (Phase 0 only): the surface those two tests exercise — LoroDoc, LoroText, LoroMap
- * (opaque), Cursor, StyleConfigMap, the typed LoroValue/TextDelta/ContainerId families and the
- * ContainerIdLike / LoroValueLike interfaces. Values cross the boundary as JSON here, which is
- * lossless for the kinds these tests use (null/bool/i64/double/string). The provably-lossy
- * cases (binary, integer-valued doubles, cid-prefixed strings) DO NOT occur in test_smoke /
- * test_text and are deliberately out of scope — the typed-value C ABI is Phase 1.
+ * Phase 0–1 surface: LoroDoc, LoroText, LoroMap, Cursor, StyleConfigMap, EphemeralStore, the
+ * typed LoroValue/TextDelta/ContainerId families and the ContainerIdLike / LoroValueLike
+ * interfaces, plus the typed-value FFI bridge (binary / integer-valued doubles survive).
+ *
+ * Phase 2 surface (this file): the remaining four container types — LoroList, LoroMovableList,
+ * LoroTree (+ TreeId / TreeParentId), LoroCounter — with their accessors and the full
+ * insert_* / set_* container matrix; ContainerId <-> "cid:" string conversion; and the
+ * VersionVector / Frontiers wrappers plus the LoroDoc methods test_doc exercises (peer_id,
+ * commit, state_vv/state_frontiers, vv<->frontiers, fork/fork_at, export/import variants,
+ * has_container, typed get_deep_value).
  *
  * Names match ../loro-cpp/build/generated/loro.hpp field-for-field (uniffi quirks included:
- * `delete_()`, `Side::kRight`, `TextDelta::kDelete{delete_}`, `ContainerType::kUnknown{kind}`,
- * `LoroValue::kI64`). The C handle types from <loro/loro.h> live in the global namespace and are
+ * `delete_()`, `Side::kRight`, `TreeParentId::kNode{id}`, `ContainerType::kUnknown{kind}`,
+ * `LoroValue::kI64`). C handle types from <loro/loro.h> live in the global namespace and are
  * referred to here with a leading `::` (e.g. `::LoroText`) to disambiguate from the `loro::`
  * wrapper classes of the same name.
+ *
+ * Construction discipline: every wrapper holds a raw C handle with a `loro_*_free` deleter and
+ * a private constructor. All cross-class construction (and the detached-container `take`)
+ * routes through `detail::Factory`, which is the sole `friend` each wrapper grants. Factory is
+ * defined after all wrapper classes; methods that use it are therefore defined out-of-line.
  */
 #ifndef LORO_CONFORMANCE_LORO_HPP
 #define LORO_CONFORMANCE_LORO_HPP
@@ -41,7 +50,7 @@ namespace loro {
 
 // ------------------------------------------------------------------ error
 
-/// Base loro exception (loro-cpp shape). Phase 0 uses a single class; the full
+/// Base loro exception (loro-cpp shape). The conformance spike uses a single class; the full
 /// loro_error:: subclass hierarchy is deferred to a later phase.
 struct LoroError : std::runtime_error {
     LoroError() : std::runtime_error("") {}
@@ -54,6 +63,10 @@ struct LoroError : std::runtime_error {
 struct LoroDoc;
 struct LoroText;
 struct LoroMap;
+struct LoroList;
+struct LoroMovableList;
+struct LoroTree;
+struct LoroCounter;
 struct Cursor;
 struct StyleConfigMap;
 struct LoroValue;
@@ -63,6 +76,12 @@ struct Subscription;
 struct EphemeralStore;
 struct EphemeralStoreEvent;
 struct EphemeralSubscriber;
+struct VersionVector;
+struct Frontiers;
+
+namespace detail {
+struct Factory;  // privileged construction helper; defined after the wrapper classes.
+}
 
 // --------------------------------------------------------- enums & POD types
 
@@ -123,6 +142,32 @@ struct ContainerId {
 
 private:
     std::variant<kRoot, kNormal> variant;
+};
+
+/// A tree node id (uniffi `TreeID`).
+struct TreeId {
+    uint64_t peer;
+    int32_t counter;
+};
+
+/// The parent of a tree node (uniffi `TreeParentId`): a node, the root, deleted, or
+/// not-yet-existent.
+struct TreeParentId {
+    struct kNode {
+        TreeId id;
+    };
+    struct kRoot {};
+    struct kDeleted {};
+    struct kUnexist {};
+    TreeParentId(kNode variant) : variant(std::move(variant)) {}
+    TreeParentId(kRoot variant) : variant(std::move(variant)) {}
+    TreeParentId(kDeleted variant) : variant(std::move(variant)) {}
+    TreeParentId(kUnexist variant) : variant(std::move(variant)) {}
+
+    const std::variant<kNode, kRoot, kDeleted, kUnexist> &get_variant() const { return variant; }
+
+private:
+    std::variant<kNode, kRoot, kDeleted, kUnexist> variant;
 };
 
 struct CounterSpan {
@@ -312,17 +357,87 @@ inline LoroExpandType to_c_expand(ExpandType e) {
     return LORO_EXPAND_AFTER;
 }
 
-/// Extracts the root-container name from a ContainerIdLike. Phase 0 supports only root
-/// (by-name) ids — which is all the conformance tests use.
+/// Extracts the root-container name from a ContainerIdLike. The conformance tests only use
+/// root (by-name) ids.
 inline std::string root_name(const std::shared_ptr<ContainerIdLike> &id, ContainerType ty) {
     ContainerId cid = id->as_container_id(std::move(ty));
     if (auto *root = std::get_if<ContainerId::kRoot>(&cid.get_variant())) {
         return root->name;
     }
-    throw LoroError("Phase 0 spike: only root (by-name) ContainerId is supported");
+    throw LoroError("conformance spike: only root (by-name) ContainerId is supported here");
 }
 
-// ---- minimal JSON support (Phase 0: rich-text delta round-trip only) --------
+// ---- ContainerType / ContainerId <-> "cid:" string (RESHAPE Phase 2) --------
+//
+// Matches loro-common 1.13.1 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
+//   root:   "cid:root-{name}:{Type}"      (the LAST ':' splits name from type — names may
+//                                           themselves contain ':')
+//   normal: "cid:{counter}@{peer}:{Type}"
+// Types render as Text/Map/List/MovableList/Tree/Counter/Unknown(k).
+
+inline const char *container_type_name(const ContainerType &ty) {
+    const auto &v = ty.get_variant();
+    if (std::holds_alternative<ContainerType::kText>(v)) return "Text";
+    if (std::holds_alternative<ContainerType::kMap>(v)) return "Map";
+    if (std::holds_alternative<ContainerType::kList>(v)) return "List";
+    if (std::holds_alternative<ContainerType::kMovableList>(v)) return "MovableList";
+    if (std::holds_alternative<ContainerType::kTree>(v)) return "Tree";
+    if (std::holds_alternative<ContainerType::kCounter>(v)) return "Counter";
+    return "Unknown";  // kUnknown is not exercised by the conformance tests.
+}
+
+inline ContainerType container_type_from_name(const std::string &name) {
+    if (name == "Text") return ContainerType(ContainerType::kText{});
+    if (name == "Map") return ContainerType(ContainerType::kMap{});
+    if (name == "List") return ContainerType(ContainerType::kList{});
+    if (name == "MovableList") return ContainerType(ContainerType::kMovableList{});
+    if (name == "Tree") return ContainerType(ContainerType::kTree{});
+    if (name == "Counter") return ContainerType(ContainerType::kCounter{});
+    return ContainerType(ContainerType::kUnknown{0});
+}
+
+inline ContainerId cid_string_to_container_id(const std::string &cid) {
+    if (cid.rfind("cid:", 0) != 0) throw LoroError("not a cid string: " + cid);
+    std::string s = cid.substr(4);
+    if (s.rfind("root-", 0) == 0) {
+        s = s.substr(5);
+        std::size_t split = s.rfind(':');
+        if (split == std::string::npos || split == 0)
+            throw LoroError("malformed root cid: " + cid);
+        ContainerType ty = container_type_from_name(s.substr(split + 1));
+        return ContainerId(ContainerId::kRoot{s.substr(0, split), std::move(ty)});
+    }
+    // normal: {counter}@{peer}:{Type}
+    std::size_t at = s.find('@');
+    std::size_t colon = s.rfind(':');
+    if (at == std::string::npos || colon == std::string::npos || at >= colon)
+        throw LoroError("malformed normal cid: " + cid);
+    int32_t counter = static_cast<int32_t>(std::stoll(s.substr(0, at)));
+    uint64_t peer = static_cast<uint64_t>(std::stoull(s.substr(at + 1, colon - at - 1)));
+    ContainerType ty = container_type_from_name(s.substr(colon + 1));
+    return ContainerId(ContainerId::kNormal{peer, counter, std::move(ty)});
+}
+
+inline std::string container_id_to_cid_string(const ContainerId &id) {
+    const auto &v = id.get_variant();
+    if (auto *r = std::get_if<ContainerId::kRoot>(&v)) {
+        return "cid:root-" + r->name + ":" + container_type_name(r->container_type);
+    }
+    const auto &n = std::get<ContainerId::kNormal>(v);
+    return "cid:" + std::to_string(n.counter) + "@" + std::to_string(n.peer) + ":" +
+           container_type_name(n.container_type);
+}
+
+inline ::LoroTreeID to_c_tree_id(const TreeId &id) {
+    ::LoroTreeID c;
+    c.peer = id.peer;
+    c.counter = id.counter;
+    return c;
+}
+
+inline TreeId from_c_tree_id(const ::LoroTreeID &c) { return TreeId{c.peer, c.counter}; }
+
+// ---- minimal JSON support (rich-text delta round-trip) ----------------------
 
 /// A tiny JSON value used solely to rebuild TextDelta + scalar attributes from the C ABI's
 /// JSON delta output. Not a general-purpose JSON type.
@@ -361,7 +476,7 @@ private:
     size_t i_ = 0;
 
     [[noreturn]] void err(const char *m) {
-        throw LoroError(std::string("Phase 0 JSON parse error: ") + m);
+        throw LoroError(std::string("conformance JSON parse error: ") + m);
     }
     void skip_ws() {
         while (i_ < n_ && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r')) {
@@ -476,7 +591,7 @@ private:
                             else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
                             else err("bad hex digit");
                         }
-                        // BMP-only UTF-8 encode (sufficient for Phase 0 tests).
+                        // BMP-only UTF-8 encode (sufficient for the conformance tests).
                         if (cp < 0x80) {
                             out.push_back(static_cast<char>(cp));
                         } else if (cp < 0x800) {
@@ -555,7 +670,7 @@ private:
 inline JsonValue parse_json(const std::string &s) { return JsonParser(s).parse(); }
 
 /// JsonValue -> typed LoroValue. Numbers without a fractional/exponent part become kI64,
-/// otherwise kDouble (Phase 0: integer-valued doubles are not preserved — that is Phase 1).
+/// otherwise kDouble (used only for rich-text delta attributes, which the tests keep scalar).
 inline LoroValue json_to_value(const JsonValue &j) {
     using K = JsonValue::Kind;
     switch (j.kind) {
@@ -601,8 +716,8 @@ inline void json_escape(const std::string &in, std::string &out) {
     out.push_back('"');
 }
 
-/// Typed LoroValue -> JSON scalar, for mark()'s value. Phase 0 supports the scalar kinds the
-/// tests produce; compound/binary/container values throw (Phase 1 typed-value ABI).
+/// Typed LoroValue -> JSON scalar, for mark()'s value. Supports the scalar kinds the tests
+/// produce; compound/binary/container values throw.
 inline std::string value_to_json(const LoroValue &v) {
     return std::visit(
         [](auto &&alt) -> std::string {
@@ -622,18 +737,17 @@ inline std::string value_to_json(const LoroValue &v) {
                 json_escape(alt.value, out);
                 return out;
             } else {
-                throw LoroError("Phase 0 spike: only scalar LoroValue kinds cross as JSON");
+                throw LoroError("conformance spike: only scalar LoroValue kinds cross as JSON");
             }
         },
         v.get_variant());
 }
 
-// ---- typed-value bridge (Phase 1) -------------------------------------------
+// ---- typed-value bridge -----------------------------------------------------
 //
-// Translates between the C++ typed `loro::LoroValue` variant and the opaque C
-// `::LoroValue` handle from <loro/loro.h>, so values cross the FFI boundary WITHOUT JSON
-// (binary stays binary; integer-valued doubles stay doubles). Replaces the lossy Phase 0
-// JSON value path for map / ephemeral values.
+// Translates between the C++ typed `loro::LoroValue` variant and the opaque C `::LoroValue`
+// handle from <loro/loro.h>, so values cross the FFI boundary WITHOUT JSON (binary stays
+// binary; integer-valued doubles stay doubles).
 
 /// RAII owner for a `::LoroValue*` returned by / built for the C ABI; frees on scope exit.
 class CValue {
@@ -696,14 +810,15 @@ inline ::LoroValue *to_c_value(const LoroValue &v) {
                 }
                 return map;
             } else {  // kContainer
-                throw LoroError("Phase 1: container-valued LoroValue cannot be sent to loro-c");
+                throw LoroError("conformance spike: container-valued LoroValue cannot be sent to "
+                                "loro-c");
             }
         },
         v.get_variant());
 }
 
-/// Reconstructs a typed `loro::LoroValue` from an owned `::LoroValue*` (no JSON). Does not
-/// take ownership of `cv` (the caller frees it).
+/// Reconstructs a typed `loro::LoroValue` from an owned `::LoroValue*` (no JSON). Does not take
+/// ownership of `cv` (the caller frees it).
 inline LoroValue from_c_value(const ::LoroValue *cv) {
     switch (loro_value_get_type(cv)) {
         case LORO_VALUE_NULL:
@@ -757,9 +872,13 @@ inline LoroValue from_c_value(const ::LoroValue *cv) {
             }
             return LoroValue(LoroValue::kMap{std::move(out)});
         }
-        case LORO_VALUE_CONTAINER:
+        case LORO_VALUE_CONTAINER: {
+            Bytes b;
+            check(loro_value_as_container(cv, b.out()));
+            return LoroValue(LoroValue::kContainer{cid_string_to_container_id(b.to_string())});
+        }
         default:
-            throw LoroError("Phase 1: container-valued LoroValue reconstruction is deferred");
+            throw LoroError("unknown LoroValue type");
     }
 }
 
@@ -781,8 +900,8 @@ private:
 
 struct LoroText {
     /// Constructs a *detached* text container (loro-c: `loro_container_new`). Attach it by
-    /// passing it to `LoroMap::insert_text_container` (etc.), which consumes it and returns
-    /// the attached handle. A detached text is not editable until attached.
+    /// passing it to a parent's `insert_text_container`, which consumes it and returns the
+    /// attached handle. A detached text is not editable until attached.
     static std::shared_ptr<LoroText> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_TEXT);
         if (!c) throw LoroError("loro_container_new(Text) returned null");
@@ -816,6 +935,12 @@ struct LoroText {
         detail::Bytes b;
         detail::check(loro_text_to_string(raw_, b.out()));
         return b.to_string();
+    }
+
+    ContainerId id() {
+        detail::Bytes b;
+        detail::check(loro_text_id(raw_, b.out()));
+        return detail::cid_string_to_container_id(b.to_string());
     }
 
     void mark(uint32_t from, uint32_t to, const std::string &key,
@@ -876,7 +1001,7 @@ struct LoroText {
         return std::shared_ptr<Cursor>(new Cursor(c));
     }
 
-    bool is_attached() { return loro_text_is_attached(raw_); }
+    bool is_attached() { return raw_ ? loro_text_is_attached(raw_) : false; }
     bool is_empty() { return loro_text_is_empty(raw_); }
 
     ~LoroText() {
@@ -890,8 +1015,7 @@ private:
     explicit LoroText(::LoroText *raw) : raw_(raw) {}        // attached
     explicit LoroText(::LoroContainer *c) : container_(c) {}  // detached (from init())
 
-    /// Releases the detached container for attachment (nulls it so the destructor won't free
-    /// it). Throws if this text is not a detached container.
+    /// Releases the detached container for attachment (nulls it). Throws if not detached.
     ::LoroContainer *take_container() {
         if (!container_) throw LoroError("LoroText is not a detached container");
         ::LoroContainer *c = container_;
@@ -899,17 +1023,12 @@ private:
         return c;
     }
 
-    ::LoroText *raw_ = nullptr;            // attached editing handle
+    ::LoroText *raw_ = nullptr;             // attached editing handle
     ::LoroContainer *container_ = nullptr;  // detached container awaiting attach
-    friend struct LoroDoc;
-    friend struct LoroMap;
-    friend struct ValueOrContainer;
+    friend struct detail::Factory;
 };
 
 struct LoroMap {
-    /// Constructs a *detached* map container (loro-c: `loro_container_new`). Attach it by
-    /// passing it to `LoroMap::insert_map_container` (etc.), which consumes it and returns
-    /// the attached handle.
     static std::shared_ptr<LoroMap> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_MAP);
         if (!c) throw LoroError("loro_container_new(Map) returned null");
@@ -922,9 +1041,7 @@ struct LoroMap {
         detail::check(loro_map_insert_value(map(), key.data(), key.size(), cv.get()));
     }
 
-    /// Returns the entry at `key` (a value or a live child container). Declared here, defined
-    /// out-of-line once `ValueOrContainer` is complete.
-    std::shared_ptr<ValueOrContainer> get(const std::string &key);
+    std::shared_ptr<ValueOrContainer> get(const std::string &key);  // out-of-line
 
     void delete_(const std::string &key) {
         detail::check(loro_map_delete(map(), key.data(), key.size()));
@@ -939,9 +1056,7 @@ struct LoroMap {
         return detail::parse_string_array(b.to_string());
     }
 
-    /// loro-cpp returns one `ValueOrContainer` per entry; here it is keys() + get() per key
-    /// (the conformance test only checks the count). Defined out-of-line.
-    std::vector<std::shared_ptr<ValueOrContainer>> values();
+    std::vector<std::shared_ptr<ValueOrContainer>> values();  // out-of-line
 
     LoroValue get_deep_value() {
         ::LoroValue *cv = loro_map_get_deep_value(map());
@@ -950,27 +1065,38 @@ struct LoroMap {
         return detail::from_c_value(cv);
     }
 
-    std::shared_ptr<LoroText> insert_text_container(const std::string &key,
-                                                    const std::shared_ptr<LoroText> &child) {
-        ::LoroContainer *attached =
-            loro_map_insert_container(map(), key.data(), key.size(), child->take_container());
-        if (!attached) throw LoroError(detail::last_error_message());
-        ::LoroText *t = loro_container_get_text(attached);
-        loro_container_free(attached);
-        if (!t) throw LoroError("attached container is not a text");
-        return std::shared_ptr<LoroText>(new LoroText(t));
+    ContainerId id() {
+        detail::Bytes b;
+        detail::check(loro_map_id(map(), b.out()));
+        return detail::cid_string_to_container_id(b.to_string());
     }
 
-    std::shared_ptr<LoroMap> insert_map_container(const std::string &key,
-                                                  const std::shared_ptr<LoroMap> &child) {
-        ::LoroContainer *attached =
-            loro_map_insert_container(map(), key.data(), key.size(), child->take_container());
-        if (!attached) throw LoroError(detail::last_error_message());
-        ::LoroMap *m = loro_container_get_map(attached);
-        loro_container_free(attached);
-        if (!m) throw LoroError("attached container is not a map");
-        return std::shared_ptr<LoroMap>(new LoroMap(m));
-    }
+    // Nested-container insertion (out-of-line; needs the complete child types + Factory).
+    std::shared_ptr<LoroText> insert_text_container(const std::string &k,
+                                                    std::shared_ptr<LoroText> c);
+    std::shared_ptr<LoroMap> insert_map_container(const std::string &k,
+                                                  std::shared_ptr<LoroMap> c);
+    std::shared_ptr<LoroList> insert_list_container(const std::string &k,
+                                                    std::shared_ptr<LoroList> c);
+    std::shared_ptr<LoroMovableList> insert_movable_list_container(
+        const std::string &k, std::shared_ptr<LoroMovableList> c);
+    std::shared_ptr<LoroTree> insert_tree_container(const std::string &k,
+                                                    std::shared_ptr<LoroTree> c);
+    std::shared_ptr<LoroCounter> insert_counter_container(const std::string &k,
+                                                          std::shared_ptr<LoroCounter> c);
+
+    std::shared_ptr<LoroText> get_or_create_text_container(const std::string &k,
+                                                           std::shared_ptr<LoroText> c);
+    std::shared_ptr<LoroMap> get_or_create_map_container(const std::string &k,
+                                                         std::shared_ptr<LoroMap> c);
+    std::shared_ptr<LoroList> get_or_create_list_container(const std::string &k,
+                                                           std::shared_ptr<LoroList> c);
+    std::shared_ptr<LoroMovableList> get_or_create_movable_list_container(
+        const std::string &k, std::shared_ptr<LoroMovableList> c);
+    std::shared_ptr<LoroTree> get_or_create_tree_container(const std::string &k,
+                                                           std::shared_ptr<LoroTree> c);
+    std::shared_ptr<LoroCounter> get_or_create_counter_container(
+        const std::string &k, std::shared_ptr<LoroCounter> c);
 
     ~LoroMap() {
         if (raw_) loro_map_free(raw_);
@@ -983,13 +1109,10 @@ private:
     explicit LoroMap(::LoroMap *raw) : raw_(raw) {}          // attached
     explicit LoroMap(::LoroContainer *c) : container_(c) {}  // detached (from init())
 
-    /// The attached editing handle, or throws if this map is a detached container.
     ::LoroMap *map() const {
         if (!raw_) throw LoroError("LoroMap is detached (not attached to a document)");
         return raw_;
     }
-
-    /// Releases the detached container for attachment (nulls it). Throws if not detached.
     ::LoroContainer *take_container() {
         if (!container_) throw LoroError("LoroMap is not a detached container");
         ::LoroContainer *c = container_;
@@ -997,16 +1120,439 @@ private:
         return c;
     }
 
-    ::LoroMap *raw_ = nullptr;             // attached handle
-    ::LoroContainer *container_ = nullptr;  // detached container awaiting attach
-    friend struct LoroDoc;
-    friend struct ValueOrContainer;
+    // Type-generic helpers shared by the named methods above (out-of-line).
+    template <class C>
+    std::shared_ptr<C> insert_container_by_key(const std::string &key, std::shared_ptr<C> child);
+    template <class C>
+    std::shared_ptr<C> get_or_create_container_by_key(const std::string &key,
+                                                      std::shared_ptr<C> child);
+
+    ::LoroMap *raw_ = nullptr;
+    ::LoroContainer *container_ = nullptr;
+    friend struct detail::Factory;
+};
+
+struct LoroList {
+    static std::shared_ptr<LoroList> init() {
+        ::LoroContainer *c = loro_container_new(LORO_CONTAINER_LIST);
+        if (!c) throw LoroError("loro_container_new(List) returned null");
+        return std::shared_ptr<LoroList>(new LoroList(c));
+    }
+
+    void insert(uint32_t pos, const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_list_insert_value(list(), pos, cv.get()));
+    }
+    void push(const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_list_push_value(list(), cv.get()));
+    }
+    std::optional<LoroValue> pop() {
+        bool present = false;
+        ::LoroValue *cv = loro_list_pop_value(list(), &present);
+        if (!present) return std::nullopt;
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+    void delete_(uint32_t pos, uint32_t len) {
+        detail::check(loro_list_delete(list(), pos, len));
+    }
+    std::shared_ptr<ValueOrContainer> get(uint32_t index);  // out-of-line
+
+    uint32_t len() { return static_cast<uint32_t>(loro_list_len(list())); }
+    bool is_empty() { return loro_list_is_empty(list()); }
+    void clear() { detail::check(loro_list_clear(list())); }
+
+    std::vector<LoroValue> to_vec() {
+        ::LoroValue *cv = loro_list_get_value(list());
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        LoroValue v = detail::from_c_value(cv);
+        if (auto *l = std::get_if<LoroValue::kList>(&v.get_variant())) return l->value;
+        throw LoroError("loro_list_get_value did not return a list");
+    }
+
+    LoroValue get_deep_value() {
+        ::LoroValue *cv = loro_list_get_deep_value(list());
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    ContainerId id() {
+        detail::Bytes b;
+        detail::check(loro_list_id(list(), b.out()));
+        return detail::cid_string_to_container_id(b.to_string());
+    }
+
+    std::shared_ptr<LoroText> insert_text_container(uint32_t pos, std::shared_ptr<LoroText> c);
+    std::shared_ptr<LoroMap> insert_map_container(uint32_t pos, std::shared_ptr<LoroMap> c);
+    std::shared_ptr<LoroList> insert_list_container(uint32_t pos, std::shared_ptr<LoroList> c);
+    std::shared_ptr<LoroMovableList> insert_movable_list_container(
+        uint32_t pos, std::shared_ptr<LoroMovableList> c);
+    std::shared_ptr<LoroTree> insert_tree_container(uint32_t pos, std::shared_ptr<LoroTree> c);
+    std::shared_ptr<LoroCounter> insert_counter_container(uint32_t pos,
+                                                          std::shared_ptr<LoroCounter> c);
+
+    ~LoroList() {
+        if (raw_) loro_list_free(raw_);
+        else if (container_) loro_container_free(container_);
+    }
+    LoroList(const LoroList &) = delete;
+    LoroList &operator=(const LoroList &) = delete;
+
+private:
+    explicit LoroList(::LoroList *raw) : raw_(raw) {}
+    explicit LoroList(::LoroContainer *c) : container_(c) {}
+
+    ::LoroList *list() const {
+        if (!raw_) throw LoroError("LoroList is detached (not attached to a document)");
+        return raw_;
+    }
+    ::LoroContainer *take_container() {
+        if (!container_) throw LoroError("LoroList is not a detached container");
+        ::LoroContainer *c = container_;
+        container_ = nullptr;
+        return c;
+    }
+    template <class C>
+    std::shared_ptr<C> insert_container_at(uint32_t pos, std::shared_ptr<C> child);
+
+    ::LoroList *raw_ = nullptr;
+    ::LoroContainer *container_ = nullptr;
+    friend struct detail::Factory;
+};
+
+struct LoroMovableList {
+    static std::shared_ptr<LoroMovableList> init() {
+        ::LoroContainer *c = loro_container_new(LORO_CONTAINER_MOVABLE_LIST);
+        if (!c) throw LoroError("loro_container_new(MovableList) returned null");
+        return std::shared_ptr<LoroMovableList>(new LoroMovableList(c));
+    }
+
+    void insert(uint32_t pos, const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_movable_list_insert_value(list(), pos, cv.get()));
+    }
+    void push(const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_movable_list_push_value(list(), cv.get()));
+    }
+    void set(uint32_t pos, const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_movable_list_set_value(list(), pos, cv.get()));
+    }
+    void mov(uint32_t from, uint32_t to) {
+        detail::check(loro_movable_list_mov(list(), from, to));
+    }
+    std::shared_ptr<ValueOrContainer> pop();              // out-of-line
+    std::shared_ptr<ValueOrContainer> get(uint32_t index);  // out-of-line
+
+    void delete_(uint32_t pos, uint32_t len) {
+        detail::check(loro_movable_list_delete(list(), pos, len));
+    }
+    uint32_t len() { return static_cast<uint32_t>(loro_movable_list_len(list())); }
+    bool is_empty() { return loro_movable_list_is_empty(list()); }
+    void clear() { detail::check(loro_movable_list_clear(list())); }
+
+    std::vector<LoroValue> to_vec() {
+        ::LoroValue *cv = loro_movable_list_get_value(list());
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        LoroValue v = detail::from_c_value(cv);
+        if (auto *l = std::get_if<LoroValue::kList>(&v.get_variant())) return l->value;
+        throw LoroError("loro_movable_list_get_value did not return a list");
+    }
+
+    LoroValue get_deep_value() {
+        ::LoroValue *cv = loro_movable_list_get_deep_value(list());
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    ContainerId id() {
+        detail::Bytes b;
+        detail::check(loro_movable_list_id(list(), b.out()));
+        return detail::cid_string_to_container_id(b.to_string());
+    }
+
+    std::shared_ptr<LoroText> insert_text_container(uint32_t pos, std::shared_ptr<LoroText> c);
+    std::shared_ptr<LoroMap> insert_map_container(uint32_t pos, std::shared_ptr<LoroMap> c);
+    std::shared_ptr<LoroList> insert_list_container(uint32_t pos, std::shared_ptr<LoroList> c);
+    std::shared_ptr<LoroMovableList> insert_movable_list_container(
+        uint32_t pos, std::shared_ptr<LoroMovableList> c);
+    std::shared_ptr<LoroTree> insert_tree_container(uint32_t pos, std::shared_ptr<LoroTree> c);
+    std::shared_ptr<LoroCounter> insert_counter_container(uint32_t pos,
+                                                          std::shared_ptr<LoroCounter> c);
+
+    std::shared_ptr<LoroText> set_text_container(uint32_t pos, std::shared_ptr<LoroText> c);
+    std::shared_ptr<LoroMap> set_map_container(uint32_t pos, std::shared_ptr<LoroMap> c);
+    std::shared_ptr<LoroList> set_list_container(uint32_t pos, std::shared_ptr<LoroList> c);
+    std::shared_ptr<LoroMovableList> set_movable_list_container(
+        uint32_t pos, std::shared_ptr<LoroMovableList> c);
+    std::shared_ptr<LoroTree> set_tree_container(uint32_t pos, std::shared_ptr<LoroTree> c);
+    std::shared_ptr<LoroCounter> set_counter_container(uint32_t pos,
+                                                       std::shared_ptr<LoroCounter> c);
+
+    ~LoroMovableList() {
+        if (raw_) loro_movable_list_free(raw_);
+        else if (container_) loro_container_free(container_);
+    }
+    LoroMovableList(const LoroMovableList &) = delete;
+    LoroMovableList &operator=(const LoroMovableList &) = delete;
+
+private:
+    explicit LoroMovableList(::LoroMovableList *raw) : raw_(raw) {}
+    explicit LoroMovableList(::LoroContainer *c) : container_(c) {}
+
+    ::LoroMovableList *list() const {
+        if (!raw_) throw LoroError("LoroMovableList is detached (not attached to a document)");
+        return raw_;
+    }
+    ::LoroContainer *take_container() {
+        if (!container_) throw LoroError("LoroMovableList is not a detached container");
+        ::LoroContainer *c = container_;
+        container_ = nullptr;
+        return c;
+    }
+    template <class C>
+    std::shared_ptr<C> insert_container_at(uint32_t pos, std::shared_ptr<C> child);
+    template <class C>
+    std::shared_ptr<C> set_container_at(uint32_t pos, std::shared_ptr<C> child);
+
+    ::LoroMovableList *raw_ = nullptr;
+    ::LoroContainer *container_ = nullptr;
+    friend struct detail::Factory;
+};
+
+struct LoroTree {
+    static std::shared_ptr<LoroTree> init() {
+        ::LoroContainer *c = loro_container_new(LORO_CONTAINER_TREE);
+        if (!c) throw LoroError("loro_container_new(Tree) returned null");
+        return std::shared_ptr<LoroTree>(new LoroTree(c));
+    }
+
+    TreeId create(TreeParentId parent) {
+        ::LoroTreeID pid;
+        bool is_node = parent_node(parent, pid);
+        ::LoroTreeID out;
+        detail::check(loro_tree_create(tree(), is_node ? &pid : nullptr, &out));
+        return detail::from_c_tree_id(out);
+    }
+
+    TreeId create_at(TreeParentId parent, uint32_t index) {
+        ::LoroTreeID pid;
+        bool is_node = parent_node(parent, pid);
+        ::LoroTreeID out;
+        detail::check(loro_tree_create_at(tree(), is_node ? &pid : nullptr, index, &out));
+        return detail::from_c_tree_id(out);
+    }
+
+    void mov(const TreeId &target, TreeParentId parent) {
+        ::LoroTreeID pid;
+        bool is_node = parent_node(parent, pid);
+        detail::check(loro_tree_mov(tree(), detail::to_c_tree_id(target), is_node ? &pid : nullptr));
+    }
+
+    void delete_(const TreeId &target) {
+        detail::check(loro_tree_delete(tree(), detail::to_c_tree_id(target)));
+    }
+
+    bool contains(const TreeId &target) {
+        return loro_tree_contains(tree(), detail::to_c_tree_id(target));
+    }
+
+    bool is_node_deleted(const TreeId &target) {
+        bool out = false;
+        detail::check(loro_tree_is_node_deleted(tree(), detail::to_c_tree_id(target), &out));
+        return out;
+    }
+
+    TreeParentId parent(const TreeId &target) {
+        LoroTreeParentKind kind;
+        ::LoroTreeID node;
+        if (!loro_tree_parent(tree(), detail::to_c_tree_id(target), &kind, &node)) {
+            return TreeParentId(TreeParentId::kUnexist{});
+        }
+        switch (kind) {
+            case LORO_TREE_PARENT_ROOT: return TreeParentId(TreeParentId::kRoot{});
+            case LORO_TREE_PARENT_DELETED: return TreeParentId(TreeParentId::kDeleted{});
+            case LORO_TREE_PARENT_NODE:
+                return TreeParentId(TreeParentId::kNode{detail::from_c_tree_id(node)});
+            case LORO_TREE_PARENT_UNEXIST:
+            default: return TreeParentId(TreeParentId::kUnexist{});
+        }
+    }
+
+    std::optional<std::vector<TreeId>> children(TreeParentId parent) {
+        ::LoroTreeID pid;
+        bool is_node = parent_node(parent, pid);
+        const ::LoroTreeID *p = is_node ? &pid : nullptr;
+        uintptr_t n = 0;
+        LoroStatus s = loro_tree_children_len(tree(), p, &n);
+        if (s == LORO_ERR_NOT_FOUND) return std::nullopt;
+        detail::check(s);
+        std::vector<TreeId> out;
+        out.reserve(n);
+        for (uintptr_t i = 0; i < n; ++i) {
+            ::LoroTreeID c;
+            detail::check(loro_tree_child_at(tree(), p, i, &c));
+            out.push_back(detail::from_c_tree_id(c));
+        }
+        return out;
+    }
+
+    std::optional<uint32_t> children_num(TreeParentId parent) {
+        ::LoroTreeID pid;
+        bool is_node = parent_node(parent, pid);
+        uintptr_t n = 0;
+        LoroStatus s = loro_tree_children_len(tree(), is_node ? &pid : nullptr, &n);
+        if (s == LORO_ERR_NOT_FOUND) return std::nullopt;
+        detail::check(s);
+        return static_cast<uint32_t>(n);
+    }
+
+    std::vector<TreeId> roots() {
+        std::vector<TreeId> out;
+        uintptr_t n = loro_tree_roots_len(tree());
+        out.reserve(n);
+        for (uintptr_t i = 0; i < n; ++i) {
+            ::LoroTreeID id;
+            detail::check(loro_tree_root_at(tree(), i, &id));
+            out.push_back(detail::from_c_tree_id(id));
+        }
+        return out;
+    }
+
+    std::vector<TreeId> nodes() {
+        std::vector<TreeId> out;
+        uintptr_t n = loro_tree_nodes_len(tree());
+        out.reserve(n);
+        for (uintptr_t i = 0; i < n; ++i) {
+            ::LoroTreeID id;
+            detail::check(loro_tree_node_at(tree(), i, &id));
+            out.push_back(detail::from_c_tree_id(id));
+        }
+        return out;
+    }
+
+    std::shared_ptr<LoroMap> get_meta(const TreeId &target);  // out-of-line
+
+    bool is_fractional_index_enabled() {
+        return loro_tree_is_fractional_index_enabled(tree());
+    }
+    void enable_fractional_index(uint8_t jitter) {
+        detail::check(loro_tree_enable_fractional_index(tree(), jitter));
+    }
+    void disable_fractional_index() {
+        detail::check(loro_tree_disable_fractional_index(tree()));
+    }
+    std::optional<std::string> fractional_index(const TreeId &target) {
+        detail::Bytes b;
+        LoroStatus s = loro_tree_fractional_index(tree(), detail::to_c_tree_id(target), b.out());
+        if (s == LORO_ERR_NOT_FOUND) return std::nullopt;
+        detail::check(s);
+        return b.to_string();
+    }
+
+    ContainerId id() {
+        detail::Bytes b;
+        detail::check(loro_tree_id(tree(), b.out()));
+        return detail::cid_string_to_container_id(b.to_string());
+    }
+
+    ~LoroTree() {
+        if (raw_) loro_tree_free(raw_);
+        else if (container_) loro_container_free(container_);
+    }
+    LoroTree(const LoroTree &) = delete;
+    LoroTree &operator=(const LoroTree &) = delete;
+
+private:
+    explicit LoroTree(::LoroTree *raw) : raw_(raw) {}
+    explicit LoroTree(::LoroContainer *c) : container_(c) {}
+
+    ::LoroTree *tree() const {
+        if (!raw_) throw LoroError("LoroTree is detached (not attached to a document)");
+        return raw_;
+    }
+    ::LoroContainer *take_container() {
+        if (!container_) throw LoroError("LoroTree is not a detached container");
+        ::LoroContainer *c = container_;
+        container_ = nullptr;
+        return c;
+    }
+    /// Writes the node id into `out` and returns true for a `kNode` parent; returns false
+    /// (root / deleted / unexist all map to the C "null parent" = root) otherwise.
+    static bool parent_node(const TreeParentId &p, ::LoroTreeID &out) {
+        if (auto *n = std::get_if<TreeParentId::kNode>(&p.get_variant())) {
+            out = detail::to_c_tree_id(n->id);
+            return true;
+        }
+        return false;
+    }
+
+    ::LoroTree *raw_ = nullptr;
+    ::LoroContainer *container_ = nullptr;
+    friend struct detail::Factory;
+};
+
+struct LoroCounter {
+    static std::shared_ptr<LoroCounter> init() {
+        ::LoroContainer *c = loro_container_new(LORO_CONTAINER_COUNTER);
+        if (!c) throw LoroError("loro_container_new(Counter) returned null");
+        return std::shared_ptr<LoroCounter>(new LoroCounter(c));
+    }
+
+    void increment(double value) { detail::check(loro_counter_increment(counter(), value)); }
+    void decrement(double value) { detail::check(loro_counter_decrement(counter(), value)); }
+    double get_value() { return loro_counter_get_value(counter()); }
+    bool is_attached() { return raw_ ? loro_counter_is_attached(raw_) : false; }
+
+    ContainerId id() {
+        detail::Bytes b;
+        detail::check(loro_counter_id(counter(), b.out()));
+        return detail::cid_string_to_container_id(b.to_string());
+    }
+
+    ~LoroCounter() {
+        if (raw_) loro_counter_free(raw_);
+        else if (container_) loro_container_free(container_);
+    }
+    LoroCounter(const LoroCounter &) = delete;
+    LoroCounter &operator=(const LoroCounter &) = delete;
+
+private:
+    explicit LoroCounter(::LoroCounter *raw) : raw_(raw) {}
+    explicit LoroCounter(::LoroContainer *c) : container_(c) {}
+
+    ::LoroCounter *counter() const {
+        if (!raw_) throw LoroError("LoroCounter is detached (not attached to a document)");
+        return raw_;
+    }
+    ::LoroContainer *take_container() {
+        if (!container_) throw LoroError("LoroCounter is not a detached container");
+        ::LoroContainer *c = container_;
+        container_ = nullptr;
+        return c;
+    }
+
+    ::LoroCounter *raw_ = nullptr;
+    ::LoroContainer *container_ = nullptr;
+    friend struct detail::Factory;
 };
 
 // --------------------------------------------------------- value-or-container
 
-/// Result of `LoroMap::get` / value navigation: either a plain typed value or a live child
-/// container. Built over the C `LoroValueOrContainer` handle.
+/// Result of `LoroMap::get` / `LoroList::get` / value navigation: either a plain typed value
+/// or a live child container. Built over the C `LoroValueOrContainer` handle.
 struct ValueOrContainer {
     bool is_container() { return loro_value_or_container_is_container(raw_); }
 
@@ -1018,23 +1564,12 @@ struct ValueOrContainer {
         return detail::from_c_value(cv);
     }
 
-    std::shared_ptr<LoroText> as_loro_text() {
-        ::LoroContainer *c = loro_value_or_container_get_container(raw_);
-        if (!c) throw LoroError(detail::last_error_message());
-        ::LoroText *t = loro_container_get_text(c);
-        loro_container_free(c);
-        if (!t) throw LoroError("value-or-container is not a text container");
-        return std::shared_ptr<LoroText>(new LoroText(t));
-    }
-
-    std::shared_ptr<LoroMap> as_loro_map() {
-        ::LoroContainer *c = loro_value_or_container_get_container(raw_);
-        if (!c) throw LoroError(detail::last_error_message());
-        ::LoroMap *m = loro_container_get_map(c);
-        loro_container_free(c);
-        if (!m) throw LoroError("value-or-container is not a map container");
-        return std::shared_ptr<LoroMap>(new LoroMap(m));
-    }
+    std::shared_ptr<LoroText> as_loro_text();                 // out-of-line
+    std::shared_ptr<LoroMap> as_loro_map();                   // out-of-line
+    std::shared_ptr<LoroList> as_loro_list();                 // out-of-line
+    std::shared_ptr<LoroMovableList> as_loro_movable_list();  // out-of-line
+    std::shared_ptr<LoroTree> as_loro_tree();                 // out-of-line
+    std::shared_ptr<LoroCounter> as_loro_counter();           // out-of-line
 
     ~ValueOrContainer() { loro_value_or_container_free(raw_); }
     ValueOrContainer(const ValueOrContainer &) = delete;
@@ -1042,15 +1577,105 @@ struct ValueOrContainer {
 
 private:
     explicit ValueOrContainer(::LoroValueOrContainer *raw) : raw_(raw) {}
+    ::LoroContainer *take_container_raw() {
+        ::LoroContainer *c = loro_value_or_container_get_container(raw_);
+        if (!c) throw LoroError(detail::last_error_message());
+        return c;
+    }
     ::LoroValueOrContainer *raw_;
-    friend struct LoroMap;
+    friend struct detail::Factory;
 };
+
+// ----------------------------------------------------------------- Factory
+
+namespace detail {
+
+/// The single privileged constructor of every wrapper (each grants it `friend`). Centralises
+/// raw-handle wrapping, detached-container release, and type-erased `LoroContainer*` adoption,
+/// so the wrapper classes need only one friend each. Defined here, after every wrapper, so all
+/// types are complete.
+struct Factory {
+    static std::shared_ptr<LoroText> wrap(::LoroText *r) {
+        return std::shared_ptr<LoroText>(new LoroText(r));
+    }
+    static std::shared_ptr<LoroMap> wrap(::LoroMap *r) {
+        return std::shared_ptr<LoroMap>(new LoroMap(r));
+    }
+    static std::shared_ptr<LoroList> wrap(::LoroList *r) {
+        return std::shared_ptr<LoroList>(new LoroList(r));
+    }
+    static std::shared_ptr<LoroMovableList> wrap(::LoroMovableList *r) {
+        return std::shared_ptr<LoroMovableList>(new LoroMovableList(r));
+    }
+    static std::shared_ptr<LoroTree> wrap(::LoroTree *r) {
+        return std::shared_ptr<LoroTree>(new LoroTree(r));
+    }
+    static std::shared_ptr<LoroCounter> wrap(::LoroCounter *r) {
+        return std::shared_ptr<LoroCounter>(new LoroCounter(r));
+    }
+    static std::shared_ptr<ValueOrContainer> voc(::LoroValueOrContainer *r) {
+        return std::shared_ptr<ValueOrContainer>(new ValueOrContainer(r));
+    }
+
+    /// Releases a detached wrapper's container handle for attachment.
+    template <class T>
+    static ::LoroContainer *take(const std::shared_ptr<T> &c) {
+        return c->take_container();
+    }
+
+    /// Recovers the container backing a ValueOrContainer (a `LoroContainer*`), then adopts it.
+    static ::LoroContainer *voc_container(const std::shared_ptr<ValueOrContainer> &voc) {
+        return voc->take_container_raw();
+    }
+
+    /// Adopts an attached `LoroContainer*` as a typed wrapper, freeing the erased handle.
+    template <class Child>
+    static std::shared_ptr<Child> adopt(::LoroContainer *attached) {
+        if constexpr (std::is_same_v<Child, LoroText>) {
+            ::LoroText *t = loro_container_get_text(attached);
+            loro_container_free(attached);
+            if (!t) throw LoroError("attached container is not a text");
+            return wrap(t);
+        } else if constexpr (std::is_same_v<Child, LoroMap>) {
+            ::LoroMap *m = loro_container_get_map(attached);
+            loro_container_free(attached);
+            if (!m) throw LoroError("attached container is not a map");
+            return wrap(m);
+        } else if constexpr (std::is_same_v<Child, LoroList>) {
+            ::LoroList *l = loro_container_get_list(attached);
+            loro_container_free(attached);
+            if (!l) throw LoroError("attached container is not a list");
+            return wrap(l);
+        } else if constexpr (std::is_same_v<Child, LoroMovableList>) {
+            ::LoroMovableList *l = loro_container_get_movable_list(attached);
+            loro_container_free(attached);
+            if (!l) throw LoroError("attached container is not a movable list");
+            return wrap(l);
+        } else if constexpr (std::is_same_v<Child, LoroTree>) {
+            ::LoroTree *t = loro_container_get_tree(attached);
+            loro_container_free(attached);
+            if (!t) throw LoroError("attached container is not a tree");
+            return wrap(t);
+        } else if constexpr (std::is_same_v<Child, LoroCounter>) {
+            ::LoroCounter *c = loro_container_get_counter(attached);
+            loro_container_free(attached);
+            if (!c) throw LoroError("attached container is not a counter");
+            return wrap(c);
+        } else {
+            static_assert(sizeof(Child) == 0, "unsupported container type");
+        }
+    }
+};
+
+}  // namespace detail
+
+// --------------------------------------------- out-of-line wrapper definitions
 
 inline std::shared_ptr<ValueOrContainer> LoroMap::get(const std::string &key) {
     ::LoroValueOrContainer *voc =
         loro_map_get_value_or_container(map(), key.data(), key.size());
     if (!voc) throw LoroError(detail::last_error_message());
-    return std::shared_ptr<ValueOrContainer>(new ValueOrContainer(voc));
+    return detail::Factory::voc(voc);
 }
 
 inline std::vector<std::shared_ptr<ValueOrContainer>> LoroMap::values() {
@@ -1058,6 +1683,286 @@ inline std::vector<std::shared_ptr<ValueOrContainer>> LoroMap::values() {
     for (const auto &key : keys()) out.push_back(get(key));
     return out;
 }
+
+template <class C>
+std::shared_ptr<C> LoroMap::insert_container_by_key(const std::string &key,
+                                                    std::shared_ptr<C> child) {
+    ::LoroContainer *attached =
+        loro_map_insert_container(map(), key.data(), key.size(), detail::Factory::take(child));
+    if (!attached) throw LoroError(detail::last_error_message());
+    return detail::Factory::adopt<C>(attached);
+}
+
+template <class C>
+std::shared_ptr<C> LoroMap::get_or_create_container_by_key(const std::string &key,
+                                                           std::shared_ptr<C> child) {
+    ::LoroContainer *existing = loro_map_get_container(map(), key.data(), key.size());
+    if (existing) return detail::Factory::adopt<C>(existing);
+    return insert_container_by_key<C>(key, std::move(child));
+}
+
+inline std::shared_ptr<LoroText> LoroMap::insert_text_container(const std::string &k,
+                                                                std::shared_ptr<LoroText> c) {
+    return insert_container_by_key<LoroText>(k, std::move(c));
+}
+inline std::shared_ptr<LoroMap> LoroMap::insert_map_container(const std::string &k,
+                                                              std::shared_ptr<LoroMap> c) {
+    return insert_container_by_key<LoroMap>(k, std::move(c));
+}
+inline std::shared_ptr<LoroList> LoroMap::insert_list_container(const std::string &k,
+                                                                std::shared_ptr<LoroList> c) {
+    return insert_container_by_key<LoroList>(k, std::move(c));
+}
+inline std::shared_ptr<LoroMovableList> LoroMap::insert_movable_list_container(
+    const std::string &k, std::shared_ptr<LoroMovableList> c) {
+    return insert_container_by_key<LoroMovableList>(k, std::move(c));
+}
+inline std::shared_ptr<LoroTree> LoroMap::insert_tree_container(const std::string &k,
+                                                                std::shared_ptr<LoroTree> c) {
+    return insert_container_by_key<LoroTree>(k, std::move(c));
+}
+inline std::shared_ptr<LoroCounter> LoroMap::insert_counter_container(
+    const std::string &k, std::shared_ptr<LoroCounter> c) {
+    return insert_container_by_key<LoroCounter>(k, std::move(c));
+}
+
+inline std::shared_ptr<LoroText> LoroMap::get_or_create_text_container(
+    const std::string &k, std::shared_ptr<LoroText> c) {
+    return get_or_create_container_by_key<LoroText>(k, std::move(c));
+}
+inline std::shared_ptr<LoroMap> LoroMap::get_or_create_map_container(
+    const std::string &k, std::shared_ptr<LoroMap> c) {
+    return get_or_create_container_by_key<LoroMap>(k, std::move(c));
+}
+inline std::shared_ptr<LoroList> LoroMap::get_or_create_list_container(
+    const std::string &k, std::shared_ptr<LoroList> c) {
+    return get_or_create_container_by_key<LoroList>(k, std::move(c));
+}
+inline std::shared_ptr<LoroMovableList> LoroMap::get_or_create_movable_list_container(
+    const std::string &k, std::shared_ptr<LoroMovableList> c) {
+    return get_or_create_container_by_key<LoroMovableList>(k, std::move(c));
+}
+inline std::shared_ptr<LoroTree> LoroMap::get_or_create_tree_container(
+    const std::string &k, std::shared_ptr<LoroTree> c) {
+    return get_or_create_container_by_key<LoroTree>(k, std::move(c));
+}
+inline std::shared_ptr<LoroCounter> LoroMap::get_or_create_counter_container(
+    const std::string &k, std::shared_ptr<LoroCounter> c) {
+    return get_or_create_container_by_key<LoroCounter>(k, std::move(c));
+}
+
+inline std::shared_ptr<ValueOrContainer> LoroList::get(uint32_t index) {
+    ::LoroValueOrContainer *voc = loro_list_get_value_or_container(list(), index);
+    if (!voc) throw LoroError(detail::last_error_message());
+    return detail::Factory::voc(voc);
+}
+
+template <class C>
+std::shared_ptr<C> LoroList::insert_container_at(uint32_t pos, std::shared_ptr<C> child) {
+    ::LoroContainer *attached =
+        loro_list_insert_container(list(), pos, detail::Factory::take(child));
+    if (!attached) throw LoroError(detail::last_error_message());
+    return detail::Factory::adopt<C>(attached);
+}
+
+inline std::shared_ptr<LoroText> LoroList::insert_text_container(uint32_t pos,
+                                                                 std::shared_ptr<LoroText> c) {
+    return insert_container_at<LoroText>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroMap> LoroList::insert_map_container(uint32_t pos,
+                                                               std::shared_ptr<LoroMap> c) {
+    return insert_container_at<LoroMap>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroList> LoroList::insert_list_container(uint32_t pos,
+                                                                 std::shared_ptr<LoroList> c) {
+    return insert_container_at<LoroList>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroMovableList> LoroList::insert_movable_list_container(
+    uint32_t pos, std::shared_ptr<LoroMovableList> c) {
+    return insert_container_at<LoroMovableList>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroTree> LoroList::insert_tree_container(uint32_t pos,
+                                                                 std::shared_ptr<LoroTree> c) {
+    return insert_container_at<LoroTree>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroCounter> LoroList::insert_counter_container(
+    uint32_t pos, std::shared_ptr<LoroCounter> c) {
+    return insert_container_at<LoroCounter>(pos, std::move(c));
+}
+
+inline std::shared_ptr<ValueOrContainer> LoroMovableList::get(uint32_t index) {
+    ::LoroValueOrContainer *voc = loro_movable_list_get_value_or_container(list(), index);
+    if (!voc) throw LoroError(detail::last_error_message());
+    return detail::Factory::voc(voc);
+}
+
+inline std::shared_ptr<ValueOrContainer> LoroMovableList::pop() {
+    bool present = false;
+    ::LoroValueOrContainer *voc = loro_movable_list_pop_value_or_container(list(), &present);
+    if (!present) return nullptr;
+    if (!voc) throw LoroError(detail::last_error_message());
+    return detail::Factory::voc(voc);
+}
+
+template <class C>
+std::shared_ptr<C> LoroMovableList::insert_container_at(uint32_t pos, std::shared_ptr<C> child) {
+    ::LoroContainer *attached =
+        loro_movable_list_insert_container(list(), pos, detail::Factory::take(child));
+    if (!attached) throw LoroError(detail::last_error_message());
+    return detail::Factory::adopt<C>(attached);
+}
+
+template <class C>
+std::shared_ptr<C> LoroMovableList::set_container_at(uint32_t pos, std::shared_ptr<C> child) {
+    ::LoroContainer *attached =
+        loro_movable_list_set_container(list(), pos, detail::Factory::take(child));
+    if (!attached) throw LoroError(detail::last_error_message());
+    return detail::Factory::adopt<C>(attached);
+}
+
+inline std::shared_ptr<LoroText> LoroMovableList::insert_text_container(
+    uint32_t pos, std::shared_ptr<LoroText> c) {
+    return insert_container_at<LoroText>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroMap> LoroMovableList::insert_map_container(
+    uint32_t pos, std::shared_ptr<LoroMap> c) {
+    return insert_container_at<LoroMap>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroList> LoroMovableList::insert_list_container(
+    uint32_t pos, std::shared_ptr<LoroList> c) {
+    return insert_container_at<LoroList>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroMovableList> LoroMovableList::insert_movable_list_container(
+    uint32_t pos, std::shared_ptr<LoroMovableList> c) {
+    return insert_container_at<LoroMovableList>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroTree> LoroMovableList::insert_tree_container(
+    uint32_t pos, std::shared_ptr<LoroTree> c) {
+    return insert_container_at<LoroTree>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroCounter> LoroMovableList::insert_counter_container(
+    uint32_t pos, std::shared_ptr<LoroCounter> c) {
+    return insert_container_at<LoroCounter>(pos, std::move(c));
+}
+
+inline std::shared_ptr<LoroText> LoroMovableList::set_text_container(
+    uint32_t pos, std::shared_ptr<LoroText> c) {
+    return set_container_at<LoroText>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroMap> LoroMovableList::set_map_container(
+    uint32_t pos, std::shared_ptr<LoroMap> c) {
+    return set_container_at<LoroMap>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroList> LoroMovableList::set_list_container(
+    uint32_t pos, std::shared_ptr<LoroList> c) {
+    return set_container_at<LoroList>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroMovableList> LoroMovableList::set_movable_list_container(
+    uint32_t pos, std::shared_ptr<LoroMovableList> c) {
+    return set_container_at<LoroMovableList>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroTree> LoroMovableList::set_tree_container(
+    uint32_t pos, std::shared_ptr<LoroTree> c) {
+    return set_container_at<LoroTree>(pos, std::move(c));
+}
+inline std::shared_ptr<LoroCounter> LoroMovableList::set_counter_container(
+    uint32_t pos, std::shared_ptr<LoroCounter> c) {
+    return set_container_at<LoroCounter>(pos, std::move(c));
+}
+
+inline std::shared_ptr<LoroMap> LoroTree::get_meta(const TreeId &target) {
+    ::LoroMap *m = loro_tree_get_meta(tree(), detail::to_c_tree_id(target));
+    if (!m) throw LoroError(detail::last_error_message());
+    return detail::Factory::wrap(m);
+}
+
+inline std::shared_ptr<LoroText> ValueOrContainer::as_loro_text() {
+    return detail::Factory::adopt<LoroText>(take_container_raw());
+}
+inline std::shared_ptr<LoroMap> ValueOrContainer::as_loro_map() {
+    return detail::Factory::adopt<LoroMap>(take_container_raw());
+}
+inline std::shared_ptr<LoroList> ValueOrContainer::as_loro_list() {
+    return detail::Factory::adopt<LoroList>(take_container_raw());
+}
+inline std::shared_ptr<LoroMovableList> ValueOrContainer::as_loro_movable_list() {
+    return detail::Factory::adopt<LoroMovableList>(take_container_raw());
+}
+inline std::shared_ptr<LoroTree> ValueOrContainer::as_loro_tree() {
+    return detail::Factory::adopt<LoroTree>(take_container_raw());
+}
+inline std::shared_ptr<LoroCounter> ValueOrContainer::as_loro_counter() {
+    return detail::Factory::adopt<LoroCounter>(take_container_raw());
+}
+
+// ----------------------------------------------------------- version / frontiers
+
+/// Version vector (loro-cpp `VersionVector`). Free with `loro_version_vector_free`.
+struct VersionVector {
+    static std::shared_ptr<VersionVector> init() {
+        ::LoroVersionVector *v = loro_version_vector_new();
+        if (!v) throw LoroError("loro_version_vector_new returned null");
+        return std::shared_ptr<VersionVector>(new VersionVector(v));
+    }
+    static std::shared_ptr<VersionVector> decode(const std::vector<uint8_t> &bytes) {
+        ::LoroVersionVector *v = loro_version_vector_decode(bytes.data(), bytes.size());
+        if (!v) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<VersionVector>(new VersionVector(v));
+    }
+    std::vector<uint8_t> encode() {
+        detail::Bytes b;
+        detail::check(loro_version_vector_encode(raw_, b.out()));
+        return b.to_vector();
+    }
+    bool eq(const std::shared_ptr<VersionVector> &other) {
+        int32_t cmp = 0;
+        // Equal vectors compare as 0; concurrent vectors return NOT_FOUND (not equal).
+        return loro_version_vector_compare(raw_, other->raw_, &cmp) == LORO_OK && cmp == 0;
+    }
+
+    ~VersionVector() { loro_version_vector_free(raw_); }
+    VersionVector(const VersionVector &) = delete;
+    VersionVector &operator=(const VersionVector &) = delete;
+
+private:
+    explicit VersionVector(::LoroVersionVector *raw) : raw_(raw) {}
+    ::LoroVersionVector *raw_;
+    friend struct LoroDoc;
+};
+
+/// Frontiers (loro-cpp `Frontiers`). Free with `loro_frontiers_free`.
+struct Frontiers {
+    static std::shared_ptr<Frontiers> init() {
+        ::LoroFrontiers *f = loro_frontiers_new();
+        if (!f) throw LoroError("loro_frontiers_new returned null");
+        return std::shared_ptr<Frontiers>(new Frontiers(f));
+    }
+    static std::shared_ptr<Frontiers> decode(const std::vector<uint8_t> &bytes) {
+        ::LoroFrontiers *f = loro_frontiers_decode(bytes.data(), bytes.size());
+        if (!f) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Frontiers>(new Frontiers(f));
+    }
+    std::vector<uint8_t> encode() {
+        detail::Bytes b;
+        detail::check(loro_frontiers_encode(raw_, b.out()));
+        return b.to_vector();
+    }
+    bool is_empty() { return loro_frontiers_is_empty(raw_); }
+    /// loro-c has no `Frontiers` comparison primitive, so equality compares the canonical
+    /// binary encodings (the conformance tests use eq only for round-trip checks).
+    bool eq(const std::shared_ptr<Frontiers> &other) { return encode() == other->encode(); }
+
+    ~Frontiers() { loro_frontiers_free(raw_); }
+    Frontiers(const Frontiers &) = delete;
+    Frontiers &operator=(const Frontiers &) = delete;
+
+private:
+    explicit Frontiers(::LoroFrontiers *raw) : raw_(raw) {}
+    ::LoroFrontiers *raw_;
+    friend struct LoroDoc;
+};
+
+// ------------------------------------------------------------- style config map
 
 struct StyleConfigMap {
     static std::shared_ptr<StyleConfigMap> init() {
@@ -1096,6 +2001,8 @@ private:
     friend struct LoroDoc;
 };
 
+// ------------------------------------------------------------------- LoroDoc
+
 struct LoroDoc {
     static std::shared_ptr<LoroDoc> init() {
         ::LoroDoc *d = loro_doc_new();
@@ -1110,7 +2017,7 @@ struct LoroDoc {
             std::string msg = detail::last_error_message();
             throw LoroError(msg.empty() ? "loro_doc_get_text returned null" : msg);
         }
-        return std::shared_ptr<LoroText>(new LoroText(t));
+        return detail::Factory::wrap(t);
     }
 
     std::shared_ptr<LoroMap> get_map(const std::shared_ptr<ContainerIdLike> &id) {
@@ -1120,7 +2027,77 @@ struct LoroDoc {
             std::string msg = detail::last_error_message();
             throw LoroError(msg.empty() ? "loro_doc_get_map returned null" : msg);
         }
-        return std::shared_ptr<LoroMap>(new LoroMap(m));
+        return detail::Factory::wrap(m);
+    }
+
+    std::shared_ptr<LoroList> get_list(const std::shared_ptr<ContainerIdLike> &id) {
+        std::string name = detail::root_name(id, ContainerType(ContainerType::kList{}));
+        ::LoroList *l = loro_doc_get_list(raw_, name.data(), name.size());
+        if (!l) {
+            std::string msg = detail::last_error_message();
+            throw LoroError(msg.empty() ? "loro_doc_get_list returned null" : msg);
+        }
+        return detail::Factory::wrap(l);
+    }
+
+    std::shared_ptr<LoroMovableList> get_movable_list(
+        const std::shared_ptr<ContainerIdLike> &id) {
+        std::string name = detail::root_name(id, ContainerType(ContainerType::kMovableList{}));
+        ::LoroMovableList *l = loro_doc_get_movable_list(raw_, name.data(), name.size());
+        if (!l) {
+            std::string msg = detail::last_error_message();
+            throw LoroError(msg.empty() ? "loro_doc_get_movable_list returned null" : msg);
+        }
+        return detail::Factory::wrap(l);
+    }
+
+    std::shared_ptr<LoroTree> get_tree(const std::shared_ptr<ContainerIdLike> &id) {
+        std::string name = detail::root_name(id, ContainerType(ContainerType::kTree{}));
+        ::LoroTree *t = loro_doc_get_tree(raw_, name.data(), name.size());
+        if (!t) {
+            std::string msg = detail::last_error_message();
+            throw LoroError(msg.empty() ? "loro_doc_get_tree returned null" : msg);
+        }
+        return detail::Factory::wrap(t);
+    }
+
+    std::shared_ptr<LoroCounter> get_counter(const std::shared_ptr<ContainerIdLike> &id) {
+        std::string name = detail::root_name(id, ContainerType(ContainerType::kCounter{}));
+        ::LoroCounter *c = loro_doc_get_counter(raw_, name.data(), name.size());
+        if (!c) {
+            std::string msg = detail::last_error_message();
+            throw LoroError(msg.empty() ? "loro_doc_get_counter returned null" : msg);
+        }
+        return detail::Factory::wrap(c);
+    }
+
+    uint64_t peer_id() { return loro_doc_peer_id(raw_); }
+    void set_peer_id(uint64_t peer) { detail::check(loro_doc_set_peer_id(raw_, peer)); }
+
+    void commit() { detail::check(loro_doc_commit(raw_)); }
+    uint32_t get_pending_txn_len() {
+        return static_cast<uint32_t>(loro_doc_get_pending_txn_len(raw_));
+    }
+
+    std::shared_ptr<VersionVector> state_vv() {
+        ::LoroVersionVector *v = loro_doc_state_vv(raw_);
+        if (!v) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<VersionVector>(new VersionVector(v));
+    }
+    std::shared_ptr<Frontiers> state_frontiers() {
+        ::LoroFrontiers *f = loro_doc_state_frontiers(raw_);
+        if (!f) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Frontiers>(new Frontiers(f));
+    }
+    std::shared_ptr<VersionVector> frontiers_to_vv(const std::shared_ptr<Frontiers> &frontiers) {
+        ::LoroVersionVector *v = loro_doc_frontiers_to_vv(raw_, frontiers->raw_);
+        if (!v) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<VersionVector>(new VersionVector(v));
+    }
+    std::shared_ptr<Frontiers> vv_to_frontiers(const std::shared_ptr<VersionVector> &vv) {
+        ::LoroFrontiers *f = loro_doc_vv_to_frontiers(raw_, vv->raw_);
+        if (!f) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Frontiers>(new Frontiers(f));
     }
 
     std::vector<uint8_t> export_snapshot() {
@@ -1128,12 +2105,55 @@ struct LoroDoc {
         detail::check(loro_doc_export_snapshot(raw_, b.out()));
         return b.to_vector();
     }
+    std::vector<uint8_t> export_snapshot_at(const std::shared_ptr<Frontiers> &frontiers) {
+        detail::Bytes b;
+        detail::check(loro_doc_export_snapshot_at(raw_, frontiers->raw_, b.out()));
+        return b.to_vector();
+    }
+    std::vector<uint8_t> export_updates(const std::shared_ptr<VersionVector> &from) {
+        detail::Bytes b;
+        detail::check(loro_doc_export_updates_from(raw_, from->raw_, b.out()));
+        return b.to_vector();
+    }
+    std::string export_json_updates(const std::shared_ptr<VersionVector> &start_vv,
+                                    const std::shared_ptr<VersionVector> &end_vv) {
+        detail::Bytes b;
+        detail::check(loro_doc_export_json_updates(raw_, start_vv->raw_, end_vv->raw_, b.out()));
+        return b.to_string();
+    }
+    ImportStatus import_json_updates(const std::string &json) {
+        detail::check(loro_doc_import_json_updates(raw_, json.data(), json.size()));
+        return ImportStatus{};
+    }
 
     ImportStatus import(const std::vector<uint8_t> &bytes) {
         detail::check(loro_doc_import(raw_, bytes.data(), bytes.size()));
-        // Phase 0: the detailed success/pending span maps are deferred to Phase 4; the
-        // conformance tests ignore the return value.
+        // The detailed success/pending span maps are deferred to Phase 4; the conformance
+        // tests ignore the return value.
         return ImportStatus{};
+    }
+
+    std::shared_ptr<LoroDoc> fork() {
+        ::LoroDoc *d = loro_doc_fork(raw_);
+        if (!d) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<LoroDoc>(new LoroDoc(d));
+    }
+    std::shared_ptr<LoroDoc> fork_at(const std::shared_ptr<Frontiers> &frontiers) {
+        ::LoroDoc *d = loro_doc_fork_at(raw_, frontiers->raw_);
+        if (!d) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<LoroDoc>(new LoroDoc(d));
+    }
+
+    LoroValue get_deep_value() {
+        ::LoroValue *cv = loro_doc_get_deep_value(raw_);
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    bool has_container(const ContainerId &id) {
+        std::string cid = detail::container_id_to_cid_string(id);
+        return loro_doc_has_container(raw_, cid.data(), cid.size());
     }
 
     void config_text_style(const std::shared_ptr<StyleConfigMap> &text_style) {
@@ -1145,7 +2165,8 @@ struct LoroDoc {
         detail::check(loro_doc_get_cursor_pos(raw_, cursor->raw_, &out));
         PosQueryResult r;
         r.update = nullptr;  // loro-c does not return an updated cursor; the tests don't read it.
-        r.current = AbsolutePosition{static_cast<uint32_t>(out.abs_pos), detail::from_c_side(out.side)};
+        r.current =
+            AbsolutePosition{static_cast<uint32_t>(out.abs_pos), detail::from_c_side(out.side)};
         return r;
     }
 

@@ -87,10 +87,42 @@ bool test_binary_fidelity() {
     return true;
 }
 
+// The new (Phase 2) LoroList typed path must preserve the same distinctions the JSON bridge
+// would corrupt: 2.0 stays kDouble (not kI64) and binary stays kBinary (not a kList).
+bool test_list_value_fidelity() {
+    using loro::LoroValue;
+    auto doc = loro::LoroDoc::init();
+    auto list = doc->get_list(root("l"));
+    std::vector<uint8_t> bytes{0x00, 0x10, 0xff, 0x7f};
+    list->push(ext::value_like_from(2.0));
+    list->push(ext::value_like_from(bytes));
+
+    auto d = list->get(0)->as_value();
+    if (!d.has_value() || !std::holds_alternative<LoroValue::kDouble>(d->get_variant()))
+        return fail("list 2.0 did not round-trip as kDouble (lossy bridge!)");
+    if (ext::value_as_double(*d).value_or(0.0) != 2.0) return fail("list double value wrong");
+
+    auto b = list->get(1)->as_value();
+    if (!b.has_value() || !std::holds_alternative<LoroValue::kBinary>(b->get_variant()))
+        return fail("list binary did not round-trip as kBinary (lossy bridge!)");
+    auto got = ext::value_as_binary(*b);
+    if (!got.has_value() || *got != bytes) return fail("list binary bytes wrong");
+
+    // to_vec() must preserve the same typed kinds (it walks loro_list_get_value).
+    auto vec = list->to_vec();
+    if (vec.size() != 2) return fail("list to_vec size != 2");
+    if (!std::holds_alternative<LoroValue::kDouble>(vec[0].get_variant()))
+        return fail("to_vec[0] not kDouble");
+    if (!std::holds_alternative<LoroValue::kBinary>(vec[1].get_variant()))
+        return fail("to_vec[1] not kBinary");
+    return true;
+}
+
 bool run() {
     if (!test_value_helpers()) return false;
     if (!test_double_fidelity()) return false;
     if (!test_binary_fidelity()) return false;
+    if (!test_list_value_fidelity()) return false;
     return true;
 }
 

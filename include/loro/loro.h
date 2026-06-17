@@ -1161,6 +1161,50 @@ enum LoroStatus loro_list_delete(struct LoroList *list, uintptr_t pos, uintptr_t
 enum LoroStatus loro_list_pop(struct LoroList *list, struct LoroBytes *out, bool *out_present);
 
 /**
+ * Inserts a *clone* of the typed `value` at index `pos`. The caller still owns `value`.
+ * Typed counterpart to [`loro_list_insert`]; preserves binary, integer-valued doubles, and
+ * the value/container distinction.
+ */
+enum LoroStatus loro_list_insert_value(struct LoroList *list,
+                                       uintptr_t pos,
+                                       const struct LoroValue *value);
+
+/**
+ * Appends a *clone* of the typed `value` to the end of the list. The caller still owns
+ * `value`. Typed counterpart to [`loro_list_push`].
+ */
+enum LoroStatus loro_list_push_value(struct LoroList *list, const struct LoroValue *value);
+
+/**
+ * Returns the entry at `index` as an owned `LoroValueOrContainer*` (a plain value or a live
+ * child container), or null if `index` is out of range. Free the result with
+ * `loro_value_or_container_free`. Typed counterpart to [`loro_list_get`].
+ */
+struct LoroValueOrContainer *loro_list_get_value_or_container(const struct LoroList *list,
+                                                              uintptr_t index);
+
+/**
+ * Pops the last element as an owned typed `LoroValue*`, writing whether one was present into
+ * `*out_present` (which may be null). Returns null when the list is empty (with
+ * `*out_present` set to false) or on error. Free a returned value with `loro_value_free`.
+ * Typed counterpart to [`loro_list_pop`].
+ */
+struct LoroValue *loro_list_pop_value(struct LoroList *list, bool *out_present);
+
+/**
+ * Returns the list's *shallow* value as an owned typed `LoroValue*` (a `List` value; nested
+ * containers appear as `Container` entries, not their deep values). Backs the C++ `to_vec`.
+ * Free with `loro_value_free`.
+ */
+struct LoroValue *loro_list_get_value(const struct LoroList *list);
+
+/**
+ * Returns the list's full recursive state as an owned typed `LoroValue*` (a `List` value
+ * with nested containers resolved to their deep values). Free with `loro_value_free`.
+ */
+struct LoroValue *loro_list_get_deep_value(const struct LoroList *list);
+
+/**
  * Writes the whole list as a JSON array (deep values) into `*out`. `*out` is only written
  * on `LORO_OK`; free it with `loro_bytes_free`.
  */
@@ -1511,6 +1555,59 @@ enum LoroStatus loro_movable_list_delete(struct LoroMovableList *list,
 enum LoroStatus loro_movable_list_pop(struct LoroMovableList *list,
                                       struct LoroBytes *out,
                                       bool *out_present);
+
+/**
+ * Inserts a *clone* of the typed `value` at index `pos`. The caller still owns `value`.
+ * Typed counterpart to [`loro_movable_list_insert`].
+ */
+enum LoroStatus loro_movable_list_insert_value(struct LoroMovableList *list,
+                                               uintptr_t pos,
+                                               const struct LoroValue *value);
+
+/**
+ * Appends a *clone* of the typed `value`. The caller still owns `value`. Typed counterpart
+ * to [`loro_movable_list_push`].
+ */
+enum LoroStatus loro_movable_list_push_value(struct LoroMovableList *list,
+                                             const struct LoroValue *value);
+
+/**
+ * Replaces the element at `pos` in place with a *clone* of the typed `value`. The caller
+ * still owns `value`. Typed counterpart to [`loro_movable_list_set`].
+ */
+enum LoroStatus loro_movable_list_set_value(struct LoroMovableList *list,
+                                            uintptr_t pos,
+                                            const struct LoroValue *value);
+
+/**
+ * Returns the entry at `index` as an owned `LoroValueOrContainer*` (a plain value or a live
+ * child container), or null if `index` is out of range. Free with
+ * `loro_value_or_container_free`. Typed counterpart to [`loro_movable_list_get`].
+ */
+struct LoroValueOrContainer *loro_movable_list_get_value_or_container(const struct LoroMovableList *list,
+                                                                      uintptr_t index);
+
+/**
+ * Pops the last element as an owned `LoroValueOrContainer*`, writing whether one was present
+ * into `*out_present` (which may be null). Returns null when the list is empty (with
+ * `*out_present` set to false) or on error. Free with `loro_value_or_container_free`. Typed
+ * counterpart to [`loro_movable_list_pop`].
+ */
+struct LoroValueOrContainer *loro_movable_list_pop_value_or_container(struct LoroMovableList *list,
+                                                                      bool *out_present);
+
+/**
+ * Returns the list's *shallow* value as an owned typed `LoroValue*` (a `List` value; nested
+ * containers appear as `Container` entries). Backs the C++ `to_vec`. Free with
+ * `loro_value_free`.
+ */
+struct LoroValue *loro_movable_list_get_value(const struct LoroMovableList *list);
+
+/**
+ * Returns the list's full recursive state as an owned typed `LoroValue*` (a `List` value
+ * with nested containers resolved to their deep values). Free with `loro_value_free`.
+ */
+struct LoroValue *loro_movable_list_get_deep_value(const struct LoroMovableList *list);
 
 /**
  * Writes the whole list as a JSON array (deep values) into `*out`. `*out` is only written
@@ -1957,6 +2054,20 @@ enum LoroStatus loro_tree_root_at(const struct LoroTree *tree,
                                   struct LoroTreeID *out);
 
 /**
+ * Returns the number of nodes (including deleted ones). Returns 0 on a null handle. The
+ * indexed counterpart to [`loro_tree_nodes_json`], for the C++ `nodes()` accessor.
+ */
+uintptr_t loro_tree_nodes_len(const struct LoroTree *tree);
+
+/**
+ * Writes the node at `index` (over all nodes, including deleted ones) into `*out`. Returns
+ * `LORO_ERR_NOT_FOUND` if `index` is out of range.
+ */
+enum LoroStatus loro_tree_node_at(const struct LoroTree *tree,
+                                  uintptr_t index,
+                                  struct LoroTreeID *out);
+
+/**
  * Writes the number of children of `parent` (null = root) into `*out`. Returns
  * `LORO_ERR_NOT_FOUND` if `parent` does not exist.
  */
@@ -2324,6 +2435,14 @@ enum LoroStatus loro_doc_import(struct LoroDoc *doc, const uint8_t *data, uintpt
  * `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
  */
 enum LoroStatus loro_doc_get_deep_value_json(const struct LoroDoc *doc, struct LoroBytes *out);
+
+/**
+ * Returns the entire document state (resolving nested containers) as an owned typed
+ * `LoroValue*` (a `Map` value), or null on error. Free with `loro_value_free`. Typed
+ * counterpart to [`loro_doc_get_deep_value_json`]; preserves binary, integer-valued
+ * doubles, and the value/container distinction (RESHAPE Phase 2).
+ */
+struct LoroValue *loro_doc_get_deep_value(const struct LoroDoc *doc);
 
 /**
  * Imports JSON-format updates `(json, len)` (as produced by [`loro_doc_export_json_updates`]

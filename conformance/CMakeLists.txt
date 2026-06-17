@@ -21,8 +21,13 @@ message(STATUS "loro-c conformance spike: building loro-cpp tests from ${LORO_CP
 
 # Phase 0: test_smoke (self-contained) + test_text (includes test_helpers.hpp).
 # Phase 1 (typed value core): test_map + test_ephemeral_store exercise the typed LoroValue
-# bridge through real loro-cpp tests. All #include <loro.hpp> — resolved to the spike header.
-set(_loro_conformance_tests test_smoke test_text test_map test_ephemeral_store)
+# bridge through real loro-cpp tests.
+# Phase 2 (containers + accessors): the four remaining container types plus the LoroDoc /
+# VersionVector / Frontiers surface test_doc needs. All #include <loro.hpp> — resolved to the
+# spike header.
+set(_loro_conformance_tests
+    test_smoke test_text test_map test_ephemeral_store
+    test_list test_movable_list test_tree test_counter test_doc)
 
 foreach(_t IN LISTS _loro_conformance_tests)
     add_executable(conformance_${_t} "${LORO_CPP_DIR}/tests/${_t}.cpp")
@@ -49,4 +54,18 @@ target_include_directories(conformance_test_value_fidelity PRIVATE
 add_test(NAME conformance_test_value_fidelity COMMAND conformance_test_value_fidelity)
 if(TARGET loro_cargo_build)
     add_dependencies(conformance_test_value_fidelity loro_cargo_build)
+endif()
+
+# Phase 2 ext test (loro-c-authored): the container slice of loro-cpp's test_ext.cpp
+# (test_container_id_helpers + test_insert_container_template). The subscription / undo slices
+# of test_ext.cpp are gated in Phases 3–4, so the full file cannot compile standalone yet.
+add_executable(conformance_test_ext_containers
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ext_containers.cpp")
+target_link_libraries(conformance_test_ext_containers PRIVATE loro::loro)
+target_include_directories(conformance_test_ext_containers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp> / <loro/loro_ext.hpp>
+    ${LORO_CPP_DIR}/tests)                 # test_helpers.hpp
+add_test(NAME conformance_test_ext_containers COMMAND conformance_test_ext_containers)
+if(TARGET loro_cargo_build)
+    add_dependencies(conformance_test_ext_containers loro_cargo_build)
 endif()

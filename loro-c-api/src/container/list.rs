@@ -15,6 +15,8 @@ use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{value_from_json, value_to_json_bytes, LoroBytes};
+use crate::value_or_container::LoroValueOrContainer;
+use crate::value_typed::LoroValue;
 use std::os::raw::c_char;
 use std::sync::Arc;
 
@@ -260,6 +262,122 @@ pub extern "C" fn loro_list_pop(
             }
             Err(e) => record_loro_error(&e),
         }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Typed-value surface (RESHAPE Phase 2) — counterparts to the JSON functions
+// above that cross the boundary as opaque `LoroValue` handles (no JSON), so
+// binary / integer-valued doubles / the value-vs-container distinction survive.
+// Mirrors the map.rs typed pattern.
+// ---------------------------------------------------------------------------
+
+/// Inserts a *clone* of the typed `value` at index `pos`. The caller still owns `value`.
+/// Typed counterpart to [`loro_list_insert`]; preserves binary, integer-valued doubles, and
+/// the value/container distinction.
+#[no_mangle]
+pub extern "C" fn loro_list_insert_value(
+    list: *mut LoroList,
+    pos: usize,
+    value: *const LoroValue,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let list = deref_or!(list, LoroStatus::LORO_ERR_INVALID_ARG);
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        match list.inner().insert(pos, value.inner().clone()) {
+            Ok(()) => LoroStatus::LORO_OK,
+            Err(e) => record_loro_error(&e),
+        }
+    })
+}
+
+/// Appends a *clone* of the typed `value` to the end of the list. The caller still owns
+/// `value`. Typed counterpart to [`loro_list_push`].
+#[no_mangle]
+pub extern "C" fn loro_list_push_value(
+    list: *mut LoroList,
+    value: *const LoroValue,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let list = deref_or!(list, LoroStatus::LORO_ERR_INVALID_ARG);
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        match list.inner().push(value.inner().clone()) {
+            Ok(()) => LoroStatus::LORO_OK,
+            Err(e) => record_loro_error(&e),
+        }
+    })
+}
+
+/// Returns the entry at `index` as an owned `LoroValueOrContainer*` (a plain value or a live
+/// child container), or null if `index` is out of range. Free the result with
+/// `loro_value_or_container_free`. Typed counterpart to [`loro_list_get`].
+#[no_mangle]
+pub extern "C" fn loro_list_get_value_or_container(
+    list: *const LoroList,
+    index: usize,
+) -> *mut LoroValueOrContainer {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        match list.inner().get(index) {
+            Some(voc) => Box::into_raw(Box::new(LoroValueOrContainer::from_inner(voc))),
+            None => {
+                set_last_error("list index out of range");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Pops the last element as an owned typed `LoroValue*`, writing whether one was present into
+/// `*out_present` (which may be null). Returns null when the list is empty (with
+/// `*out_present` set to false) or on error. Free a returned value with `loro_value_free`.
+/// Typed counterpart to [`loro_list_pop`].
+#[no_mangle]
+pub extern "C" fn loro_list_pop_value(
+    list: *mut LoroList,
+    out_present: *mut bool,
+) -> *mut LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        match list.inner().pop() {
+            Ok(Some(value)) => {
+                if !out_present.is_null() {
+                    unsafe { out_present.write(true) };
+                }
+                crate::value_typed::into_raw(value)
+            }
+            Ok(None) => {
+                if !out_present.is_null() {
+                    unsafe { out_present.write(false) };
+                }
+                std::ptr::null_mut()
+            }
+            Err(e) => {
+                record_loro_error(&e);
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Returns the list's *shallow* value as an owned typed `LoroValue*` (a `List` value; nested
+/// containers appear as `Container` entries, not their deep values). Backs the C++ `to_vec`.
+/// Free with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_list_get_value(list: *const LoroList) -> *mut LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        crate::value_typed::into_raw(list.inner().get_value())
+    })
+}
+
+/// Returns the list's full recursive state as an owned typed `LoroValue*` (a `List` value
+/// with nested containers resolved to their deep values). Free with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_list_get_deep_value(list: *const LoroList) -> *mut LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let list = deref_or!(list, std::ptr::null_mut());
+        crate::value_typed::into_raw(list.inner().get_deep_value())
     })
 }
 

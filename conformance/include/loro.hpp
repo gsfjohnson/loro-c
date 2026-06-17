@@ -88,6 +88,13 @@ struct ChangeMeta;
 struct ChangeModifier;
 struct PreCommitCallbackPayload;
 
+// RESHAPE Phase 4 — undo manager.
+struct UndoManager;
+struct OnPush;
+struct OnPop;
+struct UndoItemMeta;
+struct CursorWithPos;
+
 namespace detail {
 struct Factory;  // privileged construction helper; defined after the wrapper classes.
 struct FrontiersFactory;          // builds a Frontiers from an owned ::LoroFrontiers* (Phase 3).
@@ -108,6 +115,14 @@ enum class Side : int32_t {
     kLeft = 1,
     kMiddle = 2,
     kRight = 3,
+};
+
+/// Whether a pushed/popped undo item belongs to the undo or the redo stack (loro-cpp
+/// `UndoOrRedo`). GOTCHA: the C ABI `LoroUndoOrRedo` is `LORO_UNDO=0 / LORO_REDO=1`; map via
+/// [`detail::from_c_undo_or_redo`], never cast.
+enum class UndoOrRedo : int32_t {
+    kUndo = 1,
+    kRedo = 2,
 };
 
 /// How a diff event was triggered (loro-cpp `EventTriggerKind`). Mirrors the C ABI
@@ -341,6 +356,20 @@ private:
     std::variant<kNull, kBool, kDouble, kI64, kBinary, kString, kList, kMap, kContainer> variant;
 };
 
+/// A cursor paired with its resolved absolute position (loro-cpp `CursorWithPos`).
+struct CursorWithPos {
+    std::shared_ptr<Cursor> cursor;
+    AbsolutePosition pos;
+};
+
+/// Metadata an [`OnPush`] listener attaches to an undo item (loro-cpp `UndoItemMeta`): a typed
+/// `value` plus any `cursors` to restore. RESHAPE Phase 4 always reports `cursors` empty — the
+/// C ABI's callback-scoped `LoroUndoMeta` has no cursor channel (full cursor capture is Phase 5).
+struct UndoItemMeta {
+    LoroValue value;
+    std::vector<CursorWithPos> cursors;
+};
+
 struct TextDelta {
     struct kRetain {
         uint32_t retain;
@@ -401,6 +430,23 @@ struct FirstCommitFromPeerCallback {
 struct PreCommitCallback {
     virtual ~PreCommitCallback() {}
     virtual void on_pre_commit(const PreCommitCallbackPayload &payload) = 0;
+};
+
+/// Undo on-push listener (loro-cpp `OnPush`). Fires when an item is pushed onto the undo (or
+/// redo) stack; returns the [`UndoItemMeta`] to attach to it. `diff_event` is present only when
+/// the push came from a local edit.
+struct OnPush {
+    virtual ~OnPush() {}
+    virtual UndoItemMeta on_push(const UndoOrRedo &undo_or_redo, const CounterSpan &span,
+                                 std::optional<DiffEvent> diff_event) = 0;
+};
+
+/// Undo on-pop listener (loro-cpp `OnPop`). Fires when an item is popped during undo/redo;
+/// receives the [`UndoItemMeta`] a prior `on_push` attached.
+struct OnPop {
+    virtual ~OnPop() {}
+    virtual void on_pop(const UndoOrRedo &undo_or_redo, const CounterSpan &span,
+                        const UndoItemMeta &undo_meta) = 0;
 };
 
 struct PosQueryResult {
@@ -1002,6 +1048,44 @@ inline LoroValue from_c_value(const ::LoroValue *cv) {
         default:
             throw LoroError("unknown LoroValue type");
     }
+}
+
+}  // namespace detail
+
+namespace detail {
+
+/// Maps the C ABI `LoroUndoOrRedo` (`LORO_UNDO=0 / LORO_REDO=1`) onto loro-cpp's
+/// [`UndoOrRedo`] (`kUndo=1 / kRedo=2`). The numeric values differ — map, never cast.
+inline UndoOrRedo from_c_undo_or_redo(::LoroUndoOrRedo k) {
+    return k == LORO_REDO ? UndoOrRedo::kRedo : UndoOrRedo::kUndo;
+}
+
+/// Builds an owned [`ImportStatus`] from a `::LoroImportStatus*` (the handle a
+/// `loro_doc_import_*_status` call produced) and frees the handle. A null handle yields an
+/// empty status.
+inline ImportStatus import_status_from_c(::LoroImportStatus *st) {
+    ImportStatus result;
+    if (!st) return result;
+    uintptr_t n = loro_import_status_success_len(st);
+    for (uintptr_t i = 0; i < n; ++i) {
+        ::LoroPeerCounterSpan e;
+        if (loro_import_status_success_at(st, i, &e)) {
+            result.success.emplace(e.peer, CounterSpan{e.start, e.end});
+        }
+    }
+    if (loro_import_status_has_pending(st)) {
+        std::unordered_map<uint64_t, CounterSpan> pending;
+        uintptr_t pn = loro_import_status_pending_len(st);
+        for (uintptr_t i = 0; i < pn; ++i) {
+            ::LoroPeerCounterSpan e;
+            if (loro_import_status_pending_at(st, i, &e)) {
+                pending.emplace(e.peer, CounterSpan{e.start, e.end});
+            }
+        }
+        result.pending = std::move(pending);
+    }
+    loro_import_status_free(st);
+    return result;
 }
 
 }  // namespace detail
@@ -2345,15 +2429,37 @@ struct LoroDoc {
         return b.to_string();
     }
     ImportStatus import_json_updates(const std::string &json) {
-        detail::check(loro_doc_import_json_updates(raw_, json.data(), json.size()));
-        return ImportStatus{};
+        ::LoroImportStatus *st = nullptr;
+        detail::check(loro_doc_import_json_updates_status(raw_, json.data(), json.size(), &st));
+        return detail::import_status_from_c(st);
     }
 
     ImportStatus import(const std::vector<uint8_t> &bytes) {
-        detail::check(loro_doc_import(raw_, bytes.data(), bytes.size()));
-        // The detailed success/pending span maps are deferred to Phase 4; the conformance
-        // tests ignore the return value.
-        return ImportStatus{};
+        ::LoroImportStatus *st = nullptr;
+        detail::check(loro_doc_import_status(raw_, bytes.data(), bytes.size(), &st));
+        return detail::import_status_from_c(st);
+    }
+
+    ImportStatus import_with(const std::vector<uint8_t> &bytes, const std::string &origin) {
+        ::LoroImportStatus *st = nullptr;
+        detail::check(loro_doc_import_with_status(raw_, bytes.data(), bytes.size(), origin.data(),
+                                                  origin.size(), &st));
+        return detail::import_status_from_c(st);
+    }
+
+    ImportStatus import_batch(const std::vector<std::vector<uint8_t>> &bytes) {
+        std::vector<const uint8_t *> datas;
+        std::vector<uintptr_t> lens;
+        datas.reserve(bytes.size());
+        lens.reserve(bytes.size());
+        for (const auto &b : bytes) {
+            datas.push_back(b.data());
+            lens.push_back(b.size());
+        }
+        ::LoroImportStatus *st = nullptr;
+        detail::check(
+            loro_doc_import_batch_status(raw_, datas.data(), lens.data(), datas.size(), &st));
+        return detail::import_status_from_c(st);
     }
 
     std::shared_ptr<LoroDoc> fork() {
@@ -2441,6 +2547,7 @@ struct LoroDoc {
 private:
     explicit LoroDoc(::LoroDoc *raw) : raw_(raw) {}
     ::LoroDoc *raw_;
+    friend struct UndoManager;  // UndoManager::init needs the raw doc handle (Phase 4).
 };
 
 // -------------------------------------------------------------- subscriptions
@@ -2908,6 +3015,156 @@ struct EphemeralStore {
 private:
     explicit EphemeralStore(::LoroEphemeralStore *raw) : raw_(raw) {}
     ::LoroEphemeralStore *raw_;
+};
+
+// ------------------------------------------------------------- undo manager (Phase 4)
+
+namespace detail {
+// Heap-held owners of a C++ undo listener, passed as `user_data` to the C callback structs.
+// On install error (or when replaced / the manager is freed), loro-c runs `free_user_data`,
+// which deletes the holder — so the C side owns it after a successful `set_on_*`.
+struct OnPushHolder {
+    std::shared_ptr<OnPush> cb;
+};
+struct OnPopHolder {
+    std::shared_ptr<OnPop> cb;
+};
+}  // namespace detail
+
+// Trampolines mirror the subscription ones: build the owned C++ payload from the callback-scoped
+// C view and dispatch, never letting a C++ exception unwind across the C ABI. on_push writes the
+// returned meta's value back into the writable `LoroUndoMeta` (typed, no JSON); its `cursors` are
+// dropped because the C ABI meta has no cursor channel (Phase 4 empty-cursors stub).
+extern "C" inline void loro_conf_on_push_invoke(::LoroUndoOrRedo kind, ::LoroCounterSpan span,
+                                                const ::LoroDiffEvent *event,
+                                                ::LoroUndoMeta *meta, void *user_data) {
+    auto *holder = static_cast<detail::OnPushHolder *>(user_data);
+    if (!holder || !holder->cb) return;
+    try {
+        std::optional<DiffEvent> ev;
+        if (event) ev = detail::diff_event_from_c(event);
+        UndoItemMeta r = holder->cb->on_push(detail::from_c_undo_or_redo(kind),
+                                             CounterSpan{span.start, span.end}, std::move(ev));
+        detail::CValue cv(detail::to_c_value(r.value));
+        loro_undo_meta_set_value(meta, cv.get());
+    } catch (...) {
+    }
+}
+extern "C" inline void loro_conf_on_push_free(void *user_data) {
+    delete static_cast<detail::OnPushHolder *>(user_data);
+}
+
+extern "C" inline void loro_conf_on_pop_invoke(::LoroUndoOrRedo kind, ::LoroCounterSpan span,
+                                               const ::LoroUndoMeta *meta, void *user_data) {
+    auto *holder = static_cast<detail::OnPopHolder *>(user_data);
+    if (!holder || !holder->cb) return;
+    try {
+        LoroValue value{LoroValue::kNull{}};
+        if (::LoroValue *v = loro_undo_meta_get_value(meta)) {
+            detail::CValue g(v);
+            value = detail::from_c_value(v);
+        }
+        holder->cb->on_pop(detail::from_c_undo_or_redo(kind), CounterSpan{span.start, span.end},
+                           UndoItemMeta{std::move(value), {}});
+    } catch (...) {
+    }
+}
+extern "C" inline void loro_conf_on_pop_free(void *user_data) {
+    delete static_cast<detail::OnPopHolder *>(user_data);
+}
+
+/// Local undo/redo bound to a document's peer (loro-cpp `UndoManager`). `shared_ptr`-held,
+/// `init(doc)`-constructed. `on_push`/`on_pop` listeners observe stack changes; the attached
+/// [`UndoItemMeta`] carries a typed value (cursors are empty in this phase).
+struct UndoManager {
+    static std::shared_ptr<UndoManager> init(const std::shared_ptr<LoroDoc> &doc) {
+        ::LoroUndoManager *um = loro_undo_manager_new(doc->raw_);
+        if (!um) throw LoroError("loro_undo_manager_new returned null");
+        return std::shared_ptr<UndoManager>(new UndoManager(um));
+    }
+
+    void add_exclude_origin_prefix(const std::string &prefix) {
+        detail::check(
+            loro_undo_manager_add_exclude_origin_prefix(raw_, prefix.data(), prefix.size()));
+    }
+    void set_max_undo_steps(uint32_t size) {
+        detail::check(loro_undo_manager_set_max_undo_steps(raw_, static_cast<uintptr_t>(size)));
+    }
+    void set_merge_interval(int64_t interval) {
+        detail::check(loro_undo_manager_set_merge_interval(raw_, interval));
+    }
+
+    void set_on_push(std::shared_ptr<OnPush> on_push) {
+        auto *holder = new detail::OnPushHolder{std::move(on_push)};
+        ::LoroUndoOnPush cb;
+        cb.invoke = &loro_conf_on_push_invoke;
+        cb.user_data = holder;
+        cb.free_user_data = &loro_conf_on_push_free;
+        // On error loro-c drops the callback (running free_user_data, freeing `holder`); the
+        // check below just surfaces it — don't free `holder` again.
+        detail::check(loro_undo_manager_set_on_push(raw_, cb));
+    }
+    void set_on_pop(std::shared_ptr<OnPop> on_pop) {
+        auto *holder = new detail::OnPopHolder{std::move(on_pop)};
+        ::LoroUndoOnPop cb;
+        cb.invoke = &loro_conf_on_pop_invoke;
+        cb.user_data = holder;
+        cb.free_user_data = &loro_conf_on_pop_free;
+        detail::check(loro_undo_manager_set_on_pop(raw_, cb));
+    }
+
+    bool can_undo() { return loro_undo_manager_can_undo(raw_); }
+    bool can_redo() { return loro_undo_manager_can_redo(raw_); }
+    uint32_t undo_count() { return static_cast<uint32_t>(loro_undo_manager_undo_count(raw_)); }
+    uint32_t redo_count() { return static_cast<uint32_t>(loro_undo_manager_redo_count(raw_)); }
+    uint64_t peer() { return loro_undo_manager_peer(raw_); }
+
+    bool undo() {
+        bool applied = false;
+        detail::check(loro_undo_manager_undo(raw_, &applied));
+        return applied;
+    }
+    bool redo() {
+        bool applied = false;
+        detail::check(loro_undo_manager_redo(raw_, &applied));
+        return applied;
+    }
+    void record_new_checkpoint() {
+        detail::check(loro_undo_manager_record_new_checkpoint(raw_));
+    }
+    void group_start() { detail::check(loro_undo_manager_group_start(raw_)); }
+    void group_end() { detail::check(loro_undo_manager_group_end(raw_)); }
+
+    std::optional<LoroValue> top_undo_value() {
+        ::LoroValue *cv = loro_undo_manager_top_undo_value(raw_);
+        if (!cv) return std::nullopt;
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+    std::optional<LoroValue> top_redo_value() {
+        ::LoroValue *cv = loro_undo_manager_top_redo_value(raw_);
+        if (!cv) return std::nullopt;
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+    std::optional<UndoItemMeta> top_undo_meta() {
+        auto v = top_undo_value();
+        if (!v) return std::nullopt;
+        return UndoItemMeta{std::move(*v), {}};
+    }
+    std::optional<UndoItemMeta> top_redo_meta() {
+        auto v = top_redo_value();
+        if (!v) return std::nullopt;
+        return UndoItemMeta{std::move(*v), {}};
+    }
+
+    ~UndoManager() { loro_undo_manager_free(raw_); }
+    UndoManager(const UndoManager &) = delete;
+    UndoManager &operator=(const UndoManager &) = delete;
+
+private:
+    explicit UndoManager(::LoroUndoManager *raw) : raw_(raw) {}
+    ::LoroUndoManager *raw_;
 };
 
 }  // namespace loro

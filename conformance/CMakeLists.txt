@@ -28,10 +28,12 @@ message(STATUS "loro-c conformance spike: building loro-cpp tests from ${LORO_CP
 # Phase 3 (subscriptions): test_subscriptions exercises the diff/event envelope + commit hooks
 # (subscribe / subscribe_root / subscribe_local_update / subscribe_pre_commit /
 # subscribe_first_commit_from_peer, ChangeModifier, get_change).
+# Phase 4 (undo + commit hooks): test_undo exercises UndoManager (init / record_new_checkpoint /
+# undo / redo / can_* / undo_count / set_max_undo_steps).
 set(_loro_conformance_tests
     test_smoke test_text test_map test_ephemeral_store
     test_list test_movable_list test_tree test_counter test_doc
-    test_subscriptions)
+    test_subscriptions test_undo)
 
 foreach(_t IN LISTS _loro_conformance_tests)
     add_executable(conformance_${_t} "${LORO_CPP_DIR}/tests/${_t}.cpp")
@@ -85,4 +87,18 @@ target_include_directories(conformance_test_ext_subscriptions PRIVATE
 add_test(NAME conformance_test_ext_subscriptions COMMAND conformance_test_ext_subscriptions)
 if(TARGET loro_cargo_build)
     add_dependencies(conformance_test_ext_subscriptions loro_cargo_build)
+endif()
+
+# Phase 4 ext test (loro-c-authored): the undo slice of loro-cpp's test_ext.cpp
+# (test_undo_lambdas) — exercises the loro::ext on_undo_push/on_undo_pop adapters +
+# set_on_push/set_on_pop shortcuts.
+add_executable(conformance_test_ext_undo
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ext_undo.cpp")
+target_link_libraries(conformance_test_ext_undo PRIVATE loro::loro)
+target_include_directories(conformance_test_ext_undo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include    # the spike's <loro.hpp> / <loro/loro_ext.hpp>
+    ${LORO_CPP_DIR}/tests)                 # test_helpers.hpp
+add_test(NAME conformance_test_ext_undo COMMAND conformance_test_ext_undo)
+if(TARGET loro_cargo_build)
+    add_dependencies(conformance_test_ext_undo loro_cargo_build)
 endif()

@@ -348,6 +348,12 @@ typedef struct LoroFractionalIndex LoroFractionalIndex;
 typedef struct LoroFrontiers LoroFrontiers;
 
 /**
+ * Opaque, owned handle to an import's status (the `success` / `pending` span maps). Built by
+ * the `loro_doc_import_*_status` functions; free with [`loro_import_status_free`].
+ */
+typedef struct LoroImportStatus LoroImportStatus;
+
+/**
  * Opaque, owned collection of JSONPath query results. Free with
  * [`loro_jsonpath_results_free`].
  */
@@ -578,6 +584,16 @@ typedef struct LoroIdSpan {
      */
     int32_t counter_end;
 } LoroIdSpan;
+
+/**
+ * One entry of an import status span map: the op counters `[start, end)` applied for `peer`.
+ * Mirrors a `(PeerID, CounterSpan)` pair.
+ */
+typedef struct LoroPeerCounterSpan {
+    uint64_t peer;
+    int32_t start;
+    int32_t end;
+} LoroPeerCounterSpan;
 
 /**
  * A C subscriber callback for [`loro_doc_subscribe_jsonpath`]. `invoke` is a payload-free
@@ -2431,6 +2447,16 @@ enum LoroStatus loro_doc_export_updates(const struct LoroDoc *doc, struct LoroBy
 enum LoroStatus loro_doc_import(struct LoroDoc *doc, const uint8_t *data, uintptr_t len);
 
 /**
+ * Like [`loro_doc_import`], but also surfaces the import's [`ImportStatus`] (per-peer
+ * success / pending op-counter spans) into `*out` on success (RESHAPE Phase 4). `out` may be
+ * null to ignore the status; a written `*out` must be freed with `loro_import_status_free`.
+ */
+enum LoroStatus loro_doc_import_status(struct LoroDoc *doc,
+                                       const uint8_t *data,
+                                       uintptr_t len,
+                                       struct LoroImportStatus **out);
+
+/**
  * Serializes the entire document state (resolving nested containers) to JSON bytes into
  * `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
  */
@@ -2449,6 +2475,16 @@ struct LoroValue *loro_doc_get_deep_value(const struct LoroDoc *doc);
  * or another peer) into the document. `json` must be valid UTF-8 JSON in loro's update schema.
  */
 enum LoroStatus loro_doc_import_json_updates(struct LoroDoc *doc, const char *json, uintptr_t len);
+
+/**
+ * Like [`loro_doc_import_json_updates`], but also surfaces the import's [`ImportStatus`] into
+ * `*out` on success (RESHAPE Phase 4). `out` may be null; a written `*out` must be freed with
+ * `loro_import_status_free`.
+ */
+enum LoroStatus loro_doc_import_json_updates_status(struct LoroDoc *doc,
+                                                    const char *json,
+                                                    uintptr_t len,
+                                                    struct LoroImportStatus **out);
 
 /**
  * Exports the ops in the range `(start_vv, end_vv]` as JSON bytes into `*out`. `*out` is only
@@ -2522,6 +2558,17 @@ enum LoroStatus loro_doc_import_batch(struct LoroDoc *doc,
                                       uintptr_t count);
 
 /**
+ * Like [`loro_doc_import_batch`], but also surfaces the import's [`ImportStatus`] into `*out`
+ * on success (RESHAPE Phase 4). `out` may be null; a written `*out` must be freed with
+ * `loro_import_status_free`.
+ */
+enum LoroStatus loro_doc_import_batch_status(struct LoroDoc *doc,
+                                             const uint8_t *const *datas,
+                                             const uintptr_t *lens,
+                                             uintptr_t count,
+                                             struct LoroImportStatus **out);
+
+/**
  * Imports a snapshot or updates blob `(data, len)` while attaching `(origin, origin_len)` as
  * the origin string on the resulting change event (handy for telemetry / event filtering).
  */
@@ -2530,6 +2577,18 @@ enum LoroStatus loro_doc_import_with(struct LoroDoc *doc,
                                      uintptr_t len,
                                      const char *origin,
                                      uintptr_t origin_len);
+
+/**
+ * Like [`loro_doc_import_with`], but also surfaces the import's [`ImportStatus`] into `*out`
+ * on success (RESHAPE Phase 4). `out` may be null; a written `*out` must be freed with
+ * `loro_import_status_free`.
+ */
+enum LoroStatus loro_doc_import_with_status(struct LoroDoc *doc,
+                                            const uint8_t *data,
+                                            uintptr_t len,
+                                            const char *origin,
+                                            uintptr_t origin_len,
+                                            struct LoroImportStatus **out);
 
 /**
  * Returns the total number of operations in the document's OpLog. Returns 0 on a null handle.
@@ -2904,6 +2963,45 @@ enum LoroStatus loro_fractional_index_compare(const struct LoroFractionalIndex *
                                               int32_t *out);
 
 /**
+ * Returns the number of peers in the `success` map. Returns 0 on a null handle.
+ */
+uintptr_t loro_import_status_success_len(const struct LoroImportStatus *status);
+
+/**
+ * Writes the `success` entry at `index` into `*out`. Returns `true` on success; returns
+ * `false` (leaving `*out` untouched) on a null handle, a null `out`, or an out-of-range index.
+ */
+bool loro_import_status_success_at(const struct LoroImportStatus *status,
+                                   uintptr_t index,
+                                   struct LoroPeerCounterSpan *out);
+
+/**
+ * Returns whether this import has a `pending` map (some ops are waiting on missing
+ * dependencies). Returns `false` on a null handle.
+ */
+bool loro_import_status_has_pending(const struct LoroImportStatus *status);
+
+/**
+ * Returns the number of peers in the `pending` map, or 0 if there is no pending map or the
+ * handle is null.
+ */
+uintptr_t loro_import_status_pending_len(const struct LoroImportStatus *status);
+
+/**
+ * Writes the `pending` entry at `index` into `*out`. Returns `true` on success; returns
+ * `false` (leaving `*out` untouched) on a null handle, a null `out`, no pending map, or an
+ * out-of-range index.
+ */
+bool loro_import_status_pending_at(const struct LoroImportStatus *status,
+                                   uintptr_t index,
+                                   struct LoroPeerCounterSpan *out);
+
+/**
+ * Frees an import status handle. Passing null is a no-op.
+ */
+void loro_import_status_free(struct LoroImportStatus *status);
+
+/**
  * Runs the JSONPath expression `(path, path_len)` against the document. Returns a results
  * collection, or null on an invalid path / evaluation error (see `loro_last_error_message`).
  * Release with [`loro_jsonpath_results_free`].
@@ -3060,6 +3158,25 @@ bool loro_undo_manager_top_undo_value_json(const struct LoroUndoManager *um, str
 bool loro_undo_manager_top_redo_value_json(const struct LoroUndoManager *um, struct LoroBytes *out);
 
 /**
+ * Returns the metadata value attached to the top item of the undo stack as an owned typed
+ * `LoroValue*` (RESHAPE Phase 4), or null when the undo stack is empty or the handle is null.
+ * Typed counterpart to [`loro_undo_manager_top_undo_value_json`]: it preserves binary,
+ * integer-valued doubles, and the value/container distinction. A present-but-`Null` value is
+ * returned as a non-null `LoroValue*` wrapping `Null`, so a null return unambiguously means
+ * "no top undo item". Free the result with `loro_value_free`.
+ */
+struct LoroValue *loro_undo_manager_top_undo_value(const struct LoroUndoManager *um);
+
+/**
+ * Returns the metadata value attached to the top item of the redo stack as an owned typed
+ * `LoroValue*` (RESHAPE Phase 4), or null when the redo stack is empty or the handle is null.
+ * Typed counterpart to [`loro_undo_manager_top_redo_value_json`]; see
+ * [`loro_undo_manager_top_undo_value`] for the null-vs-`Null` distinction. Free the result
+ * with `loro_value_free`.
+ */
+struct LoroValue *loro_undo_manager_top_redo_value(const struct LoroUndoManager *um);
+
+/**
  * Records a checkpoint so subsequent edits become a new, separately-undoable item.
  */
 enum LoroStatus loro_undo_manager_record_new_checkpoint(struct LoroUndoManager *um);
@@ -3128,6 +3245,22 @@ enum LoroStatus loro_undo_meta_set_value_json(struct LoroUndoMeta *meta,
  */
 enum LoroStatus loro_undo_meta_get_value_json(const struct LoroUndoMeta *meta,
                                               struct LoroBytes *out);
+
+/**
+ * Sets the undo item's metadata value from an owned typed `LoroValue*` (RESHAPE Phase 4).
+ * Call this from an on_push listener. The value is cloned in — the caller still owns (and
+ * must free) `value`. Typed counterpart to [`loro_undo_meta_set_value_json`]: it preserves
+ * binary, integer-valued doubles, and the value/container distinction. Returns
+ * `LORO_ERR_INVALID_ARG` on a null handle or value.
+ */
+enum LoroStatus loro_undo_meta_set_value(struct LoroUndoMeta *meta, const struct LoroValue *value);
+
+/**
+ * Returns the undo item's metadata value as an owned typed `LoroValue*` (RESHAPE Phase 4),
+ * or null on a null handle. Call this from an on_pop listener. Typed counterpart to
+ * [`loro_undo_meta_get_value_json`]; free the result with `loro_value_free`.
+ */
+struct LoroValue *loro_undo_meta_get_value(const struct LoroUndoMeta *meta);
 
 /**
  * Frees a [`LoroBytes`] previously returned by this library. Passing an

@@ -436,6 +436,61 @@ inline std::shared_ptr<Subscription> subscribe(LoroCounter &c,
     return c.subscribe(on_diff(std::move(fn)));
 }
 
+// ============================================================================
+// Undo listeners (RESHAPE Phase 4)
+// ============================================================================
+//
+// Lambda → OnPush/OnPop adapters and set_on_push/set_on_pop shortcuts, ported from
+// ../loro-cpp/include/loro/loro_ext.hpp (same one-off-subclass idiom as the Phase 3 adapters).
+
+inline std::shared_ptr<OnPush> on_undo_push(
+    std::function<UndoItemMeta(const UndoOrRedo &, const CounterSpan &, std::optional<DiffEvent>)>
+        fn) {
+    struct Impl : public OnPush {
+        std::function<UndoItemMeta(const UndoOrRedo &, const CounterSpan &,
+                                   std::optional<DiffEvent>)>
+            fn;
+        explicit Impl(std::function<UndoItemMeta(const UndoOrRedo &, const CounterSpan &,
+                                                 std::optional<DiffEvent>)>
+                          f)
+            : fn(std::move(f)) {}
+        UndoItemMeta on_push(const UndoOrRedo &uor, const CounterSpan &span,
+                             std::optional<DiffEvent> diff) override {
+            if (fn) return fn(uor, span, std::move(diff));
+            return UndoItemMeta{LoroValue(LoroValue::kNull{}), {}};
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
+inline std::shared_ptr<OnPop> on_undo_pop(
+    std::function<void(const UndoOrRedo &, const CounterSpan &, const UndoItemMeta &)> fn) {
+    struct Impl : public OnPop {
+        std::function<void(const UndoOrRedo &, const CounterSpan &, const UndoItemMeta &)> fn;
+        explicit Impl(
+            std::function<void(const UndoOrRedo &, const CounterSpan &, const UndoItemMeta &)> f)
+            : fn(std::move(f)) {}
+        void on_pop(const UndoOrRedo &uor, const CounterSpan &span,
+                    const UndoItemMeta &meta) override {
+            if (fn) fn(uor, span, meta);
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
+// set_on_*  shortcuts on UndoManager.
+inline void set_on_push(
+    UndoManager &um,
+    std::function<UndoItemMeta(const UndoOrRedo &, const CounterSpan &, std::optional<DiffEvent>)>
+        fn) {
+    um.set_on_push(on_undo_push(std::move(fn)));
+}
+inline void set_on_pop(
+    UndoManager &um,
+    std::function<void(const UndoOrRedo &, const CounterSpan &, const UndoItemMeta &)> fn) {
+    um.set_on_pop(on_undo_pop(std::move(fn)));
+}
+
 }  // namespace ext
 }  // namespace loro
 

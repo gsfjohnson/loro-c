@@ -118,11 +118,95 @@ bool test_list_value_fidelity() {
     return true;
 }
 
+// RESHAPE Phase 4: import() returns a real ImportStatus (per-peer success spans) — the Rust
+// layer used to discard it (it returned an empty struct). loro-cpp's own tests never inspect it.
+bool test_import_status_success() {
+    auto doc1 = loro::LoroDoc::init();
+    doc1->set_peer_id(1);
+    auto text = doc1->get_text(root("body"));
+    text->insert(0, "hello world");
+    doc1->commit();
+    auto snapshot = doc1->export_snapshot();
+
+    auto doc2 = loro::LoroDoc::init();
+    doc2->set_peer_id(2);
+    auto status = doc2->import(snapshot);
+
+    auto it = status.success.find(1);
+    if (it == status.success.end()) return fail("import status: peer 1 missing from success");
+    if (it->second.end <= it->second.start)
+        return fail("import status: peer 1 success span is empty/invalid");
+    // A self-contained snapshot has no missing deps: pending must be absent or empty.
+    if (status.pending.has_value() && !status.pending->empty())
+        return fail("import status: unexpected pending entries for a complete snapshot");
+    return true;
+}
+
+// Importing updates whose dependencies are missing must surface a non-empty `pending` map.
+bool test_import_status_pending() {
+    auto doc1 = loro::LoroDoc::init();
+    doc1->set_peer_id(1);
+    auto text = doc1->get_text(root("body"));
+    text->insert(0, "a");
+    doc1->commit();
+    auto vv_after_first = doc1->state_vv();
+    text->insert(text->len_unicode(), "b");
+    doc1->commit();
+    // Only the second commit's ops — they depend on the (un-imported) first commit.
+    auto update2 = doc1->export_updates(vv_after_first);
+
+    auto doc2 = loro::LoroDoc::init();
+    doc2->set_peer_id(2);
+    auto status = doc2->import(update2);
+    if (!status.pending.has_value())
+        return fail("import status: expected a pending map for updates with missing deps");
+    if (status.pending->find(1) == status.pending->end())
+        return fail("import status: peer 1 missing from pending");
+    return true;
+}
+
+// RESHAPE Phase 4: the undo meta value crosses via the TYPED ABI, so a binary value an on_push
+// stores is read back intact by on_pop (the old JSON bridge would corrupt it into a list).
+bool test_undo_meta_value_fidelity() {
+    using loro::LoroValue;
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(7);
+    auto undo = loro::UndoManager::init(doc);
+
+    std::vector<uint8_t> stored{0x00, 0x01, 0xff, 0x7f, 0x80};
+    std::optional<LoroValue> popped;
+    ext::set_on_push(*undo, [&](const loro::UndoOrRedo &, const loro::CounterSpan &,
+                                std::optional<loro::DiffEvent>) {
+        return loro::UndoItemMeta{ext::value_from(stored), {}};
+    });
+    ext::set_on_pop(*undo, [&](const loro::UndoOrRedo &, const loro::CounterSpan &,
+                               const loro::UndoItemMeta &meta) { popped = meta.value; });
+
+    auto text = doc->get_text(root("body"));
+    text->insert(0, "x");
+    doc->commit();
+    undo->record_new_checkpoint();
+    text->insert(text->len_unicode(), "y");
+    doc->commit();
+    undo->record_new_checkpoint();
+
+    if (!undo->undo()) return fail("undo() returned false");
+    if (!popped.has_value()) return fail("on_pop did not deliver a meta value");
+    if (!std::holds_alternative<LoroValue::kBinary>(popped->get_variant()))
+        return fail("undo meta value did not round-trip as kBinary (lossy bridge!)");
+    auto got = ext::value_as_binary(*popped);
+    if (!got.has_value() || *got != stored) return fail("undo meta binary bytes wrong");
+    return true;
+}
+
 bool run() {
     if (!test_value_helpers()) return false;
     if (!test_double_fidelity()) return false;
     if (!test_binary_fidelity()) return false;
     if (!test_list_value_fidelity()) return false;
+    if (!test_import_status_success()) return false;
+    if (!test_import_status_pending()) return false;
+    if (!test_undo_meta_value_fidelity()) return false;
     return true;
 }
 

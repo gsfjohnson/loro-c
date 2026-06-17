@@ -23,6 +23,7 @@ pub mod doc;
 pub mod error;
 pub mod event;
 pub mod fractional_index;
+pub mod import_status;
 // The `loro` dependency unconditionally enables its `jsonpath` feature (see Cargo.toml),
 // so this module is always available.
 pub mod jsonpath;

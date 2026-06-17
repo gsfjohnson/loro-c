@@ -394,6 +394,50 @@ pub extern "C" fn loro_doc_import(
     })
 }
 
+/// Shared tail for the `loro_doc_import_*_status` functions (RESHAPE Phase 4): on `Ok(status)`,
+/// boxes the [`ImportStatus`](crate::import_status::LoroImportStatus) into `*out` (when `out`
+/// is non-null) and returns `LORO_OK`; on `Err`, records the loro error. Free a written `*out`
+/// with `loro_import_status_free`.
+fn finish_import_status(
+    result: Result<loro::ImportStatus, loro::LoroError>,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    match result {
+        Ok(status) => {
+            if !out.is_null() {
+                unsafe { out.write(crate::import_status::into_raw(status)) };
+            }
+            LoroStatus::LORO_OK
+        }
+        Err(e) => record_loro_error(&e),
+    }
+}
+
+/// Like [`loro_doc_import`], but also surfaces the import's [`ImportStatus`] (per-peer
+/// success / pending op-counter spans) into `*out` on success (RESHAPE Phase 4). `out` may be
+/// null to ignore the status; a written `*out` must be freed with `loro_import_status_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_import_status(
+    doc: *mut LoroDoc,
+    data: *const u8,
+    len: usize,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if data.is_null() && len != 0 {
+            set_last_error("null data pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
+        finish_import_status(doc.inner().import(bytes), out)
+    })
+}
+
 /// Serializes the entire document state (resolving nested containers) to JSON bytes into
 /// `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
 #[no_mangle]
@@ -441,8 +485,9 @@ pub extern "C" fn loro_doc_get_deep_value(
 // JSON updates are the peer-portable, human-readable interchange format used to interop with
 // JS / other-language peers that don't speak the binary encoding. Exports marshal the loro
 // `JsonSchema` / `JsonChange` types to JSON bytes via serde; imports parse a JSON string. As
-// with the binary `loro_doc_import`, the returned `ImportStatus` (success / pending ranges) is
-// not surfaced — fallible imports report only a `LoroStatus`.
+// with the binary `loro_doc_import`, the plain `loro_doc_import_json_updates` reports only a
+// `LoroStatus`; the `*_status` variant (RESHAPE Phase 4) additionally surfaces the returned
+// `ImportStatus` (success / pending ranges) via an out-param.
 // ---------------------------------------------------------------------------
 
 /// Imports JSON-format updates `(json, len)` (as produced by [`loro_doc_export_json_updates`]
@@ -463,6 +508,26 @@ pub extern "C" fn loro_doc_import_json_updates(
             Ok(_) => LoroStatus::LORO_OK,
             Err(e) => record_loro_error(&e),
         }
+    })
+}
+
+/// Like [`loro_doc_import_json_updates`], but also surfaces the import's [`ImportStatus`] into
+/// `*out` on success (RESHAPE Phase 4). `out` may be null; a written `*out` must be freed with
+/// `loro_import_status_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_import_json_updates_status(
+    doc: *mut LoroDoc,
+    json: *const c_char,
+    len: usize,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let s = match str_from_raw(json, len) {
+            Some(s) => s,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        finish_import_status(doc.inner().import_json_updates(s), out)
     })
 }
 
@@ -672,6 +737,51 @@ pub extern "C" fn loro_doc_import_batch(
     })
 }
 
+/// Like [`loro_doc_import_batch`], but also surfaces the import's [`ImportStatus`] into `*out`
+/// on success (RESHAPE Phase 4). `out` may be null; a written `*out` must be freed with
+/// `loro_import_status_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_import_batch_status(
+    doc: *mut LoroDoc,
+    datas: *const *const u8,
+    lens: *const usize,
+    count: usize,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if count != 0 && (datas.is_null() || lens.is_null()) {
+            set_last_error("null datas/lens pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let ptrs = if count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(datas, count) }
+        };
+        let lengths = if count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(lens, count) }
+        };
+        let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(count);
+        for (i, &len) in lengths.iter().enumerate() {
+            let ptr = ptrs[i];
+            if ptr.is_null() && len != 0 {
+                set_last_error("null blob pointer passed to loro_doc_import_batch_status");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+            let bytes = if len == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+            };
+            blobs.push(bytes);
+        }
+        finish_import_status(doc.inner().import_batch(&blobs), out)
+    })
+}
+
 /// Imports a snapshot or updates blob `(data, len)` while attaching `(origin, origin_len)` as
 /// the origin string on the resulting change event (handy for telemetry / event filtering).
 #[no_mangle]
@@ -701,6 +811,37 @@ pub extern "C" fn loro_doc_import_with(
             Ok(_) => LoroStatus::LORO_OK,
             Err(e) => record_loro_error(&e),
         }
+    })
+}
+
+/// Like [`loro_doc_import_with`], but also surfaces the import's [`ImportStatus`] into `*out`
+/// on success (RESHAPE Phase 4). `out` may be null; a written `*out` must be freed with
+/// `loro_import_status_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_import_with_status(
+    doc: *mut LoroDoc,
+    data: *const u8,
+    len: usize,
+    origin: *const c_char,
+    origin_len: usize,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if data.is_null() && len != 0 {
+            set_last_error("null data pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let origin = match str_from_raw(origin, origin_len) {
+            Some(s) => s,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
+        finish_import_status(doc.inner().import_with(bytes, origin), out)
     })
 }
 

@@ -19,6 +19,7 @@ use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::LoroDiffEvent;
 use crate::value::{str_from_raw, value_from_json, LoroBytes};
+use crate::value_typed;
 use loro::event::DiffEvent;
 use loro::{CounterSpan, UndoItemMeta, UndoManager, UndoOrRedo};
 use std::os::raw::{c_char, c_void};
@@ -307,6 +308,43 @@ fn top_value_json(value: Option<loro::LoroValue>, out: *mut LoroBytes) -> bool {
     }
 }
 
+/// Returns the metadata value attached to the top item of the undo stack as an owned typed
+/// `LoroValue*` (RESHAPE Phase 4), or null when the undo stack is empty or the handle is null.
+/// Typed counterpart to [`loro_undo_manager_top_undo_value_json`]: it preserves binary,
+/// integer-valued doubles, and the value/container distinction. A present-but-`Null` value is
+/// returned as a non-null `LoroValue*` wrapping `Null`, so a null return unambiguously means
+/// "no top undo item". Free the result with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_top_undo_value(
+    um: *const LoroUndoManager,
+) -> *mut value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let um = deref_or!(um, std::ptr::null_mut());
+        match um.0.top_undo_value() {
+            Some(v) => value_typed::into_raw(v),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Returns the metadata value attached to the top item of the redo stack as an owned typed
+/// `LoroValue*` (RESHAPE Phase 4), or null when the redo stack is empty or the handle is null.
+/// Typed counterpart to [`loro_undo_manager_top_redo_value_json`]; see
+/// [`loro_undo_manager_top_undo_value`] for the null-vs-`Null` distinction. Free the result
+/// with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_top_redo_value(
+    um: *const LoroUndoManager,
+) -> *mut value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let um = deref_or!(um, std::ptr::null_mut());
+        match um.0.top_redo_value() {
+            Some(v) => value_typed::into_raw(v),
+            None => std::ptr::null_mut(),
+        }
+    })
+}
+
 /// Records a checkpoint so subsequent edits become a new, separately-undoable item.
 #[no_mangle]
 pub extern "C" fn loro_undo_manager_record_new_checkpoint(
@@ -541,5 +579,48 @@ pub extern "C" fn loro_undo_meta_get_value_json(
                 LoroStatus::LORO_ERR_ENCODE
             }
         }
+    })
+}
+
+/// Sets the undo item's metadata value from an owned typed `LoroValue*` (RESHAPE Phase 4).
+/// Call this from an on_push listener. The value is cloned in — the caller still owns (and
+/// must free) `value`. Typed counterpart to [`loro_undo_meta_set_value_json`]: it preserves
+/// binary, integer-valued doubles, and the value/container distinction. Returns
+/// `LORO_ERR_INVALID_ARG` on a null handle or value.
+#[no_mangle]
+pub extern "C" fn loro_undo_meta_set_value(
+    meta: *mut LoroUndoMeta,
+    value: *const value_typed::LoroValue,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let meta = match unsafe { (meta as *mut UndoItemMeta).as_mut() } {
+            Some(m) => m,
+            None => {
+                set_last_error("null undo meta pointer passed to loro-c-api");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+        };
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        meta.set_value(value.inner().clone());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns the undo item's metadata value as an owned typed `LoroValue*` (RESHAPE Phase 4),
+/// or null on a null handle. Call this from an on_pop listener. Typed counterpart to
+/// [`loro_undo_meta_get_value_json`]; free the result with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_undo_meta_get_value(
+    meta: *const LoroUndoMeta,
+) -> *mut value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let meta = match unsafe { (meta as *const UndoItemMeta).as_ref() } {
+            Some(m) => m,
+            None => {
+                set_last_error("null undo meta pointer passed to loro-c-api");
+                return std::ptr::null_mut();
+            }
+        };
+        value_typed::into_raw(meta.value.clone())
     })
 }

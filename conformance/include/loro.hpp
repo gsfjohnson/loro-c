@@ -96,6 +96,7 @@ struct Subscription;
 struct EphemeralStore;
 struct EphemeralStoreEvent;
 struct EphemeralSubscriber;
+struct Awareness;
 struct VersionVector;
 struct Frontiers;
 
@@ -3327,6 +3328,119 @@ struct EphemeralStore {
 private:
     explicit EphemeralStore(::LoroEphemeralStore *raw) : raw_(raw) {}
     ::LoroEphemeralStore *raw_;
+};
+
+// --------------------------------------------------------- awareness (Phase 6, legacy)
+//
+// Per-peer presence (loro-cpp `Awareness`), deprecated upstream in favour of `EphemeralStore`
+// but reproduced for faithful drop-in parity. Values are carried typed (no JSON) via the
+// `loro_awareness_*_value` C ABI; peer-id lists cross as raw little-endian `u64` buffers.
+
+namespace detail {
+/// Decodes a little-endian `u64` buffer (as produced by `loro_awareness_peer_ids` /
+/// `loro_awareness_apply_with_changes`) into a vector of peer ids.
+inline std::vector<uint64_t> u64s_from_bytes(const Bytes &b) {
+    std::vector<uint8_t> raw = b.to_vector();
+    std::vector<uint64_t> out;
+    out.reserve(raw.size() / 8);
+    for (size_t i = 0; i + 8 <= raw.size(); i += 8) {
+        uint64_t v = 0;
+        for (size_t j = 0; j < 8; ++j) v |= static_cast<uint64_t>(raw[i + j]) << (8 * j);
+        out.push_back(v);
+    }
+    return out;
+}
+}  // namespace detail
+
+/// A peer's awareness entry (loro-cpp `PeerInfo`): typed `state` plus its logical `counter` and
+/// local `timestamp`.
+struct PeerInfo {
+    LoroValue state;
+    int32_t counter;
+    int64_t timestamp;
+};
+
+/// The peers whose state changed in an [`Awareness::apply`] (loro-cpp `AwarenessPeerUpdate`).
+struct AwarenessPeerUpdate {
+    std::vector<uint64_t> updated;
+    std::vector<uint64_t> added;
+};
+
+/// Out-of-document per-peer presence with timeout-based expiry (loro-cpp `Awareness`).
+struct Awareness {
+    static std::shared_ptr<Awareness> init(uint64_t peer, int64_t timeout) {
+        ::LoroAwareness *a = loro_awareness_new(peer, timeout);
+        if (!a) throw LoroError("loro_awareness_new returned null");
+        return std::shared_ptr<Awareness>(new Awareness(a));
+    }
+
+    uint64_t peer() { return loro_awareness_peer(raw_); }
+
+    void set_local_state(const std::shared_ptr<LoroValueLike> &value) {
+        LoroValue v = value->as_loro_value();
+        detail::CValue cv(detail::to_c_value(v));
+        detail::check(loro_awareness_set_local_state_value(raw_, cv.get()));
+    }
+
+    std::optional<LoroValue> get_local_state() {
+        ::LoroValue *cv = loro_awareness_get_local_state_value(raw_);
+        if (!cv) return std::nullopt;
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
+
+    std::vector<uint8_t> encode(const std::vector<uint64_t> &peers) {
+        detail::Bytes b;
+        detail::check(loro_awareness_encode(raw_, peers.data(), peers.size(), b.out()));
+        return b.to_vector();
+    }
+
+    std::vector<uint8_t> encode_all() {
+        detail::Bytes b;
+        detail::check(loro_awareness_encode_all(raw_, b.out()));
+        return b.to_vector();
+    }
+
+    AwarenessPeerUpdate apply(const std::vector<uint8_t> &encoded_peers_info) {
+        detail::Bytes updated;
+        detail::Bytes added;
+        detail::check(loro_awareness_apply_with_changes(raw_, encoded_peers_info.data(),
+                                                        encoded_peers_info.size(), updated.out(),
+                                                        added.out()));
+        return AwarenessPeerUpdate{detail::u64s_from_bytes(updated),
+                                   detail::u64s_from_bytes(added)};
+    }
+
+    std::unordered_map<uint64_t, PeerInfo> get_all_states() {
+        detail::Bytes ids_bytes;
+        detail::check(loro_awareness_peer_ids(raw_, ids_bytes.out()));
+        std::unordered_map<uint64_t, PeerInfo> states;
+        for (uint64_t peer : detail::u64s_from_bytes(ids_bytes)) {
+            ::LoroValue *cv = loro_awareness_get_peer_state_value(raw_, peer);
+            if (!cv) continue;  // raced out between peer_ids and the read
+            detail::CValue g(cv);
+            LoroValue state = detail::from_c_value(cv);
+            int32_t counter = 0;
+            int64_t timestamp = 0;
+            if (!loro_awareness_get_peer_info(raw_, peer, &counter, &timestamp)) continue;
+            states.emplace(peer, PeerInfo{std::move(state), counter, timestamp});
+        }
+        return states;
+    }
+
+    std::vector<uint64_t> remove_outdated() {
+        detail::Bytes b;
+        detail::check(loro_awareness_remove_outdated_ids(raw_, b.out()));
+        return detail::u64s_from_bytes(b);
+    }
+
+    ~Awareness() { loro_awareness_free(raw_); }
+    Awareness(const Awareness &) = delete;
+    Awareness &operator=(const Awareness &) = delete;
+
+private:
+    explicit Awareness(::LoroAwareness *raw) : raw_(raw) {}
+    ::LoroAwareness *raw_;
 };
 
 // ------------------------------------------------------------- undo manager (Phase 4)

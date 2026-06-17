@@ -774,6 +774,62 @@ enum LoroStatus loro_awareness_get_all_states(const struct LoroAwareness *aw,
                                               struct LoroBytes *out);
 
 /**
+ * Sets the local peer's state to a *clone* of the typed `value` (no JSON). Borrows `value`
+ * (the caller still owns it). The typed counterpart to [`loro_awareness_set_local_state`].
+ */
+enum LoroStatus loro_awareness_set_local_state_value(struct LoroAwareness *aw,
+                                                     const struct LoroValue *value);
+
+/**
+ * Returns the local peer's state as an owned typed `LoroValue*` (no JSON), or null if no local
+ * state has been set. Free the result with `loro_value_free`. The typed counterpart to
+ * [`loro_awareness_get_local_state`].
+ */
+struct LoroValue *loro_awareness_get_local_state_value(const struct LoroAwareness *aw);
+
+/**
+ * Applies encoded peer state `(data, len)` and reports which peers changed. Writes the updated
+ * and added peer ids as little-endian `u64` buffers into `*out_updated` and `*out_added`
+ * respectively; both are only written on `LORO_OK` and must be freed with `loro_bytes_free`.
+ */
+enum LoroStatus loro_awareness_apply_with_changes(struct LoroAwareness *aw,
+                                                  const uint8_t *data,
+                                                  uintptr_t len,
+                                                  struct LoroBytes *out_updated,
+                                                  struct LoroBytes *out_added);
+
+/**
+ * Removes peers whose last update is older than the timeout and writes the removed peer ids as a
+ * little-endian `u64` buffer into `*out`. `*out` is only written on `LORO_OK`; free it with
+ * `loro_bytes_free`. The reporting counterpart to [`loro_awareness_remove_outdated`].
+ */
+enum LoroStatus loro_awareness_remove_outdated_ids(struct LoroAwareness *aw, struct LoroBytes *out);
+
+/**
+ * Writes the ids of all peers with known state as a little-endian `u64` buffer into `*out`.
+ * `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. Pair with
+ * [`loro_awareness_get_peer_state_value`] / [`loro_awareness_get_peer_info`] to read each peer's
+ * state typed (the typed counterpart to [`loro_awareness_get_all_states`]).
+ */
+enum LoroStatus loro_awareness_peer_ids(const struct LoroAwareness *aw, struct LoroBytes *out);
+
+/**
+ * Returns `peer`'s state as an owned typed `LoroValue*` (no JSON), or null if `peer` has no
+ * known state. Free the result with `loro_value_free`.
+ */
+struct LoroValue *loro_awareness_get_peer_state_value(const struct LoroAwareness *aw,
+                                                      uint64_t peer);
+
+/**
+ * Writes `peer`'s `counter` and `timestamp` into `*out_counter` / `*out_timestamp`. Returns
+ * `true` if `peer` has known state (both outputs written), `false` otherwise (outputs untouched).
+ */
+bool loro_awareness_get_peer_info(const struct LoroAwareness *aw,
+                                  uint64_t peer,
+                                  int32_t *out_counter,
+                                  int64_t *out_timestamp);
+
+/**
  * Creates an ephemeral store with an inactivity `timeout` in milliseconds. Release with
  * [`loro_ephemeral_store_free`].
  */

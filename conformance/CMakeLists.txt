@@ -33,11 +33,14 @@ message(STATUS "loro-c conformance spike: building loro-cpp tests from ${LORO_CP
 # Phase 5 (versions / frontiers / cursors / jsonpath / fractional index): test_version_vector
 # (VersionVector + Frontiers algebra), test_fractional_index (FractionalIndex + tree positions),
 # test_jsonpath (jsonpath / get_by_path / get_by_str_path).
+# Phase 6 (awareness): test_awareness exercises the legacy per-peer presence type (Awareness /
+# PeerInfo / AwarenessPeerUpdate) over the typed loro_awareness_*_value C ABI.
 set(_loro_conformance_tests
     test_smoke test_text test_map test_ephemeral_store
     test_list test_movable_list test_tree test_counter test_doc
     test_subscriptions test_undo
-    test_version_vector test_fractional_index test_jsonpath)
+    test_version_vector test_fractional_index test_jsonpath
+    test_awareness)
 
 foreach(_t IN LISTS _loro_conformance_tests)
     add_executable(conformance_${_t} "${LORO_CPP_DIR}/tests/${_t}.cpp")

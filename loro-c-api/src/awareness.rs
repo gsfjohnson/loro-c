@@ -13,8 +13,11 @@
 //!   last-write-wins map with `added`/`updated`/`removed` change events and local-update
 //!   notifications for syncing.
 //!
-//! Values cross the boundary as JSON (consistent with the rest of the API). Subscriptions
-//! reuse the shared `LoroSubscription` handle from `event.rs`.
+//! Values cross the boundary as JSON (consistent with the rest of the API), but both types also
+//! expose a **typed, no-JSON** surface (`*_value` / `get_peer_*`) carrying values as opaque
+//! `LoroValue*` handles so binary, integer-valued doubles, and the value-vs-container distinction
+//! survive — this is what the loro-cpp-shaped C++ wrapper is built on. Subscriptions reuse the
+//! shared `LoroSubscription` handle from `event.rs`.
 #![allow(deprecated)]
 
 use crate::error::{set_last_error, LoroStatus};
@@ -238,6 +241,200 @@ pub extern "C" fn loro_awareness_get_all_states(
                 set_last_error(format!("failed to serialize awareness states: {e}"));
                 LoroStatus::LORO_ERR_ENCODE
             }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Awareness — typed (no-JSON) surface for the loro-cpp-shaped C++ wrapper.
+//
+// The JSON functions above are lossy (binary → list, `2.0` → i64) and discard the structured
+// results of `apply`/`remove_outdated`/`get_all_states`. These typed variants carry values as
+// opaque `LoroValue*` handles (preserving binary/doubles/value-vs-container) and return peer-id
+// lists as a raw little-endian `u64` buffer (lossless; JSON numbers would risk u64 precision
+// loss). The legacy JSON functions are kept for the existing clean-API header.
+// ---------------------------------------------------------------------------
+
+/// Packs peer ids as a contiguous little-endian `u64` buffer (8 bytes each).
+fn u64s_to_le_bytes(ids: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ids.len() * 8);
+    for id in ids {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
+    out
+}
+
+/// Sets the local peer's state to a *clone* of the typed `value` (no JSON). Borrows `value`
+/// (the caller still owns it). The typed counterpart to [`loro_awareness_set_local_state`].
+#[no_mangle]
+pub extern "C" fn loro_awareness_set_local_state_value(
+    aw: *mut LoroAwareness,
+    value: *const crate::value_typed::LoroValue,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let aw = match unsafe { aw.as_mut() } {
+            Some(a) => a,
+            None => {
+                set_last_error("null pointer passed to loro-c-api");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+        };
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        aw.0.set_local_state(value.inner().clone());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns the local peer's state as an owned typed `LoroValue*` (no JSON), or null if no local
+/// state has been set. Free the result with `loro_value_free`. The typed counterpart to
+/// [`loro_awareness_get_local_state`].
+#[no_mangle]
+pub extern "C" fn loro_awareness_get_local_state_value(
+    aw: *const LoroAwareness,
+) -> *mut crate::value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let aw = deref_or!(aw, std::ptr::null_mut());
+        match aw.0.get_local_state() {
+            Some(v) => crate::value_typed::into_raw(v),
+            None => {
+                set_last_error("no local awareness state set");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Applies encoded peer state `(data, len)` and reports which peers changed. Writes the updated
+/// and added peer ids as little-endian `u64` buffers into `*out_updated` and `*out_added`
+/// respectively; both are only written on `LORO_OK` and must be freed with `loro_bytes_free`.
+#[no_mangle]
+pub extern "C" fn loro_awareness_apply_with_changes(
+    aw: *mut LoroAwareness,
+    data: *const u8,
+    len: usize,
+    out_updated: *mut LoroBytes,
+    out_added: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let aw = match unsafe { aw.as_mut() } {
+            Some(a) => a,
+            None => {
+                set_last_error("null pointer passed to loro-c-api");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+        };
+        if out_updated.is_null() || out_added.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        if data.is_null() && len != 0 {
+            set_last_error("null data pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
+        let (updated, added) = aw.0.apply(bytes);
+        unsafe {
+            out_updated.write(LoroBytes::from_vec(u64s_to_le_bytes(&updated)));
+            out_added.write(LoroBytes::from_vec(u64s_to_le_bytes(&added)));
+        }
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Removes peers whose last update is older than the timeout and writes the removed peer ids as a
+/// little-endian `u64` buffer into `*out`. `*out` is only written on `LORO_OK`; free it with
+/// `loro_bytes_free`. The reporting counterpart to [`loro_awareness_remove_outdated`].
+#[no_mangle]
+pub extern "C" fn loro_awareness_remove_outdated_ids(
+    aw: *mut LoroAwareness,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let aw = match unsafe { aw.as_mut() } {
+            Some(a) => a,
+            None => {
+                set_last_error("null pointer passed to loro-c-api");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+        };
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let removed = aw.0.remove_outdated();
+        unsafe { out.write(LoroBytes::from_vec(u64s_to_le_bytes(&removed))) };
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Writes the ids of all peers with known state as a little-endian `u64` buffer into `*out`.
+/// `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`. Pair with
+/// [`loro_awareness_get_peer_state_value`] / [`loro_awareness_get_peer_info`] to read each peer's
+/// state typed (the typed counterpart to [`loro_awareness_get_all_states`]).
+#[no_mangle]
+pub extern "C" fn loro_awareness_peer_ids(
+    aw: *const LoroAwareness,
+    out: *mut LoroBytes,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let aw = deref_or!(aw, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let ids: Vec<u64> = aw.0.get_all_states().keys().copied().collect();
+        unsafe { out.write(LoroBytes::from_vec(u64s_to_le_bytes(&ids))) };
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns `peer`'s state as an owned typed `LoroValue*` (no JSON), or null if `peer` has no
+/// known state. Free the result with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_awareness_get_peer_state_value(
+    aw: *const LoroAwareness,
+    peer: u64,
+) -> *mut crate::value_typed::LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let aw = deref_or!(aw, std::ptr::null_mut());
+        match aw.0.get_all_states().get(&peer) {
+            Some(info) => crate::value_typed::into_raw(info.state.clone()),
+            None => {
+                set_last_error("no awareness state for peer");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Writes `peer`'s `counter` and `timestamp` into `*out_counter` / `*out_timestamp`. Returns
+/// `true` if `peer` has known state (both outputs written), `false` otherwise (outputs untouched).
+#[no_mangle]
+pub extern "C" fn loro_awareness_get_peer_info(
+    aw: *const LoroAwareness,
+    peer: u64,
+    out_counter: *mut i32,
+    out_timestamp: *mut i64,
+) -> bool {
+    ffi_guard!(false, {
+        let aw = deref_or!(aw, false);
+        if out_counter.is_null() || out_timestamp.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return false;
+        }
+        match aw.0.get_all_states().get(&peer) {
+            Some(info) => {
+                unsafe {
+                    out_counter.write(info.counter);
+                    out_timestamp.write(info.timestamp);
+                }
+                true
+            }
+            None => false,
         }
     })
 }

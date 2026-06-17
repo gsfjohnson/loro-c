@@ -1,29 +1,32 @@
 /*
- * loro/loro_ext.hpp — loro-cpp-shaped ergonomics layer (Phases 1–2 subset).
+ * loro/loro_ext.hpp — loro-cpp-shaped ergonomics layer.
  *
- * Ported near-verbatim from ../loro-cpp/include/loro/loro_ext.hpp. Pure C++ over the typed
- * `loro::LoroValue` / container wrappers from <loro.hpp>, with no C ABI of their own.
- *   Phase 1: LoroValue construction / inspection / formatting helpers.
- *   Phase 2: ContainerId / ContainerIdLike factories (root_*, container_id_like) and the
- *            templated container insertion helpers (insert_container<T> /
- *            get_or_create_container<T> / set_container<T>) over the new container surface.
- * The lambda→callback adapters, subscribe_* shortcuts, Result/try_call, and undo helpers are
- * added in later phases (they need the subscription / undo surface).
+ * Ported near-verbatim from loro-cpp's include/loro/loro_ext.hpp. Pure C++ over the typed
+ * `loro::LoroValue` / container wrappers from <loro.hpp>, with no C ABI of their own:
+ *   - LoroValue construction / inspection / formatting helpers.
+ *   - ContainerId / ContainerIdLike factories (root_*, container_id_like) and the templated
+ *     container insertion helpers (insert_container<T> / get_or_create_container<T> /
+ *     set_container<T>).
+ *   - Lambda → callback-interface adapters (on_diff, on_local_update, on_undo_push/pop, ...)
+ *     and the subscribe_* / set_on_push / set_on_pop shortcuts.
  */
-#ifndef LORO_CONFORMANCE_LORO_EXT_HPP
-#define LORO_CONFORMANCE_LORO_EXT_HPP
+#ifndef LORO_LORO_EXT_HPP
+#define LORO_LORO_EXT_HPP
 
 #include <loro.hpp>
 
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace loro {
@@ -491,7 +494,91 @@ inline void set_on_pop(
     um.set_on_pop(on_undo_pop(std::move(fn)));
 }
 
+// ============================================================================
+// Result<T> / try_call — fallible-method adapter
+// ============================================================================
+//
+// The wrappers throw LoroError (a runtime_error subclass) on Rust failure. `try_call`
+// wraps a callable and converts the throw into a Result<T> so callers can branch without
+// writing their own try/catch. LoroError is preserved as a std::exception_ptr; rethrow()
+// restores it. Ported from ../loro-cpp/include/loro/loro_ext.hpp.
+
+template <class T>
+class Result {
+public:
+    Result(T v) : data_(std::move(v)) {}
+    Result(std::exception_ptr e) : data_(e) {}
+
+    bool ok() const noexcept { return std::holds_alternative<T>(data_); }
+    explicit operator bool() const noexcept { return ok(); }
+
+    T &value() & { return std::get<T>(data_); }
+    const T &value() const & { return std::get<T>(data_); }
+    T &&value() && { return std::move(std::get<T>(data_)); }
+
+    std::exception_ptr error() const noexcept {
+        if (auto *p = std::get_if<std::exception_ptr>(&data_)) return *p;
+        return {};
+    }
+
+    void rethrow() const {
+        if (auto *p = std::get_if<std::exception_ptr>(&data_)) {
+            std::rethrow_exception(*p);
+        }
+    }
+
+    std::string error_what() const {
+        if (auto *p = std::get_if<std::exception_ptr>(&data_)) {
+            try { std::rethrow_exception(*p); }
+            catch (const std::exception &e) { return e.what(); }
+            catch (...) { return "<non-std exception>"; }
+        }
+        return {};
+    }
+
+private:
+    std::variant<T, std::exception_ptr> data_;
+};
+
+template <>
+class Result<void> {
+public:
+    Result() = default;
+    Result(std::exception_ptr e) : err_(e) {}
+
+    bool ok() const noexcept { return !err_; }
+    explicit operator bool() const noexcept { return ok(); }
+
+    std::exception_ptr error() const noexcept { return err_; }
+    void rethrow() const { if (err_) std::rethrow_exception(err_); }
+
+    std::string error_what() const {
+        if (!err_) return {};
+        try { std::rethrow_exception(err_); }
+        catch (const std::exception &e) { return e.what(); }
+        catch (...) { return "<non-std exception>"; }
+    }
+
+private:
+    std::exception_ptr err_{};
+};
+
+template <class F>
+inline auto try_call(F &&f) -> Result<std::invoke_result_t<F>> {
+    using R = std::invoke_result_t<F>;
+    try {
+        if constexpr (std::is_void_v<R>) {
+            std::forward<F>(f)();
+            return Result<void>{};
+        } else {
+            return Result<R>{std::forward<F>(f)()};
+        }
+    } catch (...) {
+        return Result<R>{std::current_exception()};
+    }
+}
+
 }  // namespace ext
 }  // namespace loro
 
-#endif  // LORO_CONFORMANCE_LORO_EXT_HPP
+#endif  // LORO_LORO_EXT_HPP

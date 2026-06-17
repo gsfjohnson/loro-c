@@ -1,69 +1,42 @@
-// M2: LoroCounter — additive increment/decrement and a two-peer merge (the CRDT counter
-// property: concurrent increments sum).
+// Exercises LoroCounter: increment / decrement / get_value across two
+// peers + sync via export/import.
+#include "test_helpers.hpp"
 
-#include <loro/loro.hpp>
+using namespace loro_test;
 
-#include <cstdio>
+namespace {
 
-static int failures = 0;
+bool run() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(1);
+    auto counter = doc->get_counter(root("clicks"));
 
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__,      \
-                         __LINE__, #cond);                                     \
-            ++failures;                                                        \
-        }                                                                      \
-    } while (0)
+    if (counter->get_value() != 0.0) return fail("initial counter not 0");
+    if (!counter->is_attached()) return fail("counter from doc should be attached");
 
-static bool approx(double a, double b) { return (a - b) < 1e-9 && (b - a) < 1e-9; }
+    counter->increment(5.0);
+    counter->increment(3.5);
+    counter->decrement(1.0);
+    if (counter->get_value() != 7.5) return fail("counter value != 7.5");
 
-static void test_basic() {
-    loro::Doc doc;
-    loro::Counter c = doc.get_counter("c");
-    CHECK(approx(c.value(), 0.0));
+    auto doc2 = loro::LoroDoc::init();
+    doc2->set_peer_id(2);
+    auto counter2 = doc2->get_counter(root("clicks"));
+    counter2->increment(2.5);
 
-    c.increment(5.0);
-    c.increment(2.5);
-    doc.commit();
-    CHECK(approx(c.value(), 7.5));
+    doc2->import(doc->export_snapshot());
+    doc->import(doc2->export_snapshot());
 
-    c.decrement(3.5);
-    doc.commit();
-    CHECK(approx(c.value(), 4.0));
-}
-
-// Two peers increment the same counter concurrently; after exchanging updates both
-// converge to the sum.
-static void test_merge() {
-    loro::Doc alice;
-    alice.set_peer_id(1);
-    loro::Doc bob;
-    bob.set_peer_id(2);
-
-    loro::Counter ac = alice.get_counter("c");
-    ac.increment(10.0);
-    alice.commit();
-
-    loro::Counter bc = bob.get_counter("c");
-    bc.increment(5.0);
-    bob.commit();
-
-    alice.import(bob.export_updates());
-    bob.import(alice.export_updates());
-
-    CHECK(approx(alice.get_counter("c").value(), 15.0));
-    CHECK(approx(bob.get_counter("c").value(), 15.0));
-}
-
-int main() {
-    test_basic();
-    test_merge();
-
-    if (failures == 0) {
-        std::puts("test_counter: OK");
-        return 0;
+    if (counter->get_value() != counter2->get_value()) {
+        return fail("counters did not converge after sync");
     }
-    std::fprintf(stderr, "test_counter: %d failure(s)\n", failures);
-    return 1;
+    if (counter->get_value() != 10.0) {
+        return fail("converged value != 10.0");
+    }
+
+    return true;
 }
+
+} // namespace
+
+LORO_TEST_MAIN(run)

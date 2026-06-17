@@ -1,37 +1,37 @@
-// basic_text — the canonical M1 flow: edit a text container, export a snapshot,
-// import it into a fresh document, and read the value back.
+// basic_text — minimal LoroDoc + LoroText edit + snapshot round-trip,
+// using the loro_ext.hpp ergonomics layer.
 //
-// Build (from the repo root, examples enabled):
-//   cmake -S . -B build -DLORO_BUILD_EXAMPLES=ON
-//   cmake --build build
-//   ./build/examples/basic_text
+// Demonstrates: doc init, root-text access via ext::root(), text edits,
+// export_snapshot, import into a fresh doc, readback.
 
-#include <loro/loro.hpp>
+#include <loro.hpp>
+#include <loro/loro_ext.hpp>
 
-#include <cstdio>
+#include <iostream>
+
+namespace ext = loro::ext;
 
 int main() {
-    std::printf("loro %s\n", loro::version().c_str());
+    auto doc = loro::LoroDoc::init();
 
-    // Author a document.
-    loro::Doc doc;
-    loro::Text text = doc.get_text("greeting");
-    text.insert(0, "hello");
-    text.insert(5, " world");
-    doc.commit();
+    auto text = doc->get_text(ext::root("body"));
+    text->insert(0, "hello");
+    text->insert(5, ", world");
 
-    std::printf("authored: %s\n", text.to_string().c_str());
-    std::printf("json:     %s\n", doc.to_json().c_str());
+    std::cout << "text: " << text->to_string() << "\n";
+    std::cout << "len:  " << text->len_unicode() << "\n";
 
-    // Snapshot it (full history + state).
-    std::vector<std::uint8_t> snapshot = doc.export_snapshot();
-    std::printf("snapshot: %zu bytes\n", snapshot.size());
+    auto snapshot = doc->export_snapshot();
+    std::cout << "snapshot: " << snapshot.size() << " bytes\n";
 
-    // Restore into an independent document and read it back.
-    loro::Doc restored;
-    restored.import(snapshot);
-    const std::string round_trip = restored.get_text("greeting").to_string();
-    std::printf("restored: %s\n", round_trip.c_str());
+    auto doc2 = loro::LoroDoc::init();
+    doc2->import(snapshot);
+    auto text2 = doc2->get_text(ext::root("body"));
 
-    return round_trip == "hello world" ? 0 : 1;
+    if (text2->to_string() != "hello, world") {
+        std::cerr << "round-trip mismatch: " << text2->to_string() << "\n";
+        return 1;
+    }
+    std::cout << "round-trip ok\n";
+    return 0;
 }

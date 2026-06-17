@@ -1,61 +1,41 @@
-// subscribe_events — the M3 flow: subscribe to a document, edit a container, and observe
-// the DiffEvent that fires on commit (trigger kind, per-container target, JSON delta).
-// Dropping the Subscription unsubscribes; no further events fire.
+// subscribe_events — observe text edits via the lambda subscription helpers.
 //
-// Build (from the repo root, examples enabled):
-//   cmake -S . -B build -DLORO_BUILD_EXAMPLES=ON
-//   cmake --build build
-//   ./build/examples/subscribe_events
+// Demonstrates: subscribe_root_lambda, subscribe_local_update_lambda,
+// Subscription RAII, basic event counting.
 
-#include <loro/loro.hpp>
+#include <loro.hpp>
+#include <loro/loro_ext.hpp>
 
-#include <cstdio>
+#include <atomic>
+#include <iostream>
+
+namespace ext = loro::ext;
 
 int main() {
-    std::printf("loro %s\n", loro::version().c_str());
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(7);
 
-    loro::Doc doc;
-    loro::Text text = doc.get_text("greeting");
+    std::atomic<int> diff_events{0};
+    std::atomic<int> local_updates{0};
 
-    int events = 0;
+    auto sub_root = ext::subscribe_root(*doc,
+        [&](const loro::DiffEvent &) { diff_events.fetch_add(1); });
 
-    // subscribe_root fires for any committed change in the document. The DiffEvent (and the
-    // ContainerDiff values obtained from it) are only valid for the duration of the callback.
-    loro::Subscription sub = doc.subscribe_root([&](const loro::DiffEvent& ev) {
-        ++events;
-        const bool local = ev.triggered_by() == LORO_EVENT_TRIGGER_LOCAL;
-        std::printf("event #%d: triggered_by=%s, %zu container diff(s)\n",
-                    events, local ? "local" : "remote", ev.size());
-        for (std::size_t i = 0; i < ev.size(); ++i) {
-            loro::ContainerDiff d = ev[i];
-            std::printf("  target=%s kind=%d delta=%s\n",
-                        d.target().c_str(), static_cast<int>(d.kind()), d.to_json().c_str());
-        }
-    });
+    auto sub_local = ext::subscribe_local_update(*doc,
+        [&](const std::vector<uint8_t> &) { local_updates.fetch_add(1); });
 
-    // Each commit delivers one event describing the batched changes since the last commit.
-    text.insert(0, "hello");
-    doc.commit();
+    auto text = doc->get_text(ext::root("body"));
+    text->insert(0, "hi");
+    doc->commit();
+    text->insert(2, "!");
+    doc->commit();
 
-    text.insert(5, " world");
-    doc.commit();
+    std::cout << "diff events:   " << diff_events.load() << "\n";
+    std::cout << "local updates: " << local_updates.load() << "\n";
 
-    {
-        // Scoped subscription: it unsubscribes when `gone` is destroyed at the end of the block.
-        int scoped = 0;
-        loro::Subscription gone = doc.subscribe_root([&](const loro::DiffEvent&) { ++scoped; });
-        text.insert(11, "!");
-        doc.commit();
-        // Both subscriptions saw this commit.
-        std::printf("scoped subscription saw %d event(s)\n", scoped);
+    if (diff_events.load() == 0 || local_updates.load() == 0) {
+        std::cerr << "expected at least one of each event\n";
+        return 1;
     }
-
-    // `gone` is unsubscribed now; only the root subscription remains.
-    const int before = events;
-    text.remove(0, 6);  // drop "hello "
-    doc.commit();
-    std::printf("final text: %s\n", text.to_string().c_str());
-
-    // The root subscription fired for every commit (4); the scoped one only for its single commit.
-    return (events == 4 && events == before + 1) ? 0 : 1;
+    return 0;
 }

@@ -131,9 +131,15 @@ loro-cpp; these are **dropped** unless a specific one is worth keeping as an add
   `test_fractional_index`, `test_jsonpath`.
 - **Phase 6 — Awareness (0–2d, conditional).** Only if the app uses `Awareness` over
   `EphemeralStore` (both libs mark it legacy). Gate: `test_awareness`.
-- **Phase 7 — Migrate loro-c's own examples/ + tests/.** Replace the clean-API examples/tests
-  with the loro-cpp-shaped suite (largely adopt `../loro-cpp/{examples,tests}/*`, adjusted for
-  loro-c's build). This becomes loro-c's permanent test suite.
+- **Phase 7 — Migrate loro-c's own examples/ + tests/. (done)** The spike header was promoted
+  in place: `conformance/include/loro.hpp` → `include/loro.hpp` and
+  `conformance/include/loro/loro_ext.hpp` → `include/loro/loro_ext.hpp` (installed as `<loro.hpp>`
+  / `<loro/loro_ext.hpp>`), the old clean-API `include/loro/loro.hpp` was deleted, and `conformance/`
+  + the `LORO_BUILD_CONFORMANCE` option were retired. `tests/` now holds the self-contained
+  loro-cpp-shaped suite (loro-cpp's 16 `test_*.cpp` + `test_helpers.hpp`, copied in, plus the
+  loro-c-authored `test_value_fidelity` and `test_cursor`, plus the pure-C `test_c_only`). `examples/`
+  adopts loro-cpp's three and ports loro-c's `rich_text` / `cursor_tracking` / `json_sync` to the new
+  API. This is loro-c's permanent test suite.
 
 **Explicit stubs (documented; throw `LoroError` if unexpectedly hit):**
 `UndoItemMeta.cursors` empty until proven needed; typed `Diff` payloads behind the envelope;

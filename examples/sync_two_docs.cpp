@@ -1,53 +1,43 @@
-// sync_two_docs — two peers edit independently, exchange their operation logs, and
-// converge to the same state. This is the CRDT property in miniature: concurrent edits
-// from different peers merge without a central server and without conflicts.
+// sync_two_docs — two docs converging via incremental update exchange.
 //
-// Build (from the repo root, examples enabled):
-//   cmake -S . -B build -DLORO_BUILD_EXAMPLES=ON
-//   cmake --build build
-//   ./build/examples/sync_two_docs
+// Demonstrates: distinct peer IDs, edits on each side, export_updates_from /
+// import on the peer, then verifying both docs settled to the same state.
 
-#include <loro/loro.hpp>
+#include <loro.hpp>
+#include <loro/loro_ext.hpp>
 
-#include <cstdio>
+#include <iostream>
+
+namespace ext = loro::ext;
 
 int main() {
-    // Two peers, each with a distinct peer id so their ops never alias.
-    loro::Doc alice;
-    alice.set_peer_id(1);
-    loro::Doc bob;
-    bob.set_peer_id(2);
+    auto a = loro::LoroDoc::init();
+    auto b = loro::LoroDoc::init();
+    a->set_peer_id(1);
+    b->set_peer_id(2);
 
-    // Start from a shared base: Alice writes, snapshots, Bob imports it.
-    loro::Text alice_text = alice.get_text("doc");
-    alice_text.insert(0, "shared");
-    alice.commit();
-    bob.import(alice.export_snapshot());
+    auto a_text = a->get_text(ext::root("body"));
+    auto b_text = b->get_text(ext::root("body"));
 
-    // Now they edit concurrently, without seeing each other's change yet.
-    alice_text.insert(6, " by-alice");  // -> "shared by-alice"
-    alice.commit();
+    a_text->insert(0, "hello ");
+    b_text->insert(0, "world");
 
-    loro::Text bob_text = bob.get_text("doc");
-    bob_text.insert(0, "bob: ");        // -> "bob: shared"
-    bob.commit();
+    // Exchange updates from each side's pre-sync state vector.
+    auto a_to_b = a->export_updates(b->state_vv());
+    auto b_to_a = b->export_updates(a->state_vv());
 
-    // Exchange operation logs in both directions and merge.
-    const std::vector<std::uint8_t> from_alice = alice.export_updates();
-    const std::vector<std::uint8_t> from_bob = bob.export_updates();
-    alice.import(from_bob);
-    bob.import(from_alice);
+    a->import(b_to_a);
+    b->import(a_to_b);
 
-    const std::string a = alice.get_text("doc").to_string();
-    const std::string b = bob.get_text("doc").to_string();
-    std::printf("alice: %s\n", a.c_str());
-    std::printf("bob:   %s\n", b.c_str());
+    auto a_final = a_text->to_string();
+    auto b_final = b_text->to_string();
+    std::cout << "a: " << a_final << "\n";
+    std::cout << "b: " << b_final << "\n";
 
-    // CRDT guarantee: both peers converge to byte-identical state.
-    if (a != b) {
-        std::fprintf(stderr, "divergence: peers did not converge\n");
+    if (a_final != b_final) {
+        std::cerr << "did not converge\n";
         return 1;
     }
-    std::printf("converged: %s\n", a.c_str());
+    std::cout << "converged: " << a_final << "\n";
     return 0;
 }

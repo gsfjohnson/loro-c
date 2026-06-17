@@ -1,24 +1,21 @@
 /*
- * loro.hpp — conformance spike (RESHAPE Phases 0–2).
+ * loro.hpp — loro-c's public C++ API: a faithful loro-cpp drop-in.
  *
  * A loro-cpp-SHAPED C++ API (namespace `loro`, shared_ptr ownership, typed `LoroValue`,
  * `init()` factories, callback interfaces) implemented as a thin wrapper over loro-c's
- * existing C ABI in <loro/loro.h>. Its purpose is to compile, link and pass loro-cpp's own
- * tests/test_*.cpp against this header, proving the API *shape* and the build wiring before
- * the full RESHAPE in-place rewrite is undertaken.
+ * C ABI in <loro/loro.h>. Names, ownership and member spellings match loro-cpp's generated
+ * header so a translation unit written against loro-cpp compiles unchanged against loro-c
+ * (see pm/RESHAPE.md). The ergonomic free-function layer lives in <loro/loro_ext.hpp>.
  *
- * Phase 0–1 surface: LoroDoc, LoroText, LoroMap, Cursor, StyleConfigMap, EphemeralStore, the
- * typed LoroValue/TextDelta/ContainerId families and the ContainerIdLike / LoroValueLike
- * interfaces, plus the typed-value FFI bridge (binary / integer-valued doubles survive).
- *
- * Phase 2 surface (this file): the remaining four container types — LoroList, LoroMovableList,
+ * Surface: LoroDoc; the six container types — LoroText, LoroMap, LoroList, LoroMovableList,
  * LoroTree (+ TreeId / TreeParentId), LoroCounter — with their accessors and the full
- * insert_* / set_* container matrix; ContainerId <-> "cid:" string conversion; and the
- * VersionVector / Frontiers wrappers plus the LoroDoc methods test_doc exercises (peer_id,
- * commit, state_vv/state_frontiers, vv<->frontiers, fork/fork_at, export/import variants,
- * has_container, typed get_deep_value).
+ * insert_* / set_* container matrix; the typed LoroValue / TextDelta / ContainerId families
+ * and the ContainerIdLike / LoroValueLike interfaces (with a typed-value FFI bridge so binary
+ * and integer-valued doubles survive — no lossy JSON round-trip); Cursor, StyleConfigMap,
+ * VersionVector / Frontiers, EphemeralStore, Awareness, UndoManager, subscriptions / commit
+ * hooks, jsonpath and fractional index; ContainerId <-> "cid:" string conversion.
  *
- * Names match ../loro-cpp/build/generated/loro.hpp field-for-field (uniffi quirks included:
+ * Names match loro-cpp's generated header field-for-field (uniffi quirks included:
  * `delete_()`, `Side::kRight`, `TreeParentId::kNode{id}`, `ContainerType::kUnknown{kind}`,
  * `LoroValue::kI64`). C handle types from <loro/loro.h> live in the global namespace and are
  * referred to here with a leading `::` (e.g. `::LoroText`) to disambiguate from the `loro::`
@@ -29,8 +26,8 @@
  * routes through `detail::Factory`, which is the sole `friend` each wrapper grants. Factory is
  * defined after all wrapper classes; methods that use it are therefore defined out-of-line.
  */
-#ifndef LORO_CONFORMANCE_LORO_HPP
-#define LORO_CONFORMANCE_LORO_HPP
+#ifndef LORO_LORO_HPP
+#define LORO_LORO_HPP
 
 #include <loro/loro.h>
 
@@ -3595,4 +3592,4 @@ private:
 
 }  // namespace loro
 
-#endif  // LORO_CONFORMANCE_LORO_HPP
+#endif  // LORO_LORO_HPP

@@ -1,175 +1,104 @@
-// G2: cursors — stable positions that survive concurrent edits. Covers text/list/movable-list
-// cursor creation, position tracking through local inserts/deletes, the configured Side (and
-// its survival through anchor deletion), encode/decode round-trip, and the headline scenario:
-// a remote peer inserts before the cursor and after merge get_cursor_pos reports the shift.
+// Cursor conformance (RESHAPE Phase 5).
+//
+// loro-cpp ships no test_cursor.cpp, so this loro-c-authored test covers the cursor surface
+// fleshed out in Phase 5:
+//   * container get_cursor(pos, side),
+//   * encode() / decode() round-trip,
+//   * get_cursor_pos() — both the resolved `current` AbsolutePosition and the `update` cursor
+//     (the latter backed by the new loro_doc_get_cursor_pos_full C ABI primitive), and
+//   * Cursor::init(...) constructing a cursor from parts (backed by the new loro_cursor_new
+//     C ABI primitive).
+//
+// loro-c-authored (not adopted from loro-cpp); built only under the conformance spike since it
+// includes the spike <loro.hpp>.
+#include "test_helpers.hpp"
 
-#include <loro/loro.hpp>
+#include <vector>
 
-#include <cstdio>
-#include <string>
+using namespace loro_test;
 
-static int failures = 0;
+namespace {
 
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__,      \
-                         __LINE__, #cond);                                     \
-            ++failures;                                                        \
-        }                                                                      \
-    } while (0)
+// get_cursor on a container, encode/decode round-trip, resolve, and track edits.
+bool test_text_cursor() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(1);
+    auto text = doc->get_text(root("body"));
+    text->insert(0, "hello");
+    doc->commit();
 
-// A text cursor at the end of the document tracks through inserts and deletes (the exact
-// sequence from loro's own get_cursor doc-example).
-static void test_text_cursor_tracking() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-    t.insert(0, "01234");
-    doc.commit();
+    auto cursor = text->get_cursor(2, loro::Side::kLeft);
+    if (!cursor) return fail("get_cursor returned null");
 
-    auto cur = t.get_cursor(5);  // position 5 == end of "01234"
-    CHECK(cur.has_value());
-    CHECK(doc.get_cursor_pos(*cur).abs_pos == 5);
+    auto encoded = cursor->encode();
+    if (encoded.empty()) return fail("cursor encode produced empty bytes");
+    auto decoded = loro::Cursor::decode(encoded);
+    if (!decoded) return fail("cursor decode returned null");
 
-    t.insert(0, "01234");  // shift everything right by 5
-    doc.commit();
-    CHECK(doc.get_cursor_pos(*cur).abs_pos == 10);
+    auto pos = doc->get_cursor_pos(decoded);
+    if (pos.current.pos != 2) return fail("decoded cursor resolved to wrong position");
 
-    t.remove(0, 10);  // delete everything
-    doc.commit();
-    CHECK(doc.get_cursor_pos(*cur).abs_pos == 0);
-
-    t.insert(0, "01234");
-    doc.commit();
-    CHECK(doc.get_cursor_pos(*cur).abs_pos == 5);
+    // Insert two codepoints entirely before the anchor: the anchored element shifts by +2.
+    text->insert(0, "XY");  // "XYhello"
+    doc->commit();
+    auto pos2 = doc->get_cursor_pos(cursor);
+    if (pos2.current.pos != 4) return fail("cursor did not track edits (expected pos 4)");
+    return true;
 }
 
-// The configured Side is reflected by the resolved position, and a Left-anchored cursor keeps
-// that side even after its anchor character is deleted.
-static void test_side_and_anchor_deletion() {
-    // The resolved side mirrors the side the cursor was created with.
-    for (loro::Side side : {LORO_SIDE_LEFT, LORO_SIDE_MIDDLE, LORO_SIDE_RIGHT}) {
-        loro::Doc doc;
-        loro::Text t = doc.get_text("t");
-        t.insert(0, "Hello");
-        doc.commit();
-        auto cur = t.get_cursor(2, side);
-        CHECK(cur.has_value());
-        const loro::PosQueryResult r = doc.get_cursor_pos(*cur);
-        CHECK(r.abs_pos == 2);
-        CHECK(r.side == side);
-    }
+// get_cursor_pos must surface the `update` cursor (loro-cpp PosQueryResult.update). loro only
+// supplies one when the anchored element was DELETED and it had to re-anchor (a plain shift keeps
+// the same id, so update stays null) — so delete the anchored char to force the trace-back path.
+bool test_cursor_pos_update() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(1);
+    auto text = doc->get_text(root("body"));
+    text->insert(0, "hello");
+    doc->commit();
 
-    // Deleting the anchor still resolves; a Left side survives the deletion.
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-    t.insert(0, "Hello");  // indices 0..4
-    doc.commit();
-    auto cur = t.get_cursor(2, LORO_SIDE_LEFT);  // anchor element at index 2
-    CHECK(cur.has_value());
+    // get_cursor(pos, side) anchors to the element AT index `pos` — here the 'l' at index 2.
+    auto cursor = text->get_cursor(2, loro::Side::kLeft);
+    if (!cursor) return fail("get_cursor returned null");
 
-    t.remove(2, 1);  // delete the anchored character -> "Helo"
-    doc.commit();
-    const loro::PosQueryResult r = doc.get_cursor_pos(*cur);
-    CHECK(r.abs_pos == 2);
-    CHECK(r.side == LORO_SIDE_LEFT);  // configured side preserved through deletion
+    text->delete_(2, 1);  // delete the anchored 'l' -> "helo"
+    doc->commit();
+
+    auto pos = doc->get_cursor_pos(cursor);
+    if (!pos.update)
+        return fail("get_cursor_pos did not yield an update cursor after the anchor was deleted");
+    // The updated cursor itself re-resolves against the current doc without error.
+    auto pos_again = doc->get_cursor_pos(pos.update);
+    if (pos_again.current.pos > text->len_unicode())
+        return fail("update cursor re-resolved out of range");
+    return true;
 }
 
-// encode -> decode reproduces a cursor that resolves to the same position.
-static void test_encode_decode_round_trip() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-    t.insert(0, "Hello world");
-    doc.commit();
+// Cursor::init builds a cursor from its parts (container id + side + origin pos).
+bool test_cursor_init() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(1);
+    auto text = doc->get_text(root("body"));
+    text->insert(0, "hello");
+    doc->commit();
 
-    auto cur = t.get_cursor(6);  // before 'w'
-    CHECK(cur.has_value());
-    const std::vector<std::uint8_t> bytes = cur->encode();
-    CHECK(!bytes.empty());
+    auto cursor = loro::Cursor::init(std::nullopt, text->id(), loro::Side::kLeft, 0);
+    if (!cursor) return fail("Cursor::init returned null");
 
-    loro::Cursor decoded = loro::Cursor::decode(bytes);
-    CHECK(doc.get_cursor_pos(decoded).abs_pos == doc.get_cursor_pos(*cur).abs_pos);
-    CHECK(doc.get_cursor_pos(decoded).abs_pos == 6);
+    // It must encode/decode and resolve against the document without error.
+    auto round = loro::Cursor::decode(cursor->encode());
+    if (!round) return fail("Cursor::init cursor failed encode/decode round-trip");
+    auto pos = doc->get_cursor_pos(cursor);
+    if (pos.current.pos > text->len_unicode()) return fail("init cursor resolved out of range");
+    return true;
 }
 
-// The headline scenario: a remote peer inserts before the cursor; after merge the resolved
-// absolute position shifts accordingly.
-static void test_concurrent_remote_insert_shifts_cursor() {
-    loro::Doc a;
-    a.set_peer_id(1);
-    loro::Text ta = a.get_text("t");
-    ta.insert(0, "Hello world");
-    a.commit();
-
-    auto cur = ta.get_cursor(3);  // anchored within doc a
-    CHECK(cur.has_value());
-    CHECK(a.get_cursor_pos(*cur).abs_pos == 3);
-
-    // A remote peer starts from a's snapshot and inserts "XYZ" at the front.
-    loro::Doc b;
-    b.set_peer_id(2);
-    b.import(a.export_snapshot());
-    loro::Text tb = b.get_text("t");
-    tb.insert(0, "XYZ");
-    b.commit();
-
-    // Merge the remote change back into a; the cursor now sits 3 positions later.
-    a.import(b.export_updates());
-    CHECK(ta.to_string() == "XYZHello world");
-    CHECK(a.get_cursor_pos(*cur).abs_pos == 6);
+bool run() {
+    if (!test_text_cursor()) return false;
+    if (!test_cursor_pos_update()) return false;
+    if (!test_cursor_init()) return false;
+    return true;
 }
 
-// List and movable-list cursors track position through inserts.
-static void test_list_cursors() {
-    {
-        loro::Doc doc;
-        loro::List l = doc.get_list("l");
-        l.insert(0, "0");
-        doc.commit();
-        auto cur = l.get_cursor(0);
-        CHECK(cur.has_value());
-        CHECK(doc.get_cursor_pos(*cur).abs_pos == 0);
+}  // namespace
 
-        l.insert(0, "0");
-        doc.commit();
-        CHECK(doc.get_cursor_pos(*cur).abs_pos == 1);
-
-        l.insert(0, "0");
-        l.insert(0, "0");
-        doc.commit();
-        CHECK(doc.get_cursor_pos(*cur).abs_pos == 3);
-
-        l.insert(4, "0");  // after the cursor: no shift
-        doc.commit();
-        CHECK(doc.get_cursor_pos(*cur).abs_pos == 3);
-    }
-    {
-        loro::Doc doc;
-        loro::MovableList l = doc.get_movable_list("ml");
-        l.push("\"a\"");
-        l.push("\"b\"");
-        doc.commit();
-        auto cur = l.get_cursor(1, LORO_SIDE_LEFT);  // anchored at "b"
-        CHECK(cur.has_value());
-        CHECK(doc.get_cursor_pos(*cur).abs_pos == 1);
-
-        l.insert(0, "\"x\"");  // insert before -> shift right
-        doc.commit();
-        CHECK(doc.get_cursor_pos(*cur).abs_pos == 2);
-    }
-}
-
-int main() {
-    test_text_cursor_tracking();
-    test_side_and_anchor_deletion();
-    test_encode_decode_round_trip();
-    test_concurrent_remote_insert_shifts_cursor();
-    test_list_cursors();
-
-    if (failures == 0) {
-        std::puts("test_cursor: OK");
-        return 0;
-    }
-    std::fprintf(stderr, "test_cursor: %d failure(s)\n", failures);
-    return 1;
-}
+LORO_TEST_MAIN(run)

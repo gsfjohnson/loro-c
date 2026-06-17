@@ -7,48 +7,51 @@
 //   cmake --build build
 //   ./build/examples/cursor_tracking
 
-#include <loro/loro.hpp>
+#include <loro.hpp>
+#include <loro/loro_ext.hpp>
 
-#include <cstdio>
+#include <iostream>
+#include <vector>
+
+namespace ext = loro::ext;
 
 int main() {
-    std::printf("loro %s\n", loro::version().c_str());
+    // Peer A authors some text and anchors a cursor to the 'w' of "world".
+    auto a = loro::LoroDoc::init();
+    a->set_peer_id(1);
+    auto text = a->get_text(ext::root("body"));
+    text->insert(0, "Hello world!");
+    a->commit();
 
-    // Peer A authors some text and places a cursor just before "world".
-    loro::Doc a;
-    a.set_peer_id(1);
-    loro::Text text = a.get_text("body");
-    text.insert(0, "Hello world!");
-    a.commit();
-
-    auto cursor = text.get_cursor(6);  // anchored before 'w'
+    auto cursor = text->get_cursor(6, loro::Side::kLeft);  // anchored to 'w' at index 6
     if (!cursor) {
-        std::fprintf(stderr, "failed to create cursor\n");
+        std::cerr << "failed to create cursor\n";
         return 1;
     }
-    std::printf("initial:  \"%s\" cursor at %zu\n", text.to_string().c_str(),
-                a.get_cursor_pos(*cursor).abs_pos);
+    std::cout << "initial:     \"" << text->to_string() << "\" cursor at "
+              << a->get_cursor_pos(cursor).current.pos << "\n";
 
     // The cursor survives transport: encode it, decode it back, same position.
     const std::vector<std::uint8_t> wire = cursor->encode();
-    loro::Cursor restored = loro::Cursor::decode(wire);
-    std::printf("encoded:  %zu bytes -> resolves to %zu\n", wire.size(),
-                a.get_cursor_pos(restored).abs_pos);
+    auto restored = loro::Cursor::decode(wire);
+    std::cout << "encoded:     " << wire.size() << " bytes -> resolves to "
+              << a->get_cursor_pos(restored).current.pos << "\n";
 
     // Peer B starts from A's snapshot and inserts a greeting at the front, concurrently.
-    loro::Doc b;
-    b.set_peer_id(2);
-    b.import(a.export_snapshot());
-    loro::Text text_b = b.get_text("body");
-    text_b.insert(0, ">> ");
-    b.commit();
+    auto b = loro::LoroDoc::init();
+    b->set_peer_id(2);
+    b->import(a->export_snapshot());
+    auto text_b = b->get_text(ext::root("body"));
+    text_b->insert(0, ">> ");
+    b->commit();
 
-    // Merge B's change back into A. The numeric index "6" would now be wrong, but the
-    // cursor tracks the same logical spot and reports the shifted absolute position.
-    a.import(b.export_updates());
-    const loro::PosQueryResult pos = a.get_cursor_pos(*cursor);
-    std::printf("after merge: \"%s\" cursor at %zu\n", text.to_string().c_str(), pos.abs_pos);
+    // Merge B's change back into A. The numeric index "6" would now be wrong, but the cursor
+    // tracks the same logical spot and reports the shifted absolute position.
+    a->import(b->export_updates(a->state_vv()));
+    const auto pos = a->get_cursor_pos(cursor);
+    std::cout << "after merge: \"" << text->to_string() << "\" cursor at "
+              << pos.current.pos << "\n";
 
     // The cursor should still sit immediately before "world" (now at index 9).
-    return pos.abs_pos == 9 ? 0 : 1;
+    return pos.current.pos == 9 ? 0 : 1;
 }

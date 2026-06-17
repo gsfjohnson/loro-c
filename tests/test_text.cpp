@@ -1,98 +1,86 @@
-// M1: LoroText edits, the snapshot -> import round trip, and the strong-co-ownership
-// free-ordering case (a Text outliving its parent Doc).
+// Exercises LoroText: insert / delete / mark / unmark / slice / splice /
+// length variants / push_str / cursor stability across edits.
+#include "test_helpers.hpp"
 
-#include <loro/loro.hpp>
+using namespace loro_test;
 
-#include <cstdio>
-#include <memory>
-#include <string>
-#include <vector>
+namespace {
 
-static int failures = 0;
+bool run() {
+    auto doc = loro::LoroDoc::init();
+    auto text = doc->get_text(root("doc"));
 
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__,      \
-                         __LINE__, #cond);                                     \
-            ++failures;                                                        \
-        }                                                                      \
-    } while (0)
-
-static void test_basic_edits() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-    CHECK(t.empty());
-
-    t.insert(0, "hello");
-    doc.commit();
-    CHECK(!t.empty());
-    CHECK(t.len_unicode() == 5);
-    CHECK(t.len_utf8() == 5);
-    CHECK(t.to_string() == "hello");
-
-    // Insert at the end, then delete a range.
-    t.insert(5, " world");
-    doc.commit();
-    CHECK(t.to_string() == "hello world");
-    CHECK(t.len_unicode() == 11);
-
-    t.remove(0, 6);  // drop "hello "
-    doc.commit();
-    CHECK(t.to_string() == "world");
-
-    // Multibyte: a non-ASCII codepoint counts as 1 unicode unit but >1 utf8 byte.
-    loro::Text u = doc.get_text("u");
-    u.insert(0, "é");  // U+00E9, 2 UTF-8 bytes
-    doc.commit();
-    CHECK(u.len_unicode() == 1);
-    CHECK(u.len_utf8() == 2);
-}
-
-// Primary M1 verification: edit -> export_snapshot -> import into a fresh doc -> read back.
-static void test_snapshot_round_trip() {
-    std::vector<std::uint8_t> snapshot;
-    {
-        loro::Doc doc;
-        loro::Text t = doc.get_text("t");
-        t.insert(0, "hello");
-        doc.commit();
-        snapshot = doc.export_snapshot();
+    text->push_str("Hello");
+    text->insert(text->len_unicode(), ", world!");
+    if (text->to_string() != "Hello, world!") {
+        return fail("push_str + insert produced wrong text");
     }
-    CHECK(!snapshot.empty());
-
-    loro::Doc fresh;
-    fresh.import(snapshot);
-    CHECK(fresh.get_text("t").to_string() == "hello");
-}
-
-// Free-ordering / strong-co-ownership: destroy the Doc while a Text is still held, then
-// use and destroy the Text. Must not use-after-free and must not leak (verified under a
-// leak checker in CI). The Text keeps the whole document state alive.
-static void test_free_ordering() {
-    auto doc = std::make_unique<loro::Doc>();
-    loro::Text t = doc->get_text("t");
-    t.insert(0, "hello");
-    doc->commit();
-
-    doc.reset();  // free the LoroDoc while `t` is still alive
-
-    // `t` remains valid because it co-owns the document state.
-    CHECK(t.to_string() == "hello");
-    CHECK(t.len_unicode() == 5);
-    t.insert(5, "!");  // still mutable
-    CHECK(t.to_string() == "hello!");
-}  // `t` destroyed here, after the doc — releases the last reference, no leak
-
-int main() {
-    test_basic_edits();
-    test_snapshot_round_trip();
-    test_free_ordering();
-
-    if (failures == 0) {
-        std::puts("test_text: OK");
-        return 0;
+    if (text->len_unicode() != 13 || text->len_utf16() != 13 || text->len_utf8() != 13) {
+        return fail("ASCII text length mismatch across encodings");
     }
-    std::fprintf(stderr, "test_text: %d failure(s)\n", failures);
-    return 1;
+
+    text->splice(7, 5, "Loro");
+    if (text->to_string() != "Hello, Loro!") {
+        return fail("splice did not replace expected range");
+    }
+
+    auto sliced = text->slice(0, 5);
+    if (sliced != "Hello") return fail("slice(0, 5) wrong");
+
+    auto cursor = text->get_cursor(5, loro::Side::kRight);
+    if (!cursor) return fail("get_cursor returned null");
+    text->insert(0, "[");
+    auto pos_after = doc->get_cursor_pos(cursor);
+    if (pos_after.current.pos != 6) {
+        return fail("cursor did not shift right after prepending '['");
+    }
+
+    auto map = doc->get_map(root("style_cfg"));
+    (void)map;
+    auto cfg = loro::StyleConfigMap::default_rich_text_config();
+    doc->config_text_style(cfg);
+
+    text->mark(0, 5, "bold", bool_value(true));
+    auto delta = text->to_delta();
+    bool saw_bold = false;
+    for (const auto &op : delta) {
+        if (auto *ins = std::get_if<loro::TextDelta::kInsert>(&op.get_variant())) {
+            if (ins->attributes.has_value() &&
+                ins->attributes->find("bold") != ins->attributes->end()) {
+                saw_bold = true;
+            }
+        }
+    }
+    if (!saw_bold) return fail("mark did not produce a bold attribute in delta");
+
+    text->unmark(0, 5, "bold");
+    auto delta_after_unmark = text->to_delta();
+    bool still_bold = false;
+    for (const auto &op : delta_after_unmark) {
+        if (auto *ins = std::get_if<loro::TextDelta::kInsert>(&op.get_variant())) {
+            if (ins->attributes.has_value()) {
+                auto it = ins->attributes->find("bold");
+                if (it != ins->attributes->end()) {
+                    if (auto *b = std::get_if<loro::LoroValue::kBool>(&it->second.get_variant())) {
+                        if (b->value) still_bold = true;
+                    }
+                }
+            }
+        }
+    }
+    if (still_bold) return fail("unmark did not clear bold attribute");
+
+    text->delete_(0, 1);
+    if (text->to_string() != "Hello, Loro!") {
+        return fail("delete did not remove the bracket we prepended");
+    }
+
+    if (text->is_empty()) return fail("text should not be empty");
+    if (!text->is_attached()) return fail("text from doc should be attached");
+
+    return true;
 }
+
+} // namespace
+
+LORO_TEST_MAIN(run)

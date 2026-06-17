@@ -1,167 +1,125 @@
-// M3: subscriptions & DiffEvent marshalling via the C++ wrapper.
-//   - subscribe_root / subscribe (per-container) / subscribe_local_update
-//   - DiffEvent envelope (trigger kind, target, diff kind) + JSON delta payload
-//   - unsubscribe on Subscription destruction
-//   - free_user_data (the captured std::function) runs exactly once on unsubscribe
+// Exercises the subscription / event surface end-to-end:
+//   - LoroDoc::subscribe (per-container) + Subscription::unsubscribe
+//   - LoroDoc::subscribe_root
+//   - LoroDoc::subscribe_local_update
+//   - LoroDoc::subscribe_first_commit_from_peer
+//   - LoroDoc::subscribe_pre_commit  (with ChangeModifier mutation)
+//
+// Each callback type in the generated bindings is a pure-virtual interface;
+// these subclasses are the test's stand-ins for the std::function adapters
+// that M3 will provide.
+#include "test_helpers.hpp"
 
-#include <loro/loro.hpp>
+#include <atomic>
 
-#include <cstdio>
-#include <memory>
-#include <string>
-#include <vector>
+using namespace loro_test;
 
-static int failures = 0;
+namespace {
 
-#define CHECK(cond)                                                                                \
-    do {                                                                                           \
-        if (!(cond)) {                                                                             \
-            std::fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #cond);        \
-            ++failures;                                                                            \
-        }                                                                                          \
-    } while (0)
-
-// A subscribe_root edit fires once with a structured envelope + JSON text delta.
-static void test_subscribe_root() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-
-    int calls = 0;
-    loro::EventTriggerKind trigger{};
-    std::size_t count = 0;
-    std::string target;
-    loro::DiffKind kind{};
-    std::string json;
-
-    auto sub = doc.subscribe_root([&](const loro::DiffEvent& ev) {
-        ++calls;
-        trigger = ev.triggered_by();
-        count = ev.size();
-        if (ev.size() > 0) {
-            loro::ContainerDiff d = ev[0];
-            target = d.target();
-            kind = d.kind();
-            json = d.to_json();
-        }
-    });
-
-    t.insert(0, "hello");
-    doc.commit();
-
-    CHECK(calls == 1);
-    CHECK(trigger == LORO_EVENT_TRIGGER_LOCAL);
-    CHECK(count >= 1);
-    CHECK(target == t.id());
-    CHECK(kind == LORO_DIFF_TEXT);
-    CHECK(json.find("hello") != std::string::npos);
-}
-
-// A per-container subscription fires only for its own container's changes.
-static void test_subscribe_container() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-    loro::Map m = doc.get_map("m");
-
-    int calls = 0;
-    std::string seen_target;
-    auto sub = doc.subscribe(t.id(), [&](const loro::DiffEvent& ev) {
-        ++calls;
-        if (ev.size() > 0) seen_target = ev[0].target();
-    });
-
-    t.insert(0, "hi");
-    doc.commit();
-    CHECK(calls == 1);
-    CHECK(seen_target == t.id());
-
-    // A commit that touches only a different container must not fire this subscription.
-    m.insert("k", "1");
-    doc.commit();
-    CHECK(calls == 1);
-}
-
-// subscribe_local_update delivers importable update bytes for each local commit.
-static void test_subscribe_local_update() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-
-    int calls = 0;
-    std::vector<std::uint8_t> update;
-    auto sub = doc.subscribe_local_update([&](const std::uint8_t* data, std::size_t len) -> bool {
-        ++calls;
-        update.assign(data, data + len);
-        return true;
-    });
-
-    t.insert(0, "hello");
-    doc.commit();
-    CHECK(calls == 1);
-    CHECK(!update.empty());
-
-    // The update bytes alone reconstruct the change in a fresh document.
-    loro::Doc fresh;
-    fresh.import(update);
-    CHECK(fresh.get_text("t").to_string() == "hello");
-}
-
-// Destroying the Subscription unsubscribes: no further callbacks fire.
-static void test_unsubscribe() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-
-    int calls = 0;
-    {
-        auto sub = doc.subscribe_root([&](const loro::DiffEvent&) { ++calls; });
-        t.insert(0, "a");
-        doc.commit();
-        CHECK(calls == 1);
-    }  // sub destroyed here -> unsubscribed
-
-    t.insert(1, "b");
-    doc.commit();
-    CHECK(calls == 1);
-}
-
-// The captured callback (and its user data) is released exactly once on unsubscribe.
-static void test_free_user_data() {
-    loro::Doc doc;
-    auto probe = std::make_shared<int>(0);
-    CHECK(probe.use_count() == 1);
-    {
-        auto sub = doc.subscribe_root([probe](const loro::DiffEvent&) { (void)probe; });
-        // The heap-allocated std::function holds a copy of the captured shared_ptr.
-        CHECK(probe.use_count() >= 2);
-    }  // sub destroyed -> free_user_data deletes the std::function -> the copy is released
-    CHECK(probe.use_count() == 1);
-}
-
-// detach() leaves the callback firing (until the doc is dropped) and empties the handle.
-static void test_detach() {
-    loro::Doc doc;
-    loro::Text t = doc.get_text("t");
-
-    int calls = 0;
-    auto sub = doc.subscribe_root([&](const loro::DiffEvent&) { ++calls; });
-    sub.detach();
-    CHECK(sub.raw() == nullptr);
-
-    t.insert(0, "x");
-    doc.commit();
-    CHECK(calls == 1);  // still firing after detach
-}
-
-int main() {
-    test_subscribe_root();
-    test_subscribe_container();
-    test_subscribe_local_update();
-    test_unsubscribe();
-    test_free_user_data();
-    test_detach();
-
-    if (failures == 0) {
-        std::puts("test_subscriptions: OK");
-        return 0;
+class CountingSubscriber : public loro::Subscriber {
+public:
+    std::atomic<int> count{0};
+    std::optional<loro::ContainerId> last_target;
+    void on_diff(const loro::DiffEvent &diff) override {
+        count.fetch_add(1);
+        last_target = diff.current_target;
     }
-    std::fprintf(stderr, "test_subscriptions: %d failure(s)\n", failures);
-    return 1;
+};
+
+class CountingLocalUpdate : public loro::LocalUpdateCallback {
+public:
+    std::atomic<int> count{0};
+    std::vector<uint8_t> last_update;
+    void on_local_update(const std::vector<uint8_t> &update) override {
+        count.fetch_add(1);
+        last_update = update;
+    }
+};
+
+class CountingFirstCommit : public loro::FirstCommitFromPeerCallback {
+public:
+    std::atomic<int> count{0};
+    std::vector<uint64_t> peers;
+    void on_first_commit_from_peer(const loro::FirstCommitFromPeerPayload &p) override {
+        count.fetch_add(1);
+        peers.push_back(p.peer);
+    }
+};
+
+class MessageInjector : public loro::PreCommitCallback {
+public:
+    std::atomic<int> count{0};
+    void on_pre_commit(const loro::PreCommitCallbackPayload &p) override {
+        count.fetch_add(1);
+        p.modifier->set_message("injected");
+    }
+};
+
+bool run() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(11);
+    doc->set_record_timestamp(true);
+
+    auto text = doc->get_text(root("body"));
+    auto cid = text->id();
+
+    auto text_sub = std::make_shared<CountingSubscriber>();
+    auto sub = doc->subscribe(cid, text_sub);
+
+    auto root_sub = std::make_shared<CountingSubscriber>();
+    auto sub_root = doc->subscribe_root(root_sub);
+
+    auto local_cb = std::make_shared<CountingLocalUpdate>();
+    auto sub_local = doc->subscribe_local_update(local_cb);
+
+    auto first_cb = std::make_shared<CountingFirstCommit>();
+    auto sub_first = doc->subscribe_first_commit_from_peer(first_cb);
+
+    auto pre_cb = std::make_shared<MessageInjector>();
+    auto sub_pre = doc->subscribe_pre_commit(pre_cb);
+
+    text->insert(0, "ping");
+    doc->commit();
+
+    if (text_sub->count.load() == 0) return fail("container subscriber did not fire");
+    if (root_sub->count.load() == 0) return fail("root subscriber did not fire");
+    if (local_cb->count.load() == 0) return fail("local-update callback did not fire");
+    if (local_cb->last_update.empty()) return fail("local-update payload empty");
+    if (first_cb->count.load() == 0) return fail("first-commit-from-peer callback did not fire");
+    if (pre_cb->count.load() == 0) return fail("pre-commit callback did not fire");
+
+    auto changes = doc->get_changed_containers_in(loro::Id{11, 0}, /*len=*/1);
+    bool change_message_set = false;
+    for (uint32_t i = 0; i < doc->len_changes(); i++) {
+        auto change = doc->get_change(loro::Id{11, static_cast<int32_t>(i)});
+        if (change.has_value() && change->message.has_value() &&
+            *change->message == "injected") {
+            change_message_set = true;
+            break;
+        }
+    }
+    if (!change_message_set) {
+        return fail("ChangeModifier::set_message did not stick");
+    }
+
+    int container_count_before = text_sub->count.load();
+    sub->unsubscribe();
+    text->insert(text->len_unicode(), " pong");
+    doc->commit();
+    if (text_sub->count.load() != container_count_before) {
+        return fail("unsubscribed container subscriber still fired");
+    }
+    if (root_sub->count.load() <= 0) {
+        return fail("root subscriber should still be receiving events");
+    }
+
+    sub_root->unsubscribe();
+    sub_local->unsubscribe();
+    sub_first->unsubscribe();
+    sub_pre->unsubscribe();
+    return true;
 }
+
+} // namespace
+
+LORO_TEST_MAIN(run)

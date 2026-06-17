@@ -1,146 +1,74 @@
-// M2: LoroTree — node creation/hierarchy, per-node metadata maps, moves, deletion, the
-// fractional index for positional moves, and a snapshot round trip.
+// Exercises LoroTree: create / mov / parent / children / nodes / get_meta /
+// fractional index toggles.
+#include "test_helpers.hpp"
 
-#include <loro/loro.hpp>
+using namespace loro_test;
 
-#include <cstdio>
-#include <string>
-#include <vector>
+namespace {
 
-static int failures = 0;
-
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__,      \
-                         __LINE__, #cond);                                     \
-            ++failures;                                                        \
-        }                                                                      \
-    } while (0)
-
-static bool same(loro::TreeId a, loro::TreeId b) {
-    return a.peer == b.peer && a.counter == b.counter;
+bool is_root(const loro::TreeParentId &p) {
+    return std::holds_alternative<loro::TreeParentId::kRoot>(p.get_variant());
 }
 
-static void test_basic_hierarchy() {
-    loro::Doc doc;
-    loro::Tree tree = doc.get_tree("t");
-    CHECK(tree.empty());
+bool run() {
+    auto doc = loro::LoroDoc::init();
+    auto tree = doc->get_tree(root("forest"));
 
-    loro::TreeId root = tree.create();        // a root node
-    loro::TreeId child = tree.create(root);   // a child of root
-    doc.commit();
+    auto root_id = tree->create(loro::TreeParentId(loro::TreeParentId::kRoot{}));
+    auto child_a = tree->create(loro::TreeParentId(loro::TreeParentId::kNode{root_id}));
+    auto child_b = tree->create(loro::TreeParentId(loro::TreeParentId::kNode{root_id}));
 
-    CHECK(!tree.empty());
-    CHECK(tree.contains(root));
-    CHECK(tree.contains(child));
+    if (!tree->contains(root_id)) return fail("tree should contain root_id");
+    if (!tree->contains(child_a)) return fail("tree should contain child_a");
 
-    std::vector<loro::TreeId> roots = tree.roots();
-    CHECK(roots.size() == 1);
-    CHECK(same(roots[0], root));
+    auto roots = tree->roots();
+    if (roots.size() != 1) return fail("roots() size != 1");
 
-    std::optional<std::vector<loro::TreeId>> kids = tree.children(root);
-    CHECK(kids.has_value());
-    CHECK(kids->size() == 1);
-    CHECK(same((*kids)[0], child));
-}
-
-static void test_meta() {
-    loro::Doc doc;
-    loro::Tree tree = doc.get_tree("t");
-    loro::TreeId node = tree.create();
-
-    loro::Map meta = tree.get_meta(node);
-    meta.insert("title", "\"hello\"");
-    doc.commit();
-
-    CHECK(tree.get_meta(node).get("title") == "\"hello\"");
-}
-
-static void test_move_and_delete() {
-    loro::Doc doc;
-    loro::Tree tree = doc.get_tree("t");
-    loro::TreeId a = tree.create();
-    loro::TreeId b = tree.create();  // two roots
-    doc.commit();
-    CHECK(tree.roots().size() == 2);
-
-    tree.move_to(b, a);  // b becomes a child of a
-    doc.commit();
-    CHECK(tree.roots().size() == 1);
-    std::optional<std::vector<loro::TreeId>> kids = tree.children(a);
-    CHECK(kids.has_value());
-    CHECK(kids->size() == 1);
-    CHECK(same((*kids)[0], b));
-
-    CHECK(!tree.is_node_deleted(b));
-    tree.erase(b);
-    doc.commit();
-    CHECK(tree.is_node_deleted(b));
-    // `contains` reports whether a node ever existed, so it stays true after deletion; the
-    // node is gone from the live hierarchy, so a's children are now empty.
-    std::optional<std::vector<loro::TreeId>> after = tree.children(a);
-    CHECK(after.has_value());
-    CHECK(after->empty());
-}
-
-static void test_fractional_index() {
-    loro::Doc doc;
-    loro::Tree tree = doc.get_tree("fi");
-    // loro enables the fractional index by default (jitter 0); enabling again is a no-op.
-    CHECK(tree.is_fractional_index_enabled());
-    tree.enable_fractional_index(0);
-    CHECK(tree.is_fractional_index_enabled());
-
-    loro::TreeId a = tree.create();          // root index 0
-    loro::TreeId b = tree.create_at(1);      // root index 1
-    doc.commit();
-    CHECK(tree.fractional_index(a).has_value());
-
-    std::vector<loro::TreeId> roots = tree.roots();
-    CHECK(roots.size() == 2);
-    CHECK(same(roots[0], a));
-    CHECK(same(roots[1], b));
-
-    tree.move_to_index(b, 0);  // move b to the front
-    doc.commit();
-    roots = tree.roots();
-    CHECK(roots.size() == 2);
-    CHECK(same(roots[0], b));
-    CHECK(same(roots[1], a));
-}
-
-static void test_snapshot_round_trip() {
-    std::vector<std::uint8_t> snapshot;
-    {
-        loro::Doc doc;
-        loro::Tree tree = doc.get_tree("t");
-        loro::TreeId r = tree.create();
-        tree.get_meta(r).insert("k", "\"v\"");
-        doc.commit();
-        snapshot = doc.export_snapshot();
+    auto kids = tree->children(loro::TreeParentId(loro::TreeParentId::kNode{root_id}));
+    if (!kids.has_value() || kids->size() != 2) {
+        return fail("root should have 2 children");
     }
-    CHECK(!snapshot.empty());
-
-    loro::Doc fresh;
-    fresh.import(snapshot);
-    loro::Tree tree = fresh.get_tree("t");
-    std::vector<loro::TreeId> roots = tree.roots();
-    CHECK(roots.size() == 1);
-    CHECK(tree.get_meta(roots[0]).get("k") == "\"v\"");
-}
-
-int main() {
-    test_basic_hierarchy();
-    test_meta();
-    test_move_and_delete();
-    test_fractional_index();
-    test_snapshot_round_trip();
-
-    if (failures == 0) {
-        std::puts("test_tree: OK");
-        return 0;
+    auto kids_count = tree->children_num(loro::TreeParentId(loro::TreeParentId::kNode{root_id}));
+    if (!kids_count.has_value() || *kids_count != 2) {
+        return fail("children_num != 2");
     }
-    std::fprintf(stderr, "test_tree: %d failure(s)\n", failures);
-    return 1;
+
+    tree->mov(child_b, loro::TreeParentId(loro::TreeParentId::kNode{child_a}));
+    auto new_parent = tree->parent(child_b);
+    auto *as_node = std::get_if<loro::TreeParentId::kNode>(&new_parent.get_variant());
+    if (!as_node || as_node->id.peer != child_a.peer || as_node->id.counter != child_a.counter) {
+        return fail("mov did not relocate child_b under child_a");
+    }
+
+    auto root_parent = tree->parent(root_id);
+    if (!is_root(root_parent)) return fail("root_id should have parent kRoot");
+
+    auto meta = tree->get_meta(root_id);
+    meta->insert("name", str_value("root-node"));
+    auto v = meta->get("name")->as_value();
+    if (!v.has_value() || loro_value_as_string(*v) != "root-node") {
+        return fail("tree metadata roundtrip failed");
+    }
+
+    auto all_nodes = tree->nodes();
+    if (all_nodes.size() != 3) return fail("nodes() size != 3");
+
+    if (!tree->is_fractional_index_enabled()) {
+        return fail("fractional index should be enabled by default");
+    }
+    auto frac = tree->fractional_index(root_id);
+    if (!frac.has_value() || frac->empty()) {
+        return fail("fractional_index for root_id missing");
+    }
+
+    tree->delete_(child_a);
+    if (tree->is_node_deleted(child_a) == false) {
+        return fail("child_a should report as deleted");
+    }
+
+    return true;
 }
+
+} // namespace
+
+LORO_TEST_MAIN(run)

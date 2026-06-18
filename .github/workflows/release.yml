@@ -52,6 +52,11 @@ jobs:
       # (pwsh on Windows, bash on Linux/macOS). Native cmake on every runner
       # accepts this drive-letter / forward-slash path.
       INSTALL_DIR: ${{ github.workspace }}/install
+      # Version stamp baked into the archive filenames (e.g. v0.1.4). On a
+      # published release this is the tag; on a manual workflow_dispatch run
+      # github.event.release.tag_name is empty, so fall back to the ref name
+      # (the branch, e.g. "main").
+      VERSION: ${{ github.event.release.tag_name || github.ref_name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -112,12 +117,12 @@ jobs:
       # ----- Package the install tree --------------------------------------
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
-        run: tar czf "loro-c-${{ matrix.artifact }}.tar.gz" -C "${{ env.INSTALL_DIR }}" .
+        run: tar czf "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz" -C "${{ env.INSTALL_DIR }}" .
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "${{ env.INSTALL_DIR }}/*" -DestinationPath "loro-c-${{ matrix.artifact }}.zip"
+        run: Compress-Archive -Path "${{ env.INSTALL_DIR }}/*" -DestinationPath "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.zip"
 
       # Run artifact: visible on the Actions run page (expires in 90 days).
       # Both patterns are listed; only the one matching this OS exists, which is
@@ -127,8 +132,8 @@ jobs:
         with:
           name: loro-c-${{ matrix.artifact }}
           path: |
-            loro-c-${{ matrix.artifact }}.tar.gz
-            loro-c-${{ matrix.artifact }}.zip
+            loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz
+            loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.zip
           if-no-files-found: error
 
       # Populate the Release page itself by attaching the same archive to the
@@ -142,7 +147,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           shopt -s nullglob
-          files=(loro-c-${{ matrix.artifact }}.*)
+          files=(loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.*)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No archive found to upload" >&2
             exit 1
@@ -161,6 +166,11 @@ jobs:
     name: windows-2022 (gnullvm)
     runs-on: windows-2022
     timeout-minutes: 90
+
+    env:
+      # Version stamp baked into the archive filename (e.g. v0.1.4); see the
+      # build job's env for the release-tag / ref-name fallback rationale.
+      VERSION: ${{ github.event.release.tag_name || github.ref_name }}
 
     defaults:
       run:
@@ -263,13 +273,13 @@ jobs:
       # in Windows form.
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path "${{ github.workspace }}/install/*" -DestinationPath "loro-c-windows-x86_64-gnullvm.zip"
+        run: Compress-Archive -Path "${{ github.workspace }}/install/*" -DestinationPath "loro-c-windows-x86_64-gnullvm-${{ env.VERSION }}.zip"
 
       - name: Upload run artifact
         uses: actions/upload-artifact@v4
         with:
           name: loro-c-windows-x86_64-gnullvm
-          path: loro-c-windows-x86_64-gnullvm.zip
+          path: loro-c-windows-x86_64-gnullvm-${{ env.VERSION }}.zip
           if-no-files-found: error
 
       - name: Attach to GitHub Release
@@ -277,4 +287,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "loro-c-windows-x86_64-gnullvm.zip" --clobber
+        run: gh release upload "$TAG" "loro-c-windows-x86_64-gnullvm-${{ env.VERSION }}.zip" --clobber

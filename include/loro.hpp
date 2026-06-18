@@ -628,6 +628,21 @@ inline ContainerType container_type_from_name(const std::string &name) {
     return ContainerType(ContainerType::kUnknown{0});
 }
 
+/// Maps the C `LoroContainerType` enum to a `ContainerType` variant. Returns nullopt for
+/// `LORO_CONTAINER_UNKNOWN` (and any unrecognised value) — i.e. "not a known live container".
+inline std::optional<ContainerType> container_type_from_c(LoroContainerType ty) {
+    switch (ty) {
+        case LORO_CONTAINER_MAP: return ContainerType(ContainerType::kMap{});
+        case LORO_CONTAINER_LIST: return ContainerType(ContainerType::kList{});
+        case LORO_CONTAINER_TEXT: return ContainerType(ContainerType::kText{});
+        case LORO_CONTAINER_MOVABLE_LIST: return ContainerType(ContainerType::kMovableList{});
+        case LORO_CONTAINER_TREE: return ContainerType(ContainerType::kTree{});
+        case LORO_CONTAINER_COUNTER: return ContainerType(ContainerType::kCounter{});
+        case LORO_CONTAINER_UNKNOWN: break;
+    }
+    return std::nullopt;
+}
+
 inline ContainerId cid_string_to_container_id(const std::string &cid) {
     if (cid.rfind("cid:", 0) != 0) throw LoroError("not a cid string: " + cid);
     std::string s = cid.substr(4);
@@ -1324,6 +1339,19 @@ struct LoroText {
         return out;
     }
 
+    /// The rich-text value as a delta-with-attributes array `LoroValue` (a list of
+    /// `{"insert": "...", "attributes": {...}}` maps). The C ABI emits this as JSON; parsed here
+    /// via the same idiom as `to_delta` / `EphemeralStore::get_all_states`.
+    LoroValue get_richtext_value() {
+        detail::Bytes b;
+        detail::check(loro_text_get_richtext_value(raw_, b.out()));
+        std::string json = b.to_string();
+        if (json.empty()) {
+            return LoroValue(LoroValue::kList{std::make_shared<std::vector<LoroValue>>()});
+        }
+        return detail::json_to_value(detail::parse_json(json));
+    }
+
     std::shared_ptr<Cursor> get_cursor(uint32_t pos, const Side &side) {
         ::LoroCursor *c = loro_text_get_cursor(raw_, pos, detail::to_c_side(side));
         if (!c) return nullptr;
@@ -1926,6 +1954,13 @@ private:
 /// or a live child container. Built over the C `LoroValueOrContainer` handle.
 struct ValueOrContainer {
     bool is_container() { return loro_value_or_container_is_container(raw_); }
+    bool is_value() { return !is_container(); }
+
+    /// The kind of the live child container, or nullopt when this holds a plain value.
+    std::optional<ContainerType> container_type() {
+        if (!is_container()) return std::nullopt;
+        return detail::container_type_from_c(loro_value_or_container_container_type(raw_));
+    }
 
     std::optional<LoroValue> as_value() {
         if (loro_value_or_container_is_container(raw_)) return std::nullopt;
@@ -2703,6 +2738,11 @@ struct LoroDoc {
         if (!f) throw LoroError(detail::last_error_message());
         return std::shared_ptr<Frontiers>(new Frontiers(f));
     }
+    std::shared_ptr<Frontiers> oplog_frontiers() {
+        ::LoroFrontiers *f = loro_doc_oplog_frontiers(raw_);
+        if (!f) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<Frontiers>(new Frontiers(f));
+    }
     std::shared_ptr<VersionVector> frontiers_to_vv(const std::shared_ptr<Frontiers> &frontiers) {
         ::LoroVersionVector *v = loro_doc_frontiers_to_vv(raw_, frontiers->raw_);
         if (!v) throw LoroError(detail::last_error_message());
@@ -2873,7 +2913,16 @@ struct LoroDoc {
 
     void set_record_timestamp(bool record) { loro_doc_set_record_timestamp(raw_, record); }
 
+    /// Attaches `origin` to the next commit (reported to subscribers, not persisted).
+    void set_next_commit_origin(const std::string &origin) {
+        detail::check(loro_doc_set_next_commit_origin(raw_, origin.data(), origin.size()));
+    }
+
     uint64_t len_changes() { return static_cast<uint64_t>(loro_doc_len_changes(raw_)); }
+    uintptr_t len_ops() { return loro_doc_len_ops(raw_); }
+
+    /// True when the doc is checked out to a non-latest version (history browsing mode).
+    bool is_detached() { return loro_doc_is_detached(raw_); }
 
     std::optional<ChangeMeta> get_change(const Id &id) {
         ::LoroId cid{id.peer, id.counter};
@@ -3398,6 +3447,22 @@ struct EphemeralStore {
         // do NOT free it again here.
         ::LoroSubscription *s = loro_ephemeral_store_subscribe(raw_, cb);
         if (!s) throw LoroError("loro_ephemeral_store_subscribe returned null");
+        return std::shared_ptr<Subscription>(new Subscription(s));
+    }
+
+    /// Subscribes to local updates: the callback receives the encoded bytes of each local change
+    /// (`set` / `delete` / `apply`) to broadcast to peers. Mirrors `LoroDoc::subscribe_local_update`.
+    std::shared_ptr<Subscription> subscribe_local_updates(
+        const std::shared_ptr<LocalUpdateCallback> &callback) {
+        auto *holder = new detail::LocalUpdateHolder{callback};
+        ::LoroLocalUpdateCallback cb;
+        cb.invoke = &loro_conf_local_update_invoke;
+        cb.user_data = holder;
+        cb.free_user_data = &loro_conf_local_update_free;
+        // On error loro-c drops the callback (running free_user_data, freeing `holder`);
+        // do NOT free it again here.
+        ::LoroSubscription *s = loro_ephemeral_store_subscribe_local_updates(raw_, cb);
+        if (!s) throw LoroError("loro_ephemeral_store_subscribe_local_updates returned null");
         return std::shared_ptr<Subscription>(new Subscription(s));
     }
 

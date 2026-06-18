@@ -22,6 +22,11 @@ bool run() {
     if (!name_val.has_value() || loro_value_as_string(*name_val) != "loro") {
         return fail("map.get('name') wrong");
     }
+    // A plain value reports is_value() and has no container_type (UPVERT_3).
+    if (!name_voc->is_value()) return fail("plain-value voc should report is_value()");
+    if (name_voc->container_type().has_value()) {
+        return fail("plain-value voc should have no container_type()");
+    }
 
     auto version_voc = map->get("version");
     auto version_val = version_voc->as_value();
@@ -44,6 +49,14 @@ bool run() {
 
     auto body_voc = map->get("body");
     if (!body_voc->is_container()) return fail("map['body'] should be a container");
+    // A live container reports !is_value() and a Text container_type (UPVERT_3).
+    // Check before as_loro_text(), which takes the container handle out of the voc.
+    if (body_voc->is_value()) return fail("container voc should not report is_value()");
+    auto body_ty = body_voc->container_type();
+    if (!body_ty.has_value() ||
+        !std::holds_alternative<loro::ContainerType::kText>(body_ty->get_variant())) {
+        return fail("map['body'] container_type() should be Text");
+    }
     auto retrieved_text = body_voc->as_loro_text();
     if (retrieved_text->to_string() != "hello") {
         return fail("nested LoroText readback wrong");

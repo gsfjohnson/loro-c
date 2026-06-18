@@ -103,6 +103,24 @@ bool run() {
         return fail("export_updates round-trip failed");
     }
 
+    // --- oplog introspection / commit origin (UPVERT_3) ---
+    if (doc->len_ops() == 0) return fail("len_ops should be > 0 after committed edits");
+    // A live doc (never checked out) is attached, not detached.
+    if (doc->is_detached()) return fail("a live doc should not be detached");
+
+    auto oplog_fr = doc->oplog_frontiers();
+    if (oplog_fr->to_vec().empty()) {
+        return fail("oplog_frontiers should be non-empty after commits");
+    }
+
+    auto ops_before = doc->len_ops();
+    doc->set_next_commit_origin("unit-test");  // attached to the next commit; must not throw
+    text->insert(text->len_unicode(), "!");
+    doc->commit();
+    if (doc->len_ops() <= ops_before) {
+        return fail("len_ops should grow after another committed op");
+    }
+
     return true;
 }
 

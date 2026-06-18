@@ -367,6 +367,18 @@ inline std::shared_ptr<LocalUpdateCallback> on_local_update(
     return std::make_shared<Impl>(std::move(fn));
 }
 
+inline std::shared_ptr<EphemeralSubscriber> on_ephemeral(
+    std::function<void(const EphemeralStoreEvent &)> fn) {
+    struct Impl : public EphemeralSubscriber {
+        std::function<void(const EphemeralStoreEvent &)> fn;
+        explicit Impl(std::function<void(const EphemeralStoreEvent &)> f) : fn(std::move(f)) {}
+        void on_ephemeral_event(const EphemeralStoreEvent &event) override {
+            if (fn) fn(event);
+        }
+    };
+    return std::make_shared<Impl>(std::move(fn));
+}
+
 inline std::shared_ptr<FirstCommitFromPeerCallback> on_first_commit_from_peer(
     std::function<void(const FirstCommitFromPeerPayload &)> fn) {
     struct Impl : public FirstCommitFromPeerCallback {
@@ -404,6 +416,16 @@ inline std::shared_ptr<Subscription> subscribe(LoroDoc &doc, ContainerId cid,
 inline std::shared_ptr<Subscription> subscribe_local_update(
     LoroDoc &doc, std::function<void(const std::vector<uint8_t> &)> fn) {
     return doc.subscribe_local_update(on_local_update(std::move(fn)));
+}
+
+// EphemeralStore subscribe shortcuts (mirror the LoroDoc forms above).
+inline std::shared_ptr<Subscription> subscribe(
+    EphemeralStore &store, std::function<void(const EphemeralStoreEvent &)> fn) {
+    return store.subscribe(on_ephemeral(std::move(fn)));
+}
+inline std::shared_ptr<Subscription> subscribe_local_update(
+    EphemeralStore &store, std::function<void(const std::vector<uint8_t> &)> fn) {
+    return store.subscribe_local_updates(on_local_update(std::move(fn)));
 }
 inline std::shared_ptr<Subscription> subscribe_first_commit_from_peer(
     LoroDoc &doc, std::function<void(const FirstCommitFromPeerPayload &)> fn) {

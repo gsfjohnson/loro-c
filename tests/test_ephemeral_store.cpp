@@ -1,6 +1,8 @@
-// Exercises EphemeralStore: set / get / keys / delete / encode_all / apply
-// and the EphemeralSubscriber callback.
+// Exercises EphemeralStore: set / get / keys / delete / encode_all / apply,
+// the EphemeralSubscriber callback, and the ext lambda subscribe overloads.
 #include "test_helpers.hpp"
+
+#include <loro/loro_ext.hpp>
 
 #include <atomic>
 
@@ -77,6 +79,46 @@ bool run() {
     if (!saw_removed) return fail("event did not list 'name' as removed");
 
     subscription->unsubscribe();
+
+    // --- ext lambda subscribe overloads (UPVERT_3) ---
+    {
+        auto s = loro::EphemeralStore::init(30'000);
+
+        std::atomic<int> ev_count{0};
+        std::vector<std::string> seen_keys;
+        auto ev_sub = loro::ext::subscribe(*s, [&](const loro::EphemeralStoreEvent &e) {
+            ev_count.fetch_add(1);
+            for (const auto &k : e.added) seen_keys.push_back(k);
+            for (const auto &k : e.removed) seen_keys.push_back(k);
+        });
+
+        std::atomic<int> lu_count{0};
+        std::vector<uint8_t> last_update;
+        auto lu_sub = loro::ext::subscribe_local_update(
+            *s, [&](const std::vector<uint8_t> &bytes) {
+                lu_count.fetch_add(1);
+                if (!bytes.empty()) last_update = bytes;
+            });
+
+        s->set("presence", str_value("online"));
+        s->delete_("presence");
+
+        if (ev_count.load() == 0) return fail("ext::subscribe(store) lambda never fired");
+        bool saw_presence = false;
+        for (const auto &k : seen_keys) {
+            if (k == "presence") saw_presence = true;
+        }
+        if (!saw_presence) return fail("ext ephemeral event missing 'presence'");
+
+        if (lu_count.load() == 0) {
+            return fail("ext::subscribe_local_update(store) lambda never fired");
+        }
+        if (last_update.empty()) return fail("ext local-update bytes were empty");
+
+        ev_sub->unsubscribe();
+        lu_sub->unsubscribe();
+    }
+
     return true;
 }
 

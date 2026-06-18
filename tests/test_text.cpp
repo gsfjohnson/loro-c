@@ -1,6 +1,8 @@
 // Exercises LoroText: insert / delete / mark / unmark / slice / splice /
-// length variants / push_str / cursor stability across edits.
+// length variants / push_str / cursor stability across edits / get_richtext_value.
 #include "test_helpers.hpp"
+
+#include <loro/loro_ext.hpp>
 
 using namespace loro_test;
 
@@ -77,6 +79,33 @@ bool run() {
 
     if (text->is_empty()) return fail("text should not be empty");
     if (!text->is_attached()) return fail("text from doc should be attached");
+
+    // --- get_richtext_value over non-ASCII text + attributes (UPVERT_3) ---
+    // "日本語" is 3 unicode codepoints (9 UTF-8 bytes); "😀" is 1 codepoint (2 UTF-16 units).
+    // Marking the leading CJK run exercises the byte/codepoint + attribute paths together.
+    auto rich = doc->get_text(root("rich"));
+    rich->insert(0, "日本語😀");
+    rich->mark(0, 3, "bold", bool_value(true));
+
+    auto richtext = rich->get_richtext_value();
+    auto *rich_ops = std::get_if<loro::LoroValue::kList>(&richtext.get_variant());
+    if (!rich_ops) return fail("get_richtext_value should be a list");
+    if (rich_ops->value->empty()) return fail("get_richtext_value list should be non-empty");
+
+    bool saw_bold_attr = false;
+    for (const auto &op : *rich_ops->value) {
+        auto *op_map = std::get_if<loro::LoroValue::kMap>(&op.get_variant());
+        if (!op_map) continue;
+        auto attrs_it = op_map->value->find("attributes");
+        if (attrs_it == op_map->value->end()) continue;
+        auto *attrs = std::get_if<loro::LoroValue::kMap>(&attrs_it->second.get_variant());
+        if (attrs && attrs->value->find("bold") != attrs->value->end()) saw_bold_attr = true;
+    }
+    if (!saw_bold_attr) return fail("get_richtext_value did not carry the bold attribute");
+
+    // The downstream app feeds the value straight to ext::value_to_string.
+    std::string rendered = loro::ext::value_to_string(richtext);
+    if (rendered.empty()) return fail("value_to_string(richtext) should be non-empty");
 
     return true;
 }

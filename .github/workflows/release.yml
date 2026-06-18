@@ -41,6 +41,10 @@ jobs:
             artifact: linux-x86_64
           - os: macos-15
             artifact: macos-arm64
+          # Intel (x86_64) macOS image — builds natively for x86_64-apple-darwin
+          # via the default Corrosion path, same steps as the arm64 job above.
+          - os: macos-15-intel
+            artifact: macos-x86_64
           # Native MSVC toolchain (default Corrosion path). ABI-incompatible
           # with the gnullvm artifact built by the build-windows-gnullvm job
           # below — consumers pick the one matching their compiler.

@@ -14,7 +14,9 @@ set(_loro_tests
     test_awareness test_ephemeral_store test_undo test_fractional_index test_version_vector
     test_jsonpath test_subscriptions test_ext
     # loro-c-authored, covering loro-cpp's blind spots.
-    test_value_fidelity test_cursor test_text_utf8)
+    test_value_fidelity test_cursor test_text_utf8
+    # Issue #2: nested-container id resolution + list/map mark values.
+    test_get_container test_text_mark)
 
 foreach(_t IN LISTS _loro_tests)
     add_executable(loro_${_t} ${_t}.cpp)

@@ -589,16 +589,6 @@ inline LoroExpandType to_c_expand(ExpandType e) {
     return LORO_EXPAND_AFTER;
 }
 
-/// Extracts the root-container name from a ContainerIdLike. The conformance tests only use
-/// root (by-name) ids.
-inline std::string root_name(const std::shared_ptr<ContainerIdLike> &id, ContainerType ty) {
-    ContainerId cid = id->as_container_id(std::move(ty));
-    if (auto *root = std::get_if<ContainerId::kRoot>(&cid.get_variant())) {
-        return root->name;
-    }
-    throw LoroError("conformance spike: only root (by-name) ContainerId is supported here");
-}
-
 // ---- ContainerType / ContainerId <-> "cid:" string (RESHAPE Phase 2) --------
 //
 // Matches loro-common 1.13.1 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
@@ -994,8 +984,31 @@ inline std::string value_to_json(const LoroValue &v) {
                 std::string out;
                 json_escape(alt.value, out);
                 return out;
-            } else {
-                throw LoroError("conformance spike: only scalar LoroValue kinds cross as JSON");
+            } else if constexpr (std::is_same_v<T, LoroValue::kList>) {
+                std::string out = "[";
+                bool first = true;
+                for (const auto &el : *alt.value) {
+                    if (!first) out += ",";
+                    first = false;
+                    out += value_to_json(el);
+                }
+                out += "]";
+                return out;
+            } else if constexpr (std::is_same_v<T, LoroValue::kMap>) {
+                std::string out = "{";
+                bool first = true;
+                for (const auto &kv : *alt.value) {
+                    if (!first) out += ",";
+                    first = false;
+                    json_escape(kv.first, out);  // appends a quoted/escaped key
+                    out += ":";
+                    out += value_to_json(kv.second);
+                }
+                out += "}";
+                return out;
+            } else {  // kBinary, kContainer
+                throw LoroError("value_to_json: binary/container LoroValue has no JSON form "
+                                "(mark values must be scalar, list, or map)");
             }
         },
         v.get_variant());
@@ -1068,8 +1081,8 @@ inline ::LoroValue *to_c_value(const LoroValue &v) {
                 }
                 return map;
             } else {  // kContainer
-                throw LoroError("conformance spike: container-valued LoroValue cannot be sent to "
-                                "loro-c");
+                throw LoroError("to_c_value: container-valued LoroValue cannot be written as a "
+                                "value; attach child containers via insert_container instead");
             }
         },
         v.get_variant());
@@ -2121,6 +2134,32 @@ struct Factory {
     }
 };
 
+/// Resolves a `ContainerIdLike` to a typed container handle for `LoroDoc::get_*`. Root
+/// (by-name) ids take the get-or-create `by_name` path (`loro_doc_get_*`); normal/nested ids
+/// take the non-creating, typed `try_by_cid` path (`loro_doc_try_get_*`), which returns null if
+/// the container does not exist (or is not that type). Defined after `Factory` so its `wrap`
+/// overloads are visible.
+template <typename CType>
+auto get_container_typed(::LoroDoc *doc, const std::shared_ptr<ContainerIdLike> &id,
+                         ContainerType ty,
+                         CType *(*by_name)(const ::LoroDoc *, const char *, uintptr_t),
+                         CType *(*try_by_cid)(const ::LoroDoc *, const char *, uintptr_t),
+                         const char *what) -> decltype(Factory::wrap(std::declval<CType *>())) {
+    ContainerId cid = id->as_container_id(std::move(ty));
+    CType *h = nullptr;
+    if (auto *root = std::get_if<ContainerId::kRoot>(&cid.get_variant())) {
+        h = by_name(doc, root->name.data(), root->name.size());  // get-or-create
+    } else {
+        std::string s = container_id_to_cid_string(cid);
+        h = try_by_cid(doc, s.data(), s.size());  // non-creating; null if absent / wrong type
+    }
+    if (!h) {
+        std::string msg = last_error_message();
+        throw LoroError(msg.empty() ? std::string(what) + " returned null" : msg);
+    }
+    return Factory::wrap(h);
+}
+
 }  // namespace detail
 
 // --------------------------------------------- out-of-line wrapper definitions
@@ -2704,65 +2743,44 @@ struct LoroDoc {
         return std::shared_ptr<LoroDoc>(new LoroDoc(d));
     }
 
+    // Resolves a root (by-name) OR a normal/nested (`{counter}@{peer}`) ContainerId. Roots take
+    // the get-or-create `loro_doc_get_*` path; nested ids take the non-creating typed
+    // `loro_doc_try_get_*` path (see detail::get_container_typed).
     std::shared_ptr<LoroText> get_text(const std::shared_ptr<ContainerIdLike> &id) {
-        std::string name = detail::root_name(id, ContainerType(ContainerType::kText{}));
-        ::LoroText *t = loro_doc_get_text(raw_, name.data(), name.size());
-        if (!t) {
-            std::string msg = detail::last_error_message();
-            throw LoroError(msg.empty() ? "loro_doc_get_text returned null" : msg);
-        }
-        return detail::Factory::wrap(t);
+        return detail::get_container_typed<::LoroText>(
+            raw_, id, ContainerType(ContainerType::kText{}), loro_doc_get_text,
+            loro_doc_try_get_text, "loro_doc_get_text");
     }
 
     std::shared_ptr<LoroMap> get_map(const std::shared_ptr<ContainerIdLike> &id) {
-        std::string name = detail::root_name(id, ContainerType(ContainerType::kMap{}));
-        ::LoroMap *m = loro_doc_get_map(raw_, name.data(), name.size());
-        if (!m) {
-            std::string msg = detail::last_error_message();
-            throw LoroError(msg.empty() ? "loro_doc_get_map returned null" : msg);
-        }
-        return detail::Factory::wrap(m);
+        return detail::get_container_typed<::LoroMap>(
+            raw_, id, ContainerType(ContainerType::kMap{}), loro_doc_get_map,
+            loro_doc_try_get_map, "loro_doc_get_map");
     }
 
     std::shared_ptr<LoroList> get_list(const std::shared_ptr<ContainerIdLike> &id) {
-        std::string name = detail::root_name(id, ContainerType(ContainerType::kList{}));
-        ::LoroList *l = loro_doc_get_list(raw_, name.data(), name.size());
-        if (!l) {
-            std::string msg = detail::last_error_message();
-            throw LoroError(msg.empty() ? "loro_doc_get_list returned null" : msg);
-        }
-        return detail::Factory::wrap(l);
+        return detail::get_container_typed<::LoroList>(
+            raw_, id, ContainerType(ContainerType::kList{}), loro_doc_get_list,
+            loro_doc_try_get_list, "loro_doc_get_list");
     }
 
     std::shared_ptr<LoroMovableList> get_movable_list(
         const std::shared_ptr<ContainerIdLike> &id) {
-        std::string name = detail::root_name(id, ContainerType(ContainerType::kMovableList{}));
-        ::LoroMovableList *l = loro_doc_get_movable_list(raw_, name.data(), name.size());
-        if (!l) {
-            std::string msg = detail::last_error_message();
-            throw LoroError(msg.empty() ? "loro_doc_get_movable_list returned null" : msg);
-        }
-        return detail::Factory::wrap(l);
+        return detail::get_container_typed<::LoroMovableList>(
+            raw_, id, ContainerType(ContainerType::kMovableList{}), loro_doc_get_movable_list,
+            loro_doc_try_get_movable_list, "loro_doc_get_movable_list");
     }
 
     std::shared_ptr<LoroTree> get_tree(const std::shared_ptr<ContainerIdLike> &id) {
-        std::string name = detail::root_name(id, ContainerType(ContainerType::kTree{}));
-        ::LoroTree *t = loro_doc_get_tree(raw_, name.data(), name.size());
-        if (!t) {
-            std::string msg = detail::last_error_message();
-            throw LoroError(msg.empty() ? "loro_doc_get_tree returned null" : msg);
-        }
-        return detail::Factory::wrap(t);
+        return detail::get_container_typed<::LoroTree>(
+            raw_, id, ContainerType(ContainerType::kTree{}), loro_doc_get_tree,
+            loro_doc_try_get_tree, "loro_doc_get_tree");
     }
 
     std::shared_ptr<LoroCounter> get_counter(const std::shared_ptr<ContainerIdLike> &id) {
-        std::string name = detail::root_name(id, ContainerType(ContainerType::kCounter{}));
-        ::LoroCounter *c = loro_doc_get_counter(raw_, name.data(), name.size());
-        if (!c) {
-            std::string msg = detail::last_error_message();
-            throw LoroError(msg.empty() ? "loro_doc_get_counter returned null" : msg);
-        }
-        return detail::Factory::wrap(c);
+        return detail::get_container_typed<::LoroCounter>(
+            raw_, id, ContainerType(ContainerType::kCounter{}), loro_doc_get_counter,
+            loro_doc_try_get_counter, "loro_doc_get_counter");
     }
 
     uint64_t peer_id() { return loro_doc_peer_id(raw_); }

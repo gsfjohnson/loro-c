@@ -44,7 +44,7 @@ fn to_side(s: LoroSide) -> Side {
     }
 }
 
-fn from_side(s: Side) -> LoroSide {
+pub(crate) fn from_side(s: Side) -> LoroSide {
     match s {
         Side::Left => LoroSide::LORO_SIDE_LEFT,
         Side::Middle => LoroSide::LORO_SIDE_MIDDLE,
@@ -67,7 +67,11 @@ pub struct LoroPosQueryResult {
 pub struct LoroCursor(Cursor);
 
 impl LoroCursor {
-    fn inner(&self) -> &Cursor {
+    pub(crate) fn from_inner(c: Cursor) -> LoroCursor {
+        LoroCursor(c)
+    }
+
+    pub(crate) fn inner(&self) -> &Cursor {
         &self.0
     }
 }

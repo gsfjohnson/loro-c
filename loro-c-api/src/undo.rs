@@ -15,6 +15,7 @@
 //! Free the manager with [`loro_undo_manager_free`]. Keep the document's peer id stable
 //! while a manager is in use.
 
+use crate::cursor::{from_side, LoroCursor, LoroSide};
 use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::LoroDiffEvent;
@@ -622,5 +623,86 @@ pub extern "C" fn loro_undo_meta_get_value(
             }
         };
         value_typed::into_raw(meta.value.clone())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// LoroUndoMeta cursors (callback-scoped) — loro-cpp parity for `UndoItemMeta.cursors`
+// ---------------------------------------------------------------------------
+
+/// Appends `cursor` to the undo item's cursor list. Call this from an on_push listener to
+/// capture a cursor whose position should be restored when the item is later popped — loro
+/// transforms the stored cursors by any intervening (remote) ops, so on_pop sees the replayed
+/// position. The cursor is cloned in; the caller still owns (and must free) `cursor`. Returns
+/// `LORO_ERR_INVALID_ARG` on a null handle or cursor.
+#[no_mangle]
+pub extern "C" fn loro_undo_meta_add_cursor(
+    meta: *mut LoroUndoMeta,
+    cursor: *const LoroCursor,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let meta = match unsafe { (meta as *mut UndoItemMeta).as_mut() } {
+            Some(m) => m,
+            None => {
+                set_last_error("null undo meta pointer passed to loro-c-api");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+        };
+        let cursor = deref_or!(cursor, LoroStatus::LORO_ERR_INVALID_ARG);
+        meta.add_cursor(cursor.inner());
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns the number of cursors attached to the undo item (whatever on_push stored). Call this
+/// from an on_pop listener. Returns 0 on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_undo_meta_cursors_len(meta: *const LoroUndoMeta) -> usize {
+    ffi_guard!(0usize, {
+        let meta = match unsafe { (meta as *const UndoItemMeta).as_ref() } {
+            Some(m) => m,
+            None => {
+                set_last_error("null undo meta pointer passed to loro-c-api");
+                return 0;
+            }
+        };
+        meta.cursors.len()
+    })
+}
+
+/// Returns the `index`-th attached cursor as an owned `LoroCursor*` (free with
+/// `loro_cursor_free`), writing its transformed absolute position into `*out_pos` and the side
+/// into `*out_side` (each written only on success, when the pointer is non-null). Call this from
+/// an on_pop listener after reading [`loro_undo_meta_cursors_len`]. Returns null on a null
+/// handle, an out-of-range index, or a caught panic.
+#[no_mangle]
+pub extern "C" fn loro_undo_meta_get_cursor(
+    meta: *const LoroUndoMeta,
+    index: usize,
+    out_pos: *mut usize,
+    out_side: *mut LoroSide,
+) -> *mut LoroCursor {
+    ffi_guard!(std::ptr::null_mut(), {
+        let meta = match unsafe { (meta as *const UndoItemMeta).as_ref() } {
+            Some(m) => m,
+            None => {
+                set_last_error("null undo meta pointer passed to loro-c-api");
+                return std::ptr::null_mut();
+            }
+        };
+        let cwp = match meta.cursors.get(index) {
+            Some(c) => c,
+            None => {
+                set_last_error("undo meta cursor index out of range");
+                return std::ptr::null_mut();
+            }
+        };
+        if !out_pos.is_null() {
+            unsafe { out_pos.write(cwp.pos.pos) };
+        }
+        if !out_side.is_null() {
+            unsafe { out_side.write(from_side(cwp.pos.side)) };
+        }
+        Box::into_raw(Box::new(LoroCursor::from_inner(cwp.cursor.clone())))
     })
 }

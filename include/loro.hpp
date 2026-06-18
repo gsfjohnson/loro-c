@@ -418,8 +418,8 @@ struct CursorWithPos {
 };
 
 /// Metadata an [`OnPush`] listener attaches to an undo item (loro-cpp `UndoItemMeta`): a typed
-/// `value` plus any `cursors` to restore. RESHAPE Phase 4 always reports `cursors` empty — the
-/// C ABI's callback-scoped `LoroUndoMeta` has no cursor channel (full cursor capture is Phase 5).
+/// `value` plus any `cursors` to restore. Cursors round-trip through push→pop; loro transforms
+/// each stored cursor by intervening ops, so on_pop reports its replayed absolute position.
 struct UndoItemMeta {
     LoroValue value;
     std::vector<CursorWithPos> cursors;
@@ -1224,16 +1224,22 @@ private:
     friend struct LoroList;
     friend struct LoroMovableList;
     friend struct LoroDoc;
+    friend struct detail::Factory;
 };
 
 struct LoroText {
-    /// Constructs a *detached* text container (loro-c: `loro_container_new`). Attach it by
-    /// passing it to a parent's `insert_text_container`, which consumes it and returns the
-    /// attached handle. A detached text is not editable until attached.
+    /// Constructs a *detached* text container (loro-c: `loro_container_new`). It is editable
+    /// while detached; attach it by passing it to a parent's `insert_text_container`, which
+    /// consumes it and returns the attached handle (replaying any buffered ops).
     static std::shared_ptr<LoroText> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_TEXT);
         if (!c) throw LoroError("loro_container_new(Text) returned null");
-        return std::shared_ptr<LoroText>(new LoroText(c));
+        ::LoroText *t = loro_container_get_text(c);  // typed handle sharing detached state
+        if (!t) {
+            loro_container_free(c);
+            throw LoroError("loro_container_get_text returned null");
+        }
+        return std::shared_ptr<LoroText>(new LoroText(c, t));
     }
 
     void insert(uint32_t pos, const std::string &s) {
@@ -1378,14 +1384,16 @@ struct LoroText {
 
     ~LoroText() {
         if (raw_) loro_text_free(raw_);
-        else if (container_) loro_container_free(container_);
+        if (container_) loro_container_free(container_);
     }
     LoroText(const LoroText &) = delete;
     LoroText &operator=(const LoroText &) = delete;
 
 private:
-    explicit LoroText(::LoroText *raw) : raw_(raw) {}        // attached
-    explicit LoroText(::LoroContainer *c) : container_(c) {}  // detached (from init())
+    explicit LoroText(::LoroText *raw) : raw_(raw) {}  // attached
+    // detached (from init()): a typed editing handle plus the type-erased container it shares
+    // state with; the container is consumed on attach, the typed handle frees independently.
+    LoroText(::LoroContainer *c, ::LoroText *raw) : raw_(raw), container_(c) {}
 
     /// Releases the detached container for attachment (nulls it). Throws if not detached.
     ::LoroContainer *take_container() {
@@ -1404,7 +1412,12 @@ struct LoroMap {
     static std::shared_ptr<LoroMap> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_MAP);
         if (!c) throw LoroError("loro_container_new(Map) returned null");
-        return std::shared_ptr<LoroMap>(new LoroMap(c));
+        ::LoroMap *m = loro_container_get_map(c);  // typed handle sharing detached state
+        if (!m) {
+            loro_container_free(c);
+            throw LoroError("loro_container_get_map returned null");
+        }
+        return std::shared_ptr<LoroMap>(new LoroMap(c, m));
     }
 
     void insert(const std::string &key, const std::shared_ptr<LoroValueLike> &value) {
@@ -1414,6 +1427,9 @@ struct LoroMap {
     }
 
     std::shared_ptr<ValueOrContainer> get(const std::string &key);  // out-of-line
+
+    /// Returns whether `key` is present (loro-cpp parity helper). Non-throwing.
+    bool contains(const std::string &key);  // out-of-line
 
     void delete_(const std::string &key) {
         detail::check(loro_map_delete(map(), key.data(), key.size()));
@@ -1475,14 +1491,15 @@ struct LoroMap {
 
     ~LoroMap() {
         if (raw_) loro_map_free(raw_);
-        else if (container_) loro_container_free(container_);
+        if (container_) loro_container_free(container_);
     }
     LoroMap(const LoroMap &) = delete;
     LoroMap &operator=(const LoroMap &) = delete;
 
 private:
-    explicit LoroMap(::LoroMap *raw) : raw_(raw) {}          // attached
-    explicit LoroMap(::LoroContainer *c) : container_(c) {}  // detached (from init())
+    explicit LoroMap(::LoroMap *raw) : raw_(raw) {}  // attached
+    // detached (from init()): typed editing handle + the type-erased container it shares state with.
+    LoroMap(::LoroContainer *c, ::LoroMap *raw) : raw_(raw), container_(c) {}
 
     ::LoroMap *map() const {
         if (!raw_) throw LoroError("LoroMap is detached (not attached to a document)");
@@ -1511,7 +1528,12 @@ struct LoroList {
     static std::shared_ptr<LoroList> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_LIST);
         if (!c) throw LoroError("loro_container_new(List) returned null");
-        return std::shared_ptr<LoroList>(new LoroList(c));
+        ::LoroList *l = loro_container_get_list(c);  // typed handle sharing detached state
+        if (!l) {
+            loro_container_free(c);
+            throw LoroError("loro_container_get_list returned null");
+        }
+        return std::shared_ptr<LoroList>(new LoroList(c, l));
     }
 
     void insert(uint32_t pos, const std::shared_ptr<LoroValueLike> &value) {
@@ -1583,14 +1605,15 @@ struct LoroList {
 
     ~LoroList() {
         if (raw_) loro_list_free(raw_);
-        else if (container_) loro_container_free(container_);
+        if (container_) loro_container_free(container_);
     }
     LoroList(const LoroList &) = delete;
     LoroList &operator=(const LoroList &) = delete;
 
 private:
-    explicit LoroList(::LoroList *raw) : raw_(raw) {}
-    explicit LoroList(::LoroContainer *c) : container_(c) {}
+    explicit LoroList(::LoroList *raw) : raw_(raw) {}  // attached
+    // detached (from init()): typed editing handle + the type-erased container it shares state with.
+    LoroList(::LoroContainer *c, ::LoroList *raw) : raw_(raw), container_(c) {}
 
     ::LoroList *list() const {
         if (!raw_) throw LoroError("LoroList is detached (not attached to a document)");
@@ -1614,7 +1637,12 @@ struct LoroMovableList {
     static std::shared_ptr<LoroMovableList> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_MOVABLE_LIST);
         if (!c) throw LoroError("loro_container_new(MovableList) returned null");
-        return std::shared_ptr<LoroMovableList>(new LoroMovableList(c));
+        ::LoroMovableList *l = loro_container_get_movable_list(c);  // shares detached state
+        if (!l) {
+            loro_container_free(c);
+            throw LoroError("loro_container_get_movable_list returned null");
+        }
+        return std::shared_ptr<LoroMovableList>(new LoroMovableList(c, l));
     }
 
     void insert(uint32_t pos, const std::shared_ptr<LoroValueLike> &value) {
@@ -1696,14 +1724,15 @@ struct LoroMovableList {
 
     ~LoroMovableList() {
         if (raw_) loro_movable_list_free(raw_);
-        else if (container_) loro_container_free(container_);
+        if (container_) loro_container_free(container_);
     }
     LoroMovableList(const LoroMovableList &) = delete;
     LoroMovableList &operator=(const LoroMovableList &) = delete;
 
 private:
-    explicit LoroMovableList(::LoroMovableList *raw) : raw_(raw) {}
-    explicit LoroMovableList(::LoroContainer *c) : container_(c) {}
+    explicit LoroMovableList(::LoroMovableList *raw) : raw_(raw) {}  // attached
+    // detached (from init()): typed editing handle + the type-erased container it shares state with.
+    LoroMovableList(::LoroContainer *c, ::LoroMovableList *raw) : raw_(raw), container_(c) {}
 
     ::LoroMovableList *list() const {
         if (!raw_) throw LoroError("LoroMovableList is detached (not attached to a document)");
@@ -1729,7 +1758,12 @@ struct LoroTree {
     static std::shared_ptr<LoroTree> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_TREE);
         if (!c) throw LoroError("loro_container_new(Tree) returned null");
-        return std::shared_ptr<LoroTree>(new LoroTree(c));
+        ::LoroTree *t = loro_container_get_tree(c);  // typed handle sharing detached state
+        if (!t) {
+            loro_container_free(c);
+            throw LoroError("loro_container_get_tree returned null");
+        }
+        return std::shared_ptr<LoroTree>(new LoroTree(c, t));
     }
 
     TreeId create(TreeParentId parent) {
@@ -1866,14 +1900,15 @@ struct LoroTree {
 
     ~LoroTree() {
         if (raw_) loro_tree_free(raw_);
-        else if (container_) loro_container_free(container_);
+        if (container_) loro_container_free(container_);
     }
     LoroTree(const LoroTree &) = delete;
     LoroTree &operator=(const LoroTree &) = delete;
 
 private:
-    explicit LoroTree(::LoroTree *raw) : raw_(raw) {}
-    explicit LoroTree(::LoroContainer *c) : container_(c) {}
+    explicit LoroTree(::LoroTree *raw) : raw_(raw) {}  // attached
+    // detached (from init()): typed editing handle + the type-erased container it shares state with.
+    LoroTree(::LoroContainer *c, ::LoroTree *raw) : raw_(raw), container_(c) {}
 
     ::LoroTree *tree() const {
         if (!raw_) throw LoroError("LoroTree is detached (not attached to a document)");
@@ -1904,7 +1939,12 @@ struct LoroCounter {
     static std::shared_ptr<LoroCounter> init() {
         ::LoroContainer *c = loro_container_new(LORO_CONTAINER_COUNTER);
         if (!c) throw LoroError("loro_container_new(Counter) returned null");
-        return std::shared_ptr<LoroCounter>(new LoroCounter(c));
+        ::LoroCounter *cn = loro_container_get_counter(c);  // typed handle sharing detached state
+        if (!cn) {
+            loro_container_free(c);
+            throw LoroError("loro_container_get_counter returned null");
+        }
+        return std::shared_ptr<LoroCounter>(new LoroCounter(c, cn));
     }
 
     void increment(double value) { detail::check(loro_counter_increment(counter(), value)); }
@@ -1923,14 +1963,15 @@ struct LoroCounter {
 
     ~LoroCounter() {
         if (raw_) loro_counter_free(raw_);
-        else if (container_) loro_container_free(container_);
+        if (container_) loro_container_free(container_);
     }
     LoroCounter(const LoroCounter &) = delete;
     LoroCounter &operator=(const LoroCounter &) = delete;
 
 private:
-    explicit LoroCounter(::LoroCounter *raw) : raw_(raw) {}
-    explicit LoroCounter(::LoroContainer *c) : container_(c) {}
+    explicit LoroCounter(::LoroCounter *raw) : raw_(raw) {}  // attached
+    // detached (from init()): typed editing handle + the type-erased container it shares state with.
+    LoroCounter(::LoroContainer *c, ::LoroCounter *raw) : raw_(raw), container_(c) {}
 
     ::LoroCounter *counter() const {
         if (!raw_) throw LoroError("LoroCounter is detached (not attached to a document)");
@@ -2023,6 +2064,13 @@ struct Factory {
         return std::shared_ptr<ValueOrContainer>(new ValueOrContainer(r));
     }
 
+    /// Adopts an owned `LoroCursor*` as a `Cursor` wrapper (used by the undo on_pop trampoline).
+    static std::shared_ptr<Cursor> wrap_cursor(::LoroCursor *r) {
+        return std::shared_ptr<Cursor>(new Cursor(r));
+    }
+    /// Borrows the raw `LoroCursor*` backing a `Cursor` (used by the undo on_push trampoline).
+    static ::LoroCursor *cursor_raw(const std::shared_ptr<Cursor> &c) { return c->raw_; }
+
     /// Releases a detached wrapper's container handle for attachment.
     template <class T>
     static ::LoroContainer *take(const std::shared_ptr<T> &c) {
@@ -2080,9 +2128,11 @@ struct Factory {
 inline std::shared_ptr<ValueOrContainer> LoroMap::get(const std::string &key) {
     ::LoroValueOrContainer *voc =
         loro_map_get_value_or_container(map(), key.data(), key.size());
-    if (!voc) throw LoroError(detail::last_error_message());
+    if (!voc) return nullptr;  // absent key → null, matching loro-cpp
     return detail::Factory::voc(voc);
 }
+
+inline bool LoroMap::contains(const std::string &key) { return get(key) != nullptr; }
 
 inline std::vector<std::shared_ptr<ValueOrContainer>> LoroMap::values() {
     std::vector<std::shared_ptr<ValueOrContainer>> out;
@@ -2159,7 +2209,7 @@ inline std::shared_ptr<LoroCounter> LoroMap::get_or_create_counter_container(
 
 inline std::shared_ptr<ValueOrContainer> LoroList::get(uint32_t index) {
     ::LoroValueOrContainer *voc = loro_list_get_value_or_container(list(), index);
-    if (!voc) throw LoroError(detail::last_error_message());
+    if (!voc) return nullptr;  // out-of-range index → null, matching loro-cpp
     return detail::Factory::voc(voc);
 }
 
@@ -2198,7 +2248,7 @@ inline std::shared_ptr<LoroCounter> LoroList::insert_counter_container(
 
 inline std::shared_ptr<ValueOrContainer> LoroMovableList::get(uint32_t index) {
     ::LoroValueOrContainer *voc = loro_movable_list_get_value_or_container(list(), index);
-    if (!voc) throw LoroError(detail::last_error_message());
+    if (!voc) return nullptr;  // out-of-range index → null, matching loro-cpp
     return detail::Factory::voc(voc);
 }
 
@@ -3604,8 +3654,9 @@ struct OnPopHolder {
 
 // Trampolines mirror the subscription ones: build the owned C++ payload from the callback-scoped
 // C view and dispatch, never letting a C++ exception unwind across the C ABI. on_push writes the
-// returned meta's value back into the writable `LoroUndoMeta` (typed, no JSON); its `cursors` are
-// dropped because the C ABI meta has no cursor channel (Phase 4 empty-cursors stub).
+// returned meta's value (typed, no JSON) and its cursors back into the writable `LoroUndoMeta`;
+// on_pop reads both back out. loro transforms the stored cursors by intervening ops between push
+// and pop, so a popped cursor reports its replayed position.
 extern "C" inline void loro_conf_on_push_invoke(::LoroUndoOrRedo kind, ::LoroCounterSpan span,
                                                 const ::LoroDiffEvent *event,
                                                 ::LoroUndoMeta *meta, void *user_data) {
@@ -3618,6 +3669,9 @@ extern "C" inline void loro_conf_on_push_invoke(::LoroUndoOrRedo kind, ::LoroCou
                                              CounterSpan{span.start, span.end}, std::move(ev));
         detail::CValue cv(detail::to_c_value(r.value));
         loro_undo_meta_set_value(meta, cv.get());
+        for (const auto &cwp : r.cursors) {
+            if (cwp.cursor) loro_undo_meta_add_cursor(meta, detail::Factory::cursor_raw(cwp.cursor));
+        }
     } catch (...) {
     }
 }
@@ -3635,8 +3689,18 @@ extern "C" inline void loro_conf_on_pop_invoke(::LoroUndoOrRedo kind, ::LoroCoun
             detail::CValue g(v);
             value = detail::from_c_value(v);
         }
+        std::vector<CursorWithPos> cursors;
+        for (size_t i = 0, n = loro_undo_meta_cursors_len(meta); i < n; ++i) {
+            uintptr_t pos = 0;
+            ::LoroSide side = LORO_SIDE_MIDDLE;
+            if (::LoroCursor *c = loro_undo_meta_get_cursor(meta, i, &pos, &side)) {
+                cursors.push_back(CursorWithPos{
+                    detail::Factory::wrap_cursor(c),
+                    AbsolutePosition{static_cast<uint32_t>(pos), detail::from_c_side(side)}});
+            }
+        }
         holder->cb->on_pop(detail::from_c_undo_or_redo(kind), CounterSpan{span.start, span.end},
-                           UndoItemMeta{std::move(value), {}});
+                           UndoItemMeta{std::move(value), std::move(cursors)});
     } catch (...) {
     }
 }

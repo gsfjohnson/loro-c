@@ -79,6 +79,30 @@ bool run() {
     auto inner_it = deep_map->value->find("inner");
     if (inner_it == deep_map->value->end()) return fail("deep value missing 'inner'");
 
+    // Issue #1: get() on a missing key returns nullptr (loro-cpp parity), not a throw; and
+    // contains() reports membership without throwing.
+    if (map->get("does_not_exist") != nullptr) {
+        return fail("map.get(absent) should return nullptr, not throw");
+    }
+    if (map->contains("does_not_exist")) return fail("contains(absent) should be false");
+    if (!map->contains("name")) return fail("contains(present) should be true");
+
+    // Issue #3: a detached container is editable *before* attach, and its buffered content
+    // survives grafting via insert_*_container.
+    auto detached_pre = loro::LoroMap::init();
+    detached_pre->insert("kind", str_value("paragraph"));  // edited while detached
+    detached_pre->insert("level", i64_value(2));
+    map->insert_map_container("predetached", detached_pre);
+    auto pre_map = map->get("predetached")->as_loro_map();
+    auto kind_v = pre_map->get("kind")->as_value();
+    if (!kind_v.has_value() || loro_value_as_string(*kind_v) != "paragraph") {
+        return fail("detached-then-grafted map lost 'kind'");
+    }
+    auto level_v = pre_map->get("level")->as_value();
+    if (!level_v.has_value() || loro_value_as_i64(*level_v) != 2) {
+        return fail("detached-then-grafted map lost 'level'");
+    }
+
     return true;
 }
 

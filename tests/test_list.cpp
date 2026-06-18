@@ -26,6 +26,9 @@ bool run() {
         }
     }
 
+    // Issue #1: get() with an out-of-range index returns nullptr (loro-cpp parity), not a throw.
+    if (list->get(999) != nullptr) return fail("list.get(out-of-range) should return nullptr");
+
     auto popped = list->pop();
     if (!popped.has_value() || loro_value_as_i64(*popped) != 30) {
         return fail("pop should return 30");
@@ -49,6 +52,20 @@ bool run() {
     if (!first_voc->is_container()) return fail("list[0] should be container");
     auto t = first_voc->as_loro_text();
     if (t->to_string() != "first") return fail("nested text readback wrong");
+
+    // Issue #3: a detached list is editable before attach; its content survives grafting.
+    auto detached_list = loro::LoroList::init();
+    detached_list->push(i64_value(100));  // edited while detached
+    detached_list->push(i64_value(200));
+    list->insert_list_container(0, detached_list);
+    auto nested = list->get(0)->as_loro_list();
+    if (nested->len() != 2) return fail("detached-then-grafted list lost items");
+    if (loro_value_as_i64(*nested->get(0)->as_value()) != 100) {
+        return fail("detached-then-grafted list[0] wrong");
+    }
+    if (loro_value_as_i64(*nested->get(1)->as_value()) != 200) {
+        return fail("detached-then-grafted list[1] wrong");
+    }
 
     list->clear();
     if (list->len() != 0) return fail("len != 0 after clear");

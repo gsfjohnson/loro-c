@@ -3356,6 +3356,34 @@ enum LoroStatus loro_undo_meta_set_value(struct LoroUndoMeta *meta, const struct
 struct LoroValue *loro_undo_meta_get_value(const struct LoroUndoMeta *meta);
 
 /**
+ * Appends `cursor` to the undo item's cursor list. Call this from an on_push listener to
+ * capture a cursor whose position should be restored when the item is later popped — loro
+ * transforms the stored cursors by any intervening (remote) ops, so on_pop sees the replayed
+ * position. The cursor is cloned in; the caller still owns (and must free) `cursor`. Returns
+ * `LORO_ERR_INVALID_ARG` on a null handle or cursor.
+ */
+enum LoroStatus loro_undo_meta_add_cursor(struct LoroUndoMeta *meta,
+                                          const struct LoroCursor *cursor);
+
+/**
+ * Returns the number of cursors attached to the undo item (whatever on_push stored). Call this
+ * from an on_pop listener. Returns 0 on a null handle.
+ */
+uintptr_t loro_undo_meta_cursors_len(const struct LoroUndoMeta *meta);
+
+/**
+ * Returns the `index`-th attached cursor as an owned `LoroCursor*` (free with
+ * `loro_cursor_free`), writing its transformed absolute position into `*out_pos` and the side
+ * into `*out_side` (each written only on success, when the pointer is non-null). Call this from
+ * an on_pop listener after reading [`loro_undo_meta_cursors_len`]. Returns null on a null
+ * handle, an out-of-range index, or a caught panic.
+ */
+struct LoroCursor *loro_undo_meta_get_cursor(const struct LoroUndoMeta *meta,
+                                             uintptr_t index,
+                                             uintptr_t *out_pos,
+                                             enum LoroSide *out_side);
+
+/**
  * Frees a [`LoroBytes`] previously returned by this library. Passing an
  * all-zero/empty buffer is a no-op. Must be called at most once per buffer.
  */

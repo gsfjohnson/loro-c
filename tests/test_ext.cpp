@@ -248,6 +248,53 @@ bool test_undo_lambdas() {
     return true;
 }
 
+// Issue #2: cursors attached to an UndoItemMeta in on_push must round-trip to on_pop (the C ABI
+// previously had no cursor channel, so they were silently dropped).
+bool test_undo_cursor_roundtrip() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(9);
+    auto undo = loro::UndoManager::init(doc);
+    auto text = doc->get_text(ext::root("body"));
+
+    std::atomic<bool> saw_cursor{false};
+    std::atomic<int> pop_pos{-1};
+
+    ext::set_on_push(*undo, [&](const loro::UndoOrRedo &, const loro::CounterSpan &,
+                                std::optional<loro::DiffEvent>) {
+        loro::UndoItemMeta meta{ext::value_null(), {}};
+        // Capture a cursor at the current end of the text (the position add_cursor records is
+        // derived from the cursor itself, so the AbsolutePosition we pass here is a placeholder).
+        auto cur = text->get_cursor(text->len_unicode(), loro::Side::kMiddle);
+        if (cur) {
+            meta.cursors.push_back(
+                loro::CursorWithPos{cur, loro::AbsolutePosition{0, loro::Side::kMiddle}});
+        }
+        return meta;
+    });
+    ext::set_on_pop(*undo, [&](const loro::UndoOrRedo &, const loro::CounterSpan &,
+                               const loro::UndoItemMeta &m) {
+        if (!m.cursors.empty() && m.cursors[0].cursor) {
+            saw_cursor.store(true);
+            pop_pos.store(static_cast<int>(m.cursors[0].pos.pos));
+        }
+    });
+
+    text->insert(0, "hello");
+    doc->commit();
+    undo->record_new_checkpoint();
+    text->insert(text->len_unicode(), " world");
+    doc->commit();
+    undo->record_new_checkpoint();
+
+    if (!undo->undo()) return fail("undo() returned false");
+    if (!saw_cursor.load()) {
+        return fail("on_pop never received a cursor (issue #2 regression)");
+    }
+    if (pop_pos.load() < 0) return fail("popped cursor pos should be >= 0");
+
+    return true;
+}
+
 bool run() {
     if (!test_value_helpers())          return false;
     if (!test_container_id_helpers())   return false;
@@ -255,6 +302,7 @@ bool run() {
     if (!test_subscribe_lambdas())      return false;
     if (!test_try_call())               return false;
     if (!test_undo_lambdas())           return false;
+    if (!test_undo_cursor_roundtrip())  return false;
     return true;
 }
 

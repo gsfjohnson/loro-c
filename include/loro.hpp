@@ -135,6 +135,14 @@ enum class Side : int32_t {
     kRight = 3,
 };
 
+/// Indexing coordinate system for text positions (loro-cpp `PosType`). Mirrors the C ABI
+/// `LoroPosType` — the common subset of `loro::cursor::PosType`.
+enum class PosType : int32_t {
+    kBytes = 0,
+    kUnicode = 1,
+    kUtf16 = 2,
+};
+
 /// The causal ordering of two version vectors (loro-cpp `Ordering`). GOTCHA: values are 1/2/3 —
 /// the C ABI `loro_version_vector_compare` writes -1/0/1, so map (see
 /// [`VersionVector::partial_cmp`]), never cast.
@@ -551,6 +559,15 @@ inline LoroSide to_c_side(Side s) {
         case Side::kRight: return LORO_SIDE_RIGHT;
     }
     return LORO_SIDE_MIDDLE;
+}
+
+inline LoroPosType to_c_pos_type(PosType p) {
+    switch (p) {
+        case PosType::kBytes: return LORO_POS_BYTES;
+        case PosType::kUnicode: return LORO_POS_UNICODE;
+        case PosType::kUtf16: return LORO_POS_UTF16;
+    }
+    return LORO_POS_UNICODE;
 }
 
 inline Side from_c_side(LoroSide s) {
@@ -1311,6 +1328,18 @@ struct LoroText {
         ::LoroCursor *c = loro_text_get_cursor(raw_, pos, detail::to_c_side(side));
         if (!c) return nullptr;
         return std::shared_ptr<Cursor>(new Cursor(c));
+    }
+
+    /// Converts `pos` from the `from` coordinate system to `to`. Returns nullopt if the
+    /// position is out of bounds or the conversion is unsupported.
+    std::optional<uint32_t> convert_pos(uint32_t pos, PosType from, PosType to) {
+        uintptr_t out = 0;
+        LoroStatus s = loro_text_convert_pos(raw_, static_cast<uintptr_t>(pos),
+                                             detail::to_c_pos_type(from),
+                                             detail::to_c_pos_type(to), &out);
+        if (s == LORO_ERR_INVALID_ARG) return std::nullopt;
+        detail::check(s);
+        return static_cast<uint32_t>(out);
     }
 
     bool is_attached() { return raw_ ? loro_text_is_attached(raw_) : false; }
@@ -2664,6 +2693,11 @@ struct LoroDoc {
         if (!v) throw LoroError(detail::last_error_message());
         return std::shared_ptr<VersionVector>(new VersionVector(v));
     }
+    std::shared_ptr<VersionVector> oplog_vv() {
+        ::LoroVersionVector *v = loro_doc_oplog_vv(raw_);
+        if (!v) throw LoroError(detail::last_error_message());
+        return std::shared_ptr<VersionVector>(new VersionVector(v));
+    }
     std::shared_ptr<Frontiers> state_frontiers() {
         ::LoroFrontiers *f = loro_doc_state_frontiers(raw_);
         if (!f) throw LoroError(detail::last_error_message());
@@ -3329,6 +3363,29 @@ struct EphemeralStore {
 
     void apply(const std::vector<uint8_t> &data) {
         detail::check(loro_ephemeral_store_apply(raw_, data.data(), data.size()));
+    }
+
+    /// Removes entries whose last update is older than the store's timeout (emitting a
+    /// `Timeout` event to subscribers if any are removed).
+    void remove_outdated() {
+        detail::check(loro_ephemeral_store_remove_outdated(raw_));
+    }
+
+    /// Returns every live entry as a `key -> LoroValue` map. The C ABI emits a JSON object
+    /// `{"<key>": <value>, ...}` (values are serialized `LoroValue`s), parsed here via the same
+    /// idiom as `LoroText::to_delta`.
+    std::unordered_map<std::string, LoroValue> get_all_states() {
+        detail::Bytes b;
+        detail::check(loro_ephemeral_store_get_all_states(raw_, b.out()));
+        std::unordered_map<std::string, LoroValue> out;
+        std::string json = b.to_string();
+        if (json.empty()) return out;
+        detail::JsonValue root = detail::parse_json(json);
+        if (root.kind != detail::JsonValue::Kind::Object) return out;
+        for (const auto &kv : root.obj) {
+            out.emplace(kv.first, detail::json_to_value(kv.second));
+        }
+        return out;
     }
 
     std::shared_ptr<Subscription> subscribe(const std::shared_ptr<EphemeralSubscriber> &sub) {

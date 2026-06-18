@@ -20,6 +20,12 @@ bool run() {
         return fail("state_vv missing entry for peer 7");
     }
 
+    auto ovv = doc->oplog_vv();
+    auto olast = ovv->get_last(7);
+    if (!olast.has_value() || *olast <= 0) {
+        return fail("oplog_vv missing entry for peer 7");
+    }
+
     auto encoded = vv->encode();
     auto decoded = loro::VersionVector::decode(encoded);
     if (!decoded->eq(vv)) return fail("VersionVector encode/decode round-trip failed");

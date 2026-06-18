@@ -58,6 +58,27 @@ bool run() {
     }
     if (!saw_bold) return fail("mark_utf8 did not produce a bold attribute in delta");
 
+    // convert_pos round-trips byte offsets <-> codepoint/utf16 indices over the same non-ASCII
+    // fixture ("áb", 3 UTF-8 bytes / 2 codepoints). Byte offset 2 sits right after the 2-byte 'á',
+    // which is codepoint index 1.
+    auto b2u = text->convert_pos(2, loro::PosType::kBytes, loro::PosType::kUnicode);
+    if (!b2u.has_value() || *b2u != 1) {
+        return fail("convert_pos byte 2 -> unicode should be 1");
+    }
+    auto u2b = text->convert_pos(1, loro::PosType::kUnicode, loro::PosType::kBytes);
+    if (!u2b.has_value() || *u2b != 2) {
+        return fail("convert_pos unicode 1 -> bytes should be 2");
+    }
+    // 'á' is a single UTF-16 code unit, so byte offset 2 maps to UTF-16 index 1.
+    auto b2u16 = text->convert_pos(2, loro::PosType::kBytes, loro::PosType::kUtf16);
+    if (!b2u16.has_value() || *b2u16 != 1) {
+        return fail("convert_pos byte 2 -> utf16 should be 1");
+    }
+    // Out-of-bounds positions yield nullopt rather than throwing.
+    if (text->convert_pos(99, loro::PosType::kBytes, loro::PosType::kUnicode).has_value()) {
+        return fail("convert_pos out-of-bounds should be nullopt");
+    }
+
     return true;
 }
 

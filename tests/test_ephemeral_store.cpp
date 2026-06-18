@@ -40,6 +40,21 @@ bool run() {
     auto keys = store->keys();
     if (keys.size() != 2) return fail("expected 2 keys in store");
 
+    auto all = store->get_all_states();
+    if (all.size() != 2) return fail("get_all_states should return 2 entries");
+    auto it_name = all.find("name");
+    if (it_name == all.end() || loro_value_as_string(it_name->second) != "alice") {
+        return fail("get_all_states missing/incorrect 'name'");
+    }
+    auto it_cursor = all.find("cursor");
+    if (it_cursor == all.end() || loro_value_as_i64(it_cursor->second) != 42) {
+        return fail("get_all_states missing/incorrect 'cursor'");
+    }
+
+    // remove_outdated with a 30s timeout drops nothing (entries are fresh); must not throw.
+    store->remove_outdated();
+    if (store->keys().size() != 2) return fail("remove_outdated dropped fresh entries");
+
     auto encoded = store->encode_all();
     if (encoded.empty()) return fail("encode_all returned empty");
 

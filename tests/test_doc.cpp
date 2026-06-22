@@ -4,6 +4,7 @@
 //   - state_vv / state_frontiers / vv_to_frontiers / frontiers_to_vv
 //   - export/import variants (snapshot, snapshot_at, updates, json)
 //   - fork / fork_at
+//   - revert_to
 //   - get_deep_value
 //   - has_container
 //
@@ -119,6 +120,22 @@ bool run() {
     doc->commit();
     if (doc->len_ops() <= ops_before) {
         return fail("len_ops should grow after another committed op");
+    }
+
+    // --- revert_to: history-preserving rewind to an earlier frontiers ---
+    // The body currently reads "alpha beta!"; revert back to the alpha frontiers.
+    auto ops_before_revert = doc->len_ops();
+    doc->revert_to(frontiers_after_alpha);
+    if (doc->get_text(root("body"))->to_string() != "alpha") {
+        return fail("revert_to(alpha) did not restore alpha-only state");
+    }
+    // Unlike checkout, revert_to keeps the doc attached...
+    if (doc->is_detached()) {
+        return fail("revert_to should leave the doc attached, not detached");
+    }
+    // ...and records the inverse operations as a new change (history grows).
+    if (doc->len_ops() <= ops_before_revert) {
+        return fail("revert_to should record inverse ops, growing len_ops");
     }
 
     return true;

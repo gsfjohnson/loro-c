@@ -2888,6 +2888,14 @@ struct LoroDoc {
         return std::shared_ptr<LoroDoc>(new LoroDoc(d));
     }
 
+    // Reverts the document state back to `frontiers` by recording the inverse
+    // operations as a new change. Unlike checkout(), the document stays attached
+    // and the rewind becomes part of history. Throws LoroError (LORO_ERR_NOT_FOUND)
+    // if `frontiers` references an unknown version.
+    void revert_to(const std::shared_ptr<Frontiers> &frontiers) {
+        detail::check(loro_doc_revert_to(raw_, frontiers->raw_));
+    }
+
     LoroValue get_deep_value() {
         ::LoroValue *cv = loro_doc_get_deep_value(raw_);
         if (!cv) throw LoroError(detail::last_error_message());

@@ -1,5 +1,11 @@
 # Plan: Close the `loro-ffi` parity gaps (`loro-c`)
 
+> **Status: COMPLETE (2026-06-22).** Step 0 and milestones G1–G6 have all landed; each section
+> header below is tagged ✅. The sections are kept as the implementation record. Remaining
+> divergences from upstream `loro.udl` are the deliberate entries in the
+> [intentional-omissions table](#intentional-omissions-stub--confirmextend-as-milestones-land),
+> not outstanding work.
+
 ## Context
 
 [CBINDGEN_PLAN.md](CBINDGEN_PLAN.md) (M1–M5) shipped a strong **core subset** of `loro-ffi`:
@@ -71,9 +77,12 @@ These are already established by M1–M5 — reuse them, don't reinvent:
 
 ---
 
-## G1 — Rich text *(highest impact)*
+## G1 — Rich text ✅ *(landed)*
 
-Loro's headline feature; today the text container can't carry formatting at all.
+Loro's headline feature. Shipped in [container/text.rs](loro-c-api/src/container/text.rs) (marks,
+deltas, splice/update, UTF-16 and position helpers) plus the style config in
+[style.rs](loro-c-api/src/style.rs); tests in [tests/test_text_mark.cpp](tests/test_text_mark.cpp)
+and the pure-C path.
 
 **Rust — [container/text.rs](loro-c-api/src/container/text.rs):**
 
@@ -112,9 +121,11 @@ the boundary of a mark exercises each `ExpandType`; concurrent marks on two docs
 
 ---
 
-## G2 — Cursors *(second highest)*
+## G2 — Cursors ✅ *(landed)*
 
-Stable positions that survive concurrent edits — needed by any real editor integration.
+Stable positions that survive concurrent edits — needed by any real editor integration. Shipped in
+[cursor.rs](loro-c-api/src/cursor.rs) (encode/decode, `get_cursor`, `get_cursor_pos`); tests in
+[tests/test_cursor.cpp](tests/test_cursor.cpp) and the pure-C path.
 
 **New file `loro-c-api/src/cursor.rs`** (register in [lib.rs](loro-c-api/src/lib.rs)):
 
@@ -139,10 +150,15 @@ the cursor's anchor resolves to the configured `Side`.
 
 ---
 
-## G3 — Sync surface: JSON updates + export modes
+## G3 — Sync surface: JSON updates + export modes ✅ *(landed)*
 
 Two related sync gaps. JSON updates are how you interop with the JS/other-language peers
-that don't speak the binary format; export modes give efficient/partial/shallow sync.
+that don't speak the binary format; export modes give efficient/partial/shallow sync. Shipped in
+[doc.rs](loro-c-api/src/doc.rs) (`import`/`export_json_updates`, `export_shallow_snapshot`/
+`_snapshot_at`/`_state_only`, `import_batch`, `is_shallow`) with the import-status type in
+[import_status.rs](loro-c-api/src/import_status.rs). Per-mode helpers shipped instead of the
+runtime `ExportMode` union, and `redact_json_updates` was deferred — both recorded in the
+intentional-omissions table.
 
 **Rust — [doc.rs](loro-c-api/src/doc.rs):**
 
@@ -367,13 +383,17 @@ one commit per group.
 
 | Order | Milestone | New C fns (approx) | Risk |
 |---|---|---|---|
-| 1 | **Step 0** — fix README/plan wording | 0 | none |
-| 2 | **G1** — rich text | ~16 + enums/handle | medium (ExpandType semantics) |
-| 3 | **G2** — cursors | ~7 + enum/handle | low (self-contained) |
-| 4 | **G4** — diff/patch | ~3 (after G1 codec) | low |
-| 5 | **G3** — JSON updates + export modes | ~12 + structs | medium (ExportMode union) |
+| 1 | **Step 0** — fix README/plan wording ✅ landed | 0 | none |
+| 2 | **G1** — rich text ✅ landed | ~16 + enums/handle | medium (ExpandType semantics) |
+| 3 | **G2** — cursors ✅ landed | ~7 + enum/handle | low (self-contained) |
+| 4 | **G4** — diff/patch ✅ landed | ~3 (after G1 codec) | low |
+| 5 | **G3** — JSON updates + export modes ✅ landed | ~12 + structs | medium (ExportMode union) |
 | 6 | **G5** — value navigation ✅ landed | ~7 + handle/POD | low |
-| 7 | **G6** — utility/attribution long tail (staged G6.1–G6.6) | ~99 | low, high volume |
+| 7 | **G6** — utility/attribution long tail (staged G6.1–G6.6) ✅ landed | ~99 | low, high volume |
+
+**All milestones (Step 0, G1–G6) have landed** as of 2026-06-22, verified against the committed
+[include/loro/loro.h](../include/loro/loro.h) and the test suite. Residual gaps are the
+deliberate entries in the intentional-omissions table below, not outstanding work.
 
 Rationale for putting G4 before G3: G4 is tiny once G1 has factored out the shared delta/diff
 JSON codec, and it unblocks time-travel demos; G3's `ExportMode` union is the only place with

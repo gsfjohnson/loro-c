@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(loro-c LANGUAGES C CXX VERSION 1.13.1.1)
+project(loro-c LANGUAGES C CXX VERSION 1.13.1.2)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

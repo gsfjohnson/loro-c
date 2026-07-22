@@ -15,7 +15,7 @@ name = "loro_c_api"
 crate-type = ["staticlib"]
 
 [dependencies]
-loro = { version = "=1.13.1", features = ["counter", "jsonpath"] }
+loro = { version = "=1.13.7", features = ["counter", "jsonpath"] }
 serde_json = "1"
 
 # No [build-dependencies]: cbindgen is invoked as a pinned CLI tool, not from build.rs.

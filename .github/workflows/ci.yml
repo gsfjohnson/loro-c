@@ -180,6 +180,27 @@ jobs:
           cmake --build build-consumer --parallel
           ctest --test-dir build-consumer --output-on-failure
 
+  # Syntax-check the public headers with clang against libstdc++ — the one compiler/stdlib
+  # pairing the build matrix above never produces (Ubuntu jobs default to GCC; the clang
+  # jobs pair with libc++ or the MS STL). That blind spot shipped issue #3: JsonValue's
+  # implicit destructor created a pair/vector instantiation cycle that only clang+libstdc++
+  # rejects. No Rust build needed — the committed headers are self-contained for -fsyntax-only.
+  # ubuntu-24.04 pairs clang 18 with GCC 14's libstdc++, matching the headers the issue was
+  # reproduced against.
+  header-clang-libstdcxx:
+    name: header syntax check (clang + libstdc++)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # clang on Linux defaults to -stdlib=libstdc++; spell it out so the job still guards
+      # the right combination if a future runner image changes the default.
+      - name: Syntax-check public headers
+        run: |
+          clang++ --version
+          printf '#include <loro.hpp>\n#include <loro/loro_ext.hpp>\nint main() { return 0; }\n' > tu.cpp
+          clang++ -std=c++20 -stdlib=libstdc++ -I include -fsyntax-only tu.cpp
+
   # Guarantee the committed C header matches the Rust source: regenerate with the pinned
   # cbindgen CLI and fail on any diff (Cargo build scripts must never mutate the source tree,
   # so the header is committed and verified here instead).

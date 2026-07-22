@@ -697,6 +697,21 @@ struct JsonValue {
     std::vector<JsonValue> arr;
     std::vector<std::pair<std::string, JsonValue>> obj;  // small, insertion-ordered
 
+    // The destructor is user-declared here and defined (defaulted) below the class.
+    // With an implicit destructor, instantiating std::pair<std::string, JsonValue>
+    // evaluates the explicit(...) condition on pair's default constructor, which
+    // forces the implicit destructor's definition -> ~vector<pair<...>> -> a
+    // completeness check on the still-mid-instantiation pair. libstdc++ under clang
+    // rejects that cycle; a declared-but-not-yet-defined destructor breaks it. The
+    // copy/move members are defaulted explicitly so the user-declared destructor
+    // doesn't suppress them (semantics unchanged). See gsfjohnson/loro-c#3.
+    JsonValue() = default;
+    JsonValue(const JsonValue &) = default;
+    JsonValue(JsonValue &&) = default;
+    JsonValue &operator=(const JsonValue &) = default;
+    JsonValue &operator=(JsonValue &&) = default;
+    ~JsonValue();
+
     const JsonValue *find(const std::string &key) const {
         for (const auto &kv : obj) {
             if (kv.first == key) return &kv.second;
@@ -704,6 +719,8 @@ struct JsonValue {
         return nullptr;
     }
 };
+
+inline JsonValue::~JsonValue() = default;
 
 class JsonParser {
 public:

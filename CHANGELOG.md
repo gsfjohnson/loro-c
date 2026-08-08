@@ -7,6 +7,31 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [Unreleased]
+
+- **iOS release assets** ([#5]) — the release workflow now cross-builds three
+  single-slice iOS tarballs alongside the host platforms: `ios-arm64` (device,
+  `aarch64-apple-ios`), `ios-sim-arm64` (Apple Silicon simulator,
+  `aarch64-apple-ios-sim`), and `ios-sim-x86_64` (Intel Mac simulator,
+  `x86_64-apple-ios`). Same install-prefix layout as the existing assets, so
+  `find_package(loro)` works unchanged (the packaged config is self-contained —
+  no Rust/Corrosion at consumer configure time); static archive only, no
+  bitcode (deprecated); minimum deployment target iOS 13.0 (14.0 for the arm64
+  simulator, rustc's floor for that target). Each job asserts the installed
+  archive's architecture and Mach-O platform (device vs simulator) and
+  cross-builds the `tests/consumer` project against the install tree as a link
+  check. CI gains a build-only `aarch64-apple-ios` cross job guarding PRs.
+- **Fix: manual (non-Corrosion) builds hard-coded the Windows system-library
+  list** — `cmake/BuildRustStaticlib.cmake` and the list baked into
+  `loroConfig.cmake` / `loro.pc` assumed the gnullvm Windows target for *any*
+  `LORO_USE_CORROSION=OFF` build. Both now key on the cargo target triple
+  (falling back to the pinned rustup toolchain name, then host detection) via
+  the shared `cmake/LoroSystemLibs.cmake`, so a manual build for Apple/Linux
+  targets gets the correct (empty/Linux) list. All existing configurations
+  produce identical lists.
+
+[#5]: https://github.com/gsfjohnson/loro-c/issues/5
+
 ## [1.13.7.1] - 2026-07-22
 
 - **Upgrade pinned `loro` crate `1.13.1` → `1.13.7`** ([#4]) — two upstream

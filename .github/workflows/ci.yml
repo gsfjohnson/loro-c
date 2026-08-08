@@ -180,6 +180,80 @@ jobs:
           cmake --build build-consumer --parallel
           ctest --test-dir build-consumer --output-on-failure
 
+  # iOS cross guard (device slice only): the release workflow builds three iOS slices
+  # (see release.yml's build-ios job), and without this job a regression in the cross
+  # configure (CMAKE_SYSTEM_NAME=iOS + Corrosion + explicit Rust_CARGO_TARGET) or in the
+  # packaged config's find-root behavior would only surface at release time. One slice
+  # suffices as a PR guard — the three differ only in triple/SDK/arch values. Build-only:
+  # iOS binaries cannot run on the runner, so BUILD_TESTING=OFF, no ctest, and the
+  # consumer is built (link check), not run. See release.yml for step-by-step rationale.
+  build-ios-cross:
+    name: macos-15 (iOS cross)
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    env:
+      # rustc stamps this into every object's minos (CMAKE_OSX_DEPLOYMENT_TARGET only
+      # reaches the C/C++ configure checks).
+      IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `targets:` pre-installs the cross std; Corrosion's FindRust errors if the
+      # requested Rust_CARGO_TARGET is not installed.
+      - name: Install Rust (stable + iOS target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+
+      # Corrosion's FindRust has no Apple branch in its triple auto-derivation, so the
+      # target must be explicit or it would silently build the macOS host archive.
+      - name: Configure (Release, iOS cross)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphoneos
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+          -DRust_CARGO_TARGET=aarch64-apple-ios
+          -DBUILD_TESTING=OFF
+          -DLORO_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install
+        run: cmake --install build --prefix "${{ runner.temp }}/loro-install"
+
+      # Arch + Mach-O platform check (2 = iOS device) — guards the silent-host-build
+      # failure mode; lipo alone cannot tell a device slice from a simulator slice.
+      - name: Verify archive slice
+        run: |
+          lipo -info "${{ runner.temp }}/loro-install/lib/libloro_c_api.a" | grep -q arm64
+          otool -l "${{ runner.temp }}/loro-install/lib/libloro_c_api.a" | grep -Eq 'platform (2|IOS)$'
+
+      # Cross-configure + BUILD (no run) of the standalone consumer. CMAKE_FIND_ROOT_PATH
+      # is needed alongside CMAKE_PREFIX_PATH: CMAKE_SYSTEM_NAME=iOS re-roots find_package
+      # searches under the SDK.
+      - name: Consumer find_package cross-build check
+        run: >
+          cmake -S tests/consumer -B build-consumer
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=iphoneos
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+          -DCMAKE_PREFIX_PATH="${{ runner.temp }}/loro-install"
+          -DCMAKE_FIND_ROOT_PATH="${{ runner.temp }}/loro-install" &&
+          cmake --build build-consumer --parallel
+
   # Syntax-check the public headers with clang against libstdc++ — the one compiler/stdlib
   # pairing the build matrix above never produces (Ubuntu jobs default to GCC; the clang
   # jobs pair with libc++ or the MS STL). That blind spot shipped issue #3: JsonValue's

@@ -8,7 +8,8 @@
 # and only relative arguments — no absolute path is ever handed to cargo.
 #
 # It produces an INTERFACE target `loro_c_api` (same name Corrosion would create) that
-# links the built staticlib plus the native system libraries the Rust std needs.
+# links the built staticlib plus the native system libraries the Rust std needs (computed
+# per target by cmake/LoroSystemLibs.cmake).
 
 if(NOT DEFINED LORO_CARGO)
     find_program(LORO_CARGO cargo REQUIRED)
@@ -76,10 +77,13 @@ add_custom_target(loro_cargo_build ALL DEPENDS "${_staticlib}")
 add_library(loro_c_api INTERFACE)
 add_dependencies(loro_c_api loro_cargo_build)
 # Linking the generated file by full path makes consumers depend on its custom command.
-# The trailing system libs are exactly cargo's reported `native-static-libs` for the
-# gnullvm/gnu Windows target (query: `cargo rustc --release --lib -- --print
-# native-static-libs`). bcrypt+advapi32 back getrandom's BCryptGenRandom path.
-target_link_libraries(loro_c_api INTERFACE
-    "${_staticlib}"
-    bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp unwind
-)
+# The trailing system libs come from cmake/LoroSystemLibs.cmake, keyed on the cargo
+# target/toolchain (gnullvm Windows on the dev box -> bcrypt..unwind, where bcrypt+advapi32
+# back getrandom's BCryptGenRandom path; Apple targets -> none) — the same list
+# CMakeLists.txt bakes into loroConfig.cmake / loro.pc, so the build tree and the install
+# tree cannot disagree.
+include(${CMAKE_CURRENT_LIST_DIR}/LoroSystemLibs.cmake)
+loro_system_libs(_manual_sys _manual_pc_unused)
+target_link_libraries(loro_c_api INTERFACE "${_staticlib}" ${_manual_sys})
+unset(_manual_sys)
+unset(_manual_pc_unused)

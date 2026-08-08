@@ -102,28 +102,16 @@ include(CMakePackageConfigHelpers)
 
 set(LORO_INSTALL_CMAKEDIR ${CMAKE_INSTALL_LIBDIR}/cmake/loro)
 
-# System libraries the static Rust archive pulls in. Resolved HERE (at our configure time)
-# rather than in the consumer's loroConfig.cmake, because the install is platform-specific
-# anyway and consumer-side WIN32/APPLE detection is unreliable on the MSYS2/CLANG64 box
-# (CMake's WIN32 is unset there even though the gnullvm target is Windows). Source of truth:
-# `cargo rustc --release --lib -- --print native-static-libs`. Both forms are baked into the
-# generated package: LORO_SYSTEM_LIBS into loroConfig.cmake, LORO_PC_PRIVATE_LIBS into loro.pc.
-if(NOT LORO_USE_CORROSION)
-    # MSYS2/CLANG64 gnullvm manual path — matches BuildRustStaticlib.cmake's build-tree list,
-    # including libunwind (the crate is built with panic=unwind).
-    set(_loro_sys bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp unwind)
-    set(LORO_PC_PRIVATE_LIBS "-lbcrypt -ladvapi32 -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -lunwind")
-elseif(WIN32)
-    # MSVC (CI): SEH unwinding, no libunwind.
-    set(_loro_sys bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp)
-    set(LORO_PC_PRIVATE_LIBS "-lbcrypt -ladvapi32 -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp")
-elseif(APPLE)
-    set(_loro_sys "")
-    set(LORO_PC_PRIVATE_LIBS "")
-else()
-    set(_loro_sys m dl pthread gcc_s util rt)
-    set(LORO_PC_PRIVATE_LIBS "-lm -ldl -lpthread -lgcc_s -lutil -lrt")
-endif()
+# System libraries the static Rust archive pulls in. Computed by cmake/LoroSystemLibs.cmake,
+# keyed on the Rust *target triple* (not the CMake host): host WIN32/APPLE detection is
+# unreliable on the MSYS2/CLANG64 box (WIN32 is unset there even though the gnullvm target
+# is Windows), and an iOS cross build runs on a macOS host. Resolved HERE (at our configure
+# time) rather than in the consumer's loroConfig.cmake for the same reason. Both forms are
+# baked into the generated package: LORO_SYSTEM_LIBS into loroConfig.cmake,
+# LORO_PC_PRIVATE_LIBS into loro.pc. The manual build path attaches the identical list to
+# its build-tree target (cmake/BuildRustStaticlib.cmake calls the same function).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LoroSystemLibs.cmake)
+loro_system_libs(_loro_sys LORO_PC_PRIVATE_LIBS)
 # Space-separated form for the @LORO_SYSTEM_LIBS@ substitution in loroConfig.cmake.in.
 string(JOIN " " LORO_SYSTEM_LIBS ${_loro_sys})
 

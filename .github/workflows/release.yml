@@ -24,6 +24,13 @@ permissions:
 # toolchain via the default Corrosion path (the same path ci.yml exercises);
 # the dev-box MSYS2/CLANG64 gnullvm workaround is not needed here because the
 # hosted runner has a working link.exe.
+#
+# The build-ios job below adds three cross-compiled iOS slices (device arm64,
+# simulator arm64, simulator x86_64) as separate per-slice tarballs (issue #5;
+# no xcframework). iOS binaries cannot execute on the runner, so those jobs
+# build with BUILD_TESTING=OFF and validate via (a) lipo/otool arch + platform
+# checks on the installed archive and (b) a cross-configured *build* (no run)
+# of tests/consumer against the install tree.
 
 jobs:
   build:
@@ -292,3 +299,146 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$TAG" "loro-c-windows-x86_64-gnullvm-${{ env.VERSION }}.zip" --clobber
+
+  # iOS cross builds (issue #5): three separate single-arch slices, packaged with the
+  # same prefix layout as the host assets so downstream find_package(loro) works
+  # unchanged. A separate job (not rows on `build`) because iOS binaries cannot run on
+  # the runner: no ctest, BUILD_TESTING=OFF, and the consumer smoke test is build-only.
+  # The install tree's only compiled artifact is the Rust staticlib (the C++ layer is
+  # header-only), so no C/C++ cross toolchain beyond the SDK is exercised — but we still
+  # configure CMake for iOS (CMAKE_SYSTEM_NAME=iOS) so the release job goes through
+  # exactly what a consumer does. No bitcode (deprecated since Xcode 14; rustc stopped
+  # emitting it long ago).
+  build-ios:
+    name: ios (${{ matrix.artifact }})
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # min_os: rustc stamps each object's LC_BUILD_VERSION minos from the
+          # IPHONEOS_DEPLOYMENT_TARGET env var (set below). aarch64-apple-ios-sim's
+          # floor is iOS 14; the other two targets go down to 13.
+          # platform_re: LC_BUILD_VERSION platform id asserted by "Verify archive
+          # slice" — 2 = iOS device, 7 = iOS simulator (newer otool spells the name).
+          - artifact: ios-arm64          # physical devices
+            rust_target: aarch64-apple-ios
+            sdk: iphoneos
+            arch: arm64
+            min_os: "13.0"
+            platform_re: 'platform (2|IOS)$'
+          - artifact: ios-sim-arm64      # simulator on Apple Silicon
+            rust_target: aarch64-apple-ios-sim
+            sdk: iphonesimulator
+            arch: arm64
+            min_os: "14.0"
+            platform_re: 'platform (7|IOSSIMULATOR)$'
+          - artifact: ios-sim-x86_64     # simulator on Intel Macs
+            rust_target: x86_64-apple-ios
+            sdk: iphonesimulator
+            arch: x86_64
+            min_os: "13.0"
+            platform_re: 'platform (7|IOSSIMULATOR)$'
+
+    env:
+      INSTALL_DIR: ${{ github.workspace }}/install
+      # Version stamp baked into the archive filename (e.g. v1.13.7.2); see the build
+      # job's env for the release-tag / ref-name fallback rationale.
+      VERSION: ${{ github.event.release.tag_name || github.ref_name }}
+      # rustc reads this env var directly and stamps it into every object's minos.
+      # CMAKE_OSX_DEPLOYMENT_TARGET only reaches the (header-only) C/C++ configure
+      # checks, so this env var is what actually governs the shipped archive.
+      IPHONEOS_DEPLOYMENT_TARGET: ${{ matrix.min_os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `targets:` pre-installs the cross std via rustup; Corrosion's FindRust fatally
+      # errors if the requested Rust_CARGO_TARGET is not installed.
+      - name: Install Rust (stable + iOS target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      # All three slices run on the same runner image under the same job id, so the
+      # per-slice `key` keeps their target/ caches from colliding.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+          key: ${{ matrix.artifact }}
+
+      # Corrosion's FindRust has no Apple branch in its triple auto-derivation: without
+      # an explicit Rust_CARGO_TARGET it would silently build the macOS *host* archive
+      # (the "Verify archive slice" step below guards against exactly that). Default
+      # generator (Unix Makefiles) on purpose — the Xcode generator drags in signing.
+      # BUILD_TESTING=OFF because iOS test binaries cannot run here.
+      - name: Configure (Release, iOS cross)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=${{ matrix.sdk }}
+          -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.min_os }}
+          -DRust_CARGO_TARGET=${{ matrix.rust_target }}
+          -DBUILD_TESTING=OFF
+          -DLORO_BUILD_EXAMPLES=OFF
+          -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install
+        run: cmake --install build
+
+      # Assert the installed archive is the right architecture AND the right Mach-O
+      # platform — lipo alone cannot tell ios-arm64 from ios-sim-arm64. The otool dump
+      # also surfaces the stamped minos in the log, so a rustc deployment-floor drift
+      # is visible rather than silent.
+      - name: Verify archive slice
+        run: |
+          lipo -info "${INSTALL_DIR}/lib/libloro_c_api.a"
+          lipo -info "${INSTALL_DIR}/lib/libloro_c_api.a" | grep -q '${{ matrix.arch }}'
+          otool -l "${INSTALL_DIR}/lib/libloro_c_api.a" | grep -A4 LC_BUILD_VERSION | head -30
+          otool -l "${INSTALL_DIR}/lib/libloro_c_api.a" | grep -Eq '${{ matrix.platform_re }}'
+
+      # Cross-configure + BUILD (no run) of the standalone consumer: proves loroConfig
+      # resolves and an iOS link against the packaged archive completes. In addition to
+      # CMAKE_PREFIX_PATH, CMAKE_FIND_ROOT_PATH is required: with CMAKE_SYSTEM_NAME=iOS,
+      # CMake re-roots find_package searches under the SDK, so the install prefix must
+      # itself be listed as a find root. (Also the documented consumer recipe — README.)
+      - name: Consumer find_package cross-build check
+        run: >
+          cmake -S tests/consumer -B build-consumer
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_SYSROOT=${{ matrix.sdk }}
+          -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.min_os }}
+          -DCMAKE_PREFIX_PATH="${{ env.INSTALL_DIR }}"
+          -DCMAKE_FIND_ROOT_PATH="${{ env.INSTALL_DIR }}" &&
+          cmake --build build-consumer --parallel
+
+      # Same install-tree tarball layout as the host assets; the tzf listing documents
+      # the payload in the job log.
+      - name: Package
+        run: |
+          tar czf "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz" -C "${{ env.INSTALL_DIR }}" .
+          tar tzf "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz"
+
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loro-c-${{ matrix.artifact }}
+          path: loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz" --clobber

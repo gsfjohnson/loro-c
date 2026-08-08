@@ -34,7 +34,7 @@ loro-c-api/               the Rust crate that implements the C ABI
 cmake/                    package config + pkg-config templates; manual cargo->CMake fallback
 examples/                 basic_text, rich_text, cursor_tracking, sync_two_docs, json_sync, subscribe_events
 tests/                    CTest suite (C++ and pure-C) + tests/consumer (find_package smoke test)
-.github/workflows/      CI: build/test matrix + install smoke test + cbindgen drift guard
+.github/workflows/      CI: build/test matrix + iOS cross guard + install smoke test + cbindgen drift guard
 ```
 
 ## Building
@@ -99,6 +99,44 @@ This produces:
 <prefix>/lib/cmake/loro/{loroConfig.cmake,loroConfigVersion.cmake,loro-targets.cmake,…}
 <prefix>/lib/pkgconfig/loro.pc
 ```
+
+### Prebuilt release assets
+
+Every [GitHub Release](https://github.com/gsfjohnson/loro-c/releases) ships the install
+tree above, pre-built per platform, so downstreams can consume loro-c without a Rust
+toolchain — unpack an archive and point `find_package` at it:
+
+| Asset | Target |
+|---|---|
+| `loro-c-linux-x86_64-<tag>.tar.gz` | Linux x86_64 (glibc) |
+| `loro-c-macos-arm64-<tag>.tar.gz` | macOS Apple Silicon |
+| `loro-c-macos-x86_64-<tag>.tar.gz` | macOS Intel |
+| `loro-c-windows-x86_64-msvc-<tag>.zip` | Windows, MSVC ABI |
+| `loro-c-windows-x86_64-gnullvm-<tag>.zip` | Windows, mingw/clang ABI |
+| `loro-c-ios-arm64-<tag>.tar.gz` | iOS devices (`aarch64-apple-ios`) |
+| `loro-c-ios-sim-arm64-<tag>.tar.gz` | iOS simulator on Apple Silicon (`aarch64-apple-ios-sim`) |
+| `loro-c-ios-sim-x86_64-<tag>.tar.gz` | iOS simulator on Intel Macs (`x86_64-apple-ios`) |
+
+The iOS slices are static archives only, built without bitcode (deprecated since
+Xcode 14), with a minimum deployment target of iOS 13.0 (14.0 for the arm64 simulator —
+rustc's floor for that target). To consume one from an iOS cross build:
+
+```sh
+cmake -S app -B build-ios \
+  -DCMAKE_SYSTEM_NAME=iOS \
+  -DCMAKE_OSX_SYSROOT=iphoneos \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+  -DCMAKE_PREFIX_PATH=/path/to/unpacked/prefix \
+  -DCMAKE_FIND_ROOT_PATH=/path/to/unpacked/prefix
+```
+
+Under `CMAKE_SYSTEM_NAME=iOS`, CMake re-roots `find_package` searches beneath the SDK, so
+the prefix must appear in `CMAKE_FIND_ROOT_PATH` as well as `CMAKE_PREFIX_PATH` (or set
+`loro_DIR=<prefix>/lib/cmake/loro` directly, which bypasses the search). The packaged
+`loroConfig.cmake` is self-contained: the Rust-archive snippet it includes is a plain
+`STATIC IMPORTED` target with a prefix-relative path, so consumers — cross-compiled ones
+included — need neither Rust nor Corrosion at configure time.
 
 ### From CMake (`find_package`)
 

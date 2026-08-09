@@ -364,11 +364,13 @@ jobs:
       - uses: actions/checkout@v4
 
       # `targets:` pre-installs the cross std via rustup; Corrosion's FindRust fatally
-      # errors if the requested Rust_CARGO_TARGET is not installed.
+      # errors if the requested Rust_CARGO_TARGET is not installed. llvm-tools
+      # provides the llvm-objcopy used by "Strip embedded bitcode" below.
       - name: Install Rust (stable + iOS target)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
+          components: llvm-tools
 
       # All three slices run on the same runner image under the same job id, so the
       # per-slice `key` keeps their target/ caches from colliding.
@@ -406,16 +408,27 @@ jobs:
       # objects with __LLVM,__bitcode/__cmdline sections — issue #5 observation;
       # from rustup's shipped std, not our build flags). ld64 never propagates it
       # into linked output (bitcode acceptance is gone since Xcode 14), so it is
-      # pure archive dead weight. Write to a temp file then move over the original
-      # rather than trusting in-place output. Deliberately placed BEFORE the verify
-      # and consumer steps so the slice assertions and the downstream link check run
-      # against the exact stripped archive that gets packaged.
+      # pure archive dead weight. NOT `xcrun bitcode_strip`: on object-file
+      # archives it shells out to ld with pre-ld-prime bitcode options that
+      # Xcode 15+ rejects ("ld: file cannot be open()ed, errno=2 path=strip",
+      # seen on Xcode 16.4 in run 31289399635). llvm-objcopy from rustup's
+      # llvm-tools component (installed above) edits the archive directly, in
+      # place, and is versioned with the toolchain rather than Xcode. The final
+      # grep asserts the sections are actually gone. Deliberately placed BEFORE
+      # the verify and consumer steps so the slice assertions and the downstream
+      # link check run against the exact stripped archive that gets packaged.
       - name: Strip embedded bitcode
         run: |
-          ls -l "${INSTALL_DIR}/lib/libloro_c_api.a"
-          xcrun bitcode_strip -r "${INSTALL_DIR}/lib/libloro_c_api.a" -o "${INSTALL_DIR}/lib/libloro_c_api.a.stripped"
-          mv "${INSTALL_DIR}/lib/libloro_c_api.a.stripped" "${INSTALL_DIR}/lib/libloro_c_api.a"
-          ls -l "${INSTALL_DIR}/lib/libloro_c_api.a"
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          LLVM_OBJCOPY="$(rustc --print sysroot)/lib/rustlib/${HOST}/bin/llvm-objcopy"
+          A="${INSTALL_DIR}/lib/libloro_c_api.a"
+          ls -l "$A"
+          "$LLVM_OBJCOPY" --remove-section=__LLVM,__bitcode --remove-section=__LLVM,__cmdline "$A"
+          ls -l "$A"
+          if otool -l "$A" | grep -Eq 'sectname (__bitcode|__cmdline)'; then
+            echo "bitcode sections still present after strip" >&2
+            exit 1
+          fi
 
       # Assert the installed archive is the right architecture AND the right Mach-O
       # platform — lipo alone cannot tell ios-arm64 from ios-sim-arm64. The otool dump

@@ -23,12 +23,14 @@ release against `loro 1.13.1`).
   check. CI gains a build-only `aarch64-apple-ios` cross job guarding PRs.
   Verified downstream (basu, issue #5): compile + link on all three slices and
   a runtime round-trip under the x86_64 iOS-simulator runtime. Follow-ups from
-  that verification: the package step now runs `xcrun bitcode_strip -r` on the
-  archive — rustup's prebuilt std members carry inert `__LLVM` bitcode
-  sections (never propagated by ld64, pure archive dead weight); and a known
-  stable-rustc quirk is recorded in the workflow: the `x86_64-apple-ios` std
-  objects ship old-style `LC_VERSION_MIN_IPHONEOS` load commands (harmless to
-  ld64; not fixable without nightly `-Zbuild-std`).
+  that verification: the package step now strips the inert `__LLVM,__bitcode`/
+  `__cmdline` sections rustup's prebuilt std members carry (never propagated
+  by ld64, pure archive dead weight) using `llvm-objcopy` from rustup's
+  `llvm-tools` component — Xcode's `bitcode_strip` is broken for object-file
+  archives under ld-prime (Xcode 15+); and a known stable-rustc quirk is
+  recorded in the workflow: the `x86_64-apple-ios` std objects ship old-style
+  `LC_VERSION_MIN_IPHONEOS` load commands (harmless to ld64; not fixable
+  without nightly `-Zbuild-std`).
 - **Fix: manual (non-Corrosion) builds hard-coded the Windows system-library
   list** — `cmake/BuildRustStaticlib.cmake` and the list baked into
   `loroConfig.cmake` / `loro.pc` assumed the gnullvm Windows target for *any*

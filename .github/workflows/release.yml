@@ -335,6 +335,14 @@ jobs:
             arch: arm64
             min_os: "14.0"
             platform_re: 'platform (7|IOSSIMULATOR)$'
+          # Known quirk (issue #5, downstream verification): rustup's prebuilt std for
+          # x86_64-apple-ios stamps its ~295 archive members with old-style
+          # LC_VERSION_MIN_IPHONEOS load commands instead of platform-7
+          # LC_BUILD_VERSION (the target predates the split device/sim triples; only
+          # nightly -Zbuild-std could rebuild them). loro's own objects are clean,
+          # and ld64 links the mix silently — but do NOT tighten the platform
+          # assertion below to *every* member, and expect possible platform-mismatch
+          # warnings from newer linkers. The arm64-sim slice is unaffected.
           - artifact: ios-sim-x86_64     # simulator on Intel Macs
             rust_target: x86_64-apple-ios
             sdk: iphonesimulator
@@ -393,6 +401,21 @@ jobs:
 
       - name: Install
         run: cmake --install build
+
+      # Strip the inert bitcode that rustup's prebuilt std members carry (~250
+      # objects with __LLVM,__bitcode/__cmdline sections — issue #5 observation;
+      # from rustup's shipped std, not our build flags). ld64 never propagates it
+      # into linked output (bitcode acceptance is gone since Xcode 14), so it is
+      # pure archive dead weight. Write to a temp file then move over the original
+      # rather than trusting in-place output. Deliberately placed BEFORE the verify
+      # and consumer steps so the slice assertions and the downstream link check run
+      # against the exact stripped archive that gets packaged.
+      - name: Strip embedded bitcode
+        run: |
+          ls -l "${INSTALL_DIR}/lib/libloro_c_api.a"
+          xcrun bitcode_strip -r "${INSTALL_DIR}/lib/libloro_c_api.a" -o "${INSTALL_DIR}/lib/libloro_c_api.a.stripped"
+          mv "${INSTALL_DIR}/lib/libloro_c_api.a.stripped" "${INSTALL_DIR}/lib/libloro_c_api.a"
+          ls -l "${INSTALL_DIR}/lib/libloro_c_api.a"
 
       # Assert the installed archive is the right architecture AND the right Mach-O
       # platform — lipo alone cannot tell ios-arm64 from ios-sim-arm64. The otool dump

@@ -7,7 +7,7 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
-## [Unreleased]
+## [1.13.7.2] - 2026-08-08
 
 - **iOS release assets** ([#5]) — the release workflow now cross-builds three
   single-slice iOS tarballs alongside the host platforms: `ios-arm64` (device,
@@ -21,6 +21,14 @@ release against `loro 1.13.1`).
   archive's architecture and Mach-O platform (device vs simulator) and
   cross-builds the `tests/consumer` project against the install tree as a link
   check. CI gains a build-only `aarch64-apple-ios` cross job guarding PRs.
+  Verified downstream (basu, issue #5): compile + link on all three slices and
+  a runtime round-trip under the x86_64 iOS-simulator runtime. Follow-ups from
+  that verification: the package step now runs `xcrun bitcode_strip -r` on the
+  archive — rustup's prebuilt std members carry inert `__LLVM` bitcode
+  sections (never propagated by ld64, pure archive dead weight); and a known
+  stable-rustc quirk is recorded in the workflow: the `x86_64-apple-ios` std
+  objects ship old-style `LC_VERSION_MIN_IPHONEOS` load commands (harmless to
+  ld64; not fixable without nightly `-Zbuild-std`).
 - **Fix: manual (non-Corrosion) builds hard-coded the Windows system-library
   list** — `cmake/BuildRustStaticlib.cmake` and the list baked into
   `loroConfig.cmake` / `loro.pc` assumed the gnullvm Windows target for *any*
@@ -31,6 +39,7 @@ release against `loro 1.13.1`).
   produce identical lists.
 
 [#5]: https://github.com/gsfjohnson/loro-c/issues/5
+[1.13.7.2]: https://github.com/gsfjohnson/loro-c/compare/v1.13.7.1...v1.13.7.2
 
 ## [1.13.7.1] - 2026-07-22
 

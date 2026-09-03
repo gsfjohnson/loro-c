@@ -7,6 +7,43 @@ using namespace loro_test;
 
 namespace {
 
+// get_missing_span / diff read peers back from JSON. A peer above INT64_MAX used to make the
+// parser throw std::out_of_range straight to the caller (gsfjohnson/loro-c#6).
+bool large_peer_spans() {
+    const uint64_t peers[] = {0x8000000000000000ULL, 0xfffffffffffffffeULL,
+                              12012086296529505043ULL};
+    for (uint64_t peer : peers) {
+        auto doc = loro::LoroDoc::init();
+        doc->set_peer_id(peer);
+        auto text = doc->get_text(root("body"));
+        text->insert(0, "abc");
+        doc->commit();
+        auto vv = doc->oplog_vv();
+        auto empty_vv = loro::VersionVector::init();
+
+        auto missing = empty_vv->get_missing_span(vv);
+        if (missing.size() != 1) return fail("large peer: get_missing_span should have 1 span");
+        if (missing[0].peer != peer) return fail("large peer: get_missing_span peer mismatch");
+        if (missing[0].counter.start != 0 || missing[0].counter.end != 3) {
+            return fail("large peer: get_missing_span counter span mismatch");
+        }
+
+        auto d = vv->diff(empty_vv);
+        auto r = d.retreat.find(peer);
+        if (r == d.retreat.end()) return fail("large peer: diff().retreat missing the peer");
+        if (r->second.start != 0 || r->second.end != 3) {
+            return fail("large peer: diff().retreat counter span mismatch");
+        }
+        if (!d.forward.empty()) return fail("large peer: diff().forward should be empty");
+
+        auto d2 = empty_vv->diff(vv);
+        if (d2.forward.find(peer) == d2.forward.end()) {
+            return fail("large peer: diff().forward missing the peer");
+        }
+    }
+    return true;
+}
+
 bool run() {
     auto doc = loro::LoroDoc::init();
     doc->set_peer_id(7);
@@ -63,7 +100,7 @@ bool run() {
     auto empty_f = loro::Frontiers::init();
     if (!empty_f->is_empty()) return fail("init() Frontiers should be empty");
 
-    return true;
+    return large_peer_spans();
 }
 
 } // namespace

@@ -11,6 +11,7 @@
 #include "test_helpers.hpp"
 
 #include <atomic>
+#include <variant>
 
 using namespace loro_test;
 
@@ -55,7 +56,66 @@ public:
     }
 };
 
+// Records every path node seen, so the test can check the peer round-trips through the
+// path JSON parser.
+class PathNodeCollector : public loro::Subscriber {
+public:
+    int count = 0;
+    std::vector<loro::TreeId> nodes;
+    void on_diff(const loro::DiffEvent &diff) override {
+        ++count;
+        for (const auto &cd : diff.events) {
+            for (const auto &step : cd.path) {
+                if (auto *n = std::get_if<loro::Index::kNode>(&step.index.get_variant())) {
+                    nodes.push_back(n->target);
+                }
+            }
+        }
+    }
+};
+
+// Regression for gsfjohnson/loro-c#6: a peer id with bit 63 set used to make the path JSON
+// parser throw (stoll overflow) inside the subscriber trampoline, which swallowed the exception
+// and silently dropped every tree diff event. Map/list/text events were unaffected, and
+// LoroDoc::init() picks a random 64-bit peer, so half of all fresh docs hit this.
+bool large_peer_tree_events() {
+    const uint64_t peers[] = {1ULL, 0x7fffffffffffffffULL, 0x8000000000000000ULL,
+                              0xfffffffffffffffeULL, 12012086296529505043ULL};
+    for (uint64_t peer : peers) {
+        auto doc = loro::LoroDoc::init();
+        doc->set_peer_id(peer);
+        auto tree = doc->get_tree(root("tree"));
+        auto sub = std::make_shared<PathNodeCollector>();
+        auto handle = doc->subscribe_root(sub);
+
+        auto node = tree->create(loro::TreeParentId(loro::TreeParentId::kRoot{}));
+        tree->get_meta(node)->insert("name", str_value("A"));
+        doc->commit();
+
+        if (sub->count == 0) {
+            std::cerr << "peer=" << peer << ": ";
+            return fail("no tree diff event delivered (loro-c#6 regression)");
+        }
+        if (node.peer != peer) {
+            std::cerr << "peer=" << peer << ": ";
+            return fail("created TreeId does not carry the doc's peer");
+        }
+        bool saw_node = false;
+        for (const auto &n : sub->nodes) {
+            if (n.peer == peer && n.counter == node.counter) saw_node = true;
+        }
+        if (!saw_node) {
+            std::cerr << "peer=" << peer << ": ";
+            return fail("path node peer did not round-trip through the path JSON parser");
+        }
+        handle->unsubscribe();
+    }
+    return true;
+}
+
 bool run() {
+    if (!large_peer_tree_events()) return false;
+
     auto doc = loro::LoroDoc::init();
     doc->set_peer_id(11);
     doc->set_record_timestamp(true);

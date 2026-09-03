@@ -924,7 +924,16 @@ private:
             v.d = std::stod(num);
         } else {
             v.kind = JsonValue::Kind::Int;
-            v.i = std::stoll(num);
+            // Peer ids cross the C ABI as bare u64 JSON numbers, and a random peer has bit 63
+            // set half the time. `stoll` throws out_of_range above INT64_MAX, so fall back to
+            // `stoull` and keep the bit pattern in `i`; every peer consumer casts back to
+            // `uint64_t`. Negative overflow still throws. See gsfjohnson/loro-c#6.
+            try {
+                v.i = std::stoll(num);
+            } catch (const std::out_of_range &) {
+                if (num[0] == '-') throw;
+                v.i = static_cast<int64_t>(std::stoull(num));
+            }
         }
         return v;
     }
@@ -2475,9 +2484,7 @@ struct VersionVector {
         return updated;
     }
 
-    /// The spans in `target` this vector is missing. NOTE: peers cross as JSON numbers here, so
-    /// very large peer ids beyond `int64_t` lose precision (a conformance-parser limit; the gate
-    /// uses small peers).
+    /// The spans in `target` this vector is missing.
     std::vector<IdSpan> get_missing_span(const std::shared_ptr<VersionVector> &target) {
         detail::Bytes b;
         detail::check(loro_version_vector_get_missing_span(raw_, target->raw_, b.out()));
@@ -3185,7 +3192,14 @@ inline DiffEvent diff_event_from_c(const ::LoroDiffEvent *ev) {
         ContainerDiff d{std::move(ctarget), {}, unknown, kind};
         Bytes pj;
         if (loro_container_diff_path_json(cd, pj.out()) == LORO_OK) {
-            d.path = path_items_from_json(pj.to_string());
+            // A path that fails to parse leaves `path` empty rather than throwing: the
+            // trampolines swallow exceptions (they cannot unwind across the C ABI), so a throw
+            // here would silently drop the whole event for the subscriber (loro-c#6).
+            try {
+                d.path = path_items_from_json(pj.to_string());
+            } catch (const std::exception &) {
+                d.path.clear();
+            }
         }
         e.events.push_back(std::move(d));
     }
@@ -3221,6 +3235,9 @@ extern "C" inline void loro_conf_subscriber_invoke(const ::LoroDiffEvent *ev, vo
     try {
         holder->sub->on_diff(detail::diff_event_from_c(ev));
     } catch (...) {
+        // Swallow: unwinding across the C ABI boundary is undefined behaviour. The event
+        // conversion itself is failure-tolerant (see diff_event_from_c), so what lands here is
+        // the subscriber's own exception.
     }
 }
 extern "C" inline void loro_conf_subscriber_free(void *user_data) {

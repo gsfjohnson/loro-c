@@ -7,6 +7,36 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [1.13.9.2] - 2026-09-02
+
+- **Fix: C++ layer dropped every tree diff event when the peer id had bit 63
+  set** ([#6]). `detail::JsonParser::parse_number` parsed all JSON integers
+  with `std::stoll`, which throws `std::out_of_range` above `INT64_MAX`. Peer
+  ids cross the C ABI as bare `u64` JSON numbers, so any doc whose peer was
+  >= 2^63 — half of all `LoroDoc::init()` docs, which pick a random 64-bit
+  peer — made the tree path step (`{"node":{"peer":…}}`) throw inside
+  `loro_conf_subscriber_invoke`, whose catch-all then silently dropped the
+  event. Map/list/text events were unaffected, so it presented as a lost
+  subscription. The parser now falls back to `std::stoull` on unsigned
+  overflow and keeps the bit pattern (all peer consumers already cast back
+  to `uint64_t`); negative overflow still throws.
+- The same parse path also served `VersionVector::get_missing_span` and
+  `VersionVector::diff`, which threw `std::out_of_range` to the caller for
+  the same peers (the doc comment called this a precision loss; it was an
+  exception). Both now return the full 64-bit peer. Stale note removed.
+- `detail::diff_event_from_c` no longer lets a path-parse failure discard the
+  whole event: a path that fails to parse is delivered empty, so a subscriber
+  still sees the `ContainerDiff` (target, kind, `is_unknown`) rather than
+  nothing.
+- Tests: `test_subscriptions` now drives a tree create + meta insert on peers
+  `1`, `INT64_MAX`, `2^63`, `UINT64_MAX - 1` (`UINT64_MAX` itself is reserved upstream), and a high random value, asserting
+  the root subscriber fires and the path node peer round-trips;
+  `test_version_vector` covers `get_missing_span` and `diff` at the same
+  peers. No prior test used a peer above 99.
+
+[1.13.9.2]: https://github.com/gsfjohnson/loro-c/compare/v1.13.9.1...v1.13.9.2
+[#6]: https://github.com/gsfjohnson/loro-c/issues/6
+
 ## [1.13.9.1] - 2026-09-02
 
 - **Upgrade pinned `loro` crate `1.13.7` → `1.13.9`** — the newest published

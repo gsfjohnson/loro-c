@@ -7,6 +7,32 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [1.13.9.1] - 2026-09-02
+
+- **Upgrade pinned `loro` crate `1.13.7` → `1.13.9`** — the newest published
+  Rust crate (there is no `1.13.8`; the `loro-crdt@1.14.x`/`1.15.x` GitHub
+  releases are the npm/WASM package line, which versions independently and
+  still builds on Rust `loro 1.13.9`). No public-API changes in
+  `crates/loro/src` between the two tags and the same feature flags
+  (`counter`, `jsonpath`), so the C/C++ wrapper surface is unchanged. Two
+  upstream behaviour changes land on paths the wrapper exposes:
+  - *Snapshot memory/perf* (loro-dev/loro#1049): full snapshot export no
+    longer walks and materialises every lazy container, the SSTable block
+    cache is byte-capped (4 MiB decompressed per table), snapshot output is
+    preallocated exactly, and external snapshot import validates per-block
+    checksums up front instead of failing later during lazy reads (a malformed
+    snapshot now surfaces as an import error rather than a deferred one).
+  - *Import replay fix* (loro-dev/loro#1058): a false-positive "concurrent
+    branch" classification in the DAG common-ancestor walk could replay the
+    whole history and build diff calculators for every unchanged container on
+    import; the LCA walk now tracks the dependency tip per path and diffing is
+    limited to containers that actually differ.
+  Cargo.lock re-resolved `loro`, `loro-internal`, and `loro-kv-store` to
+  1.13.9; `loro-common` stays at 1.13.1, so the version marker in `loro.hpp`
+  is unchanged.
+
+[1.13.9.1]: https://github.com/gsfjohnson/loro-c/compare/v1.13.7.2...v1.13.9.1
+
 ## [1.13.7.2] - 2026-08-08
 
 - **iOS release assets** ([#5]) — the release workflow now cross-builds three

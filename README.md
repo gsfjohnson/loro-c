@@ -8,17 +8,16 @@ C++ API is shaped as a faithful [`loro-cpp`](https://github.com/loro-dev/loro) d
 written against loro-cpp compiles unchanged here; the ergonomic free-function layer lives in
 `<loro/loro_ext.hpp>`.
 
-> **Status: core document model + all six containers + events + the advanced subsystems +
-> rich text + cursors + JSON-update sync & export modes; advancing toward full `loro-ffi`
-> parity.** The surface covers `LoroDoc`,
+> **Status: `loro-ffi` parity, less a short list of deliberate omissions.** The surface
+> covers `LoroDoc`,
 > all six containers (`Text` — including rich-text marks, deltas, and UTF-16/position helpers —
 > `Map`, `List`, `MovableList`, `Tree`, `Counter`), events & subscriptions, stable cursors,
 > JSON-update interchange and the full export-mode family (snapshot / updates / shallow-snapshot
-> / state-only / snapshot-at / updates-in-range, plus `import_batch` / `import_with`), and
+> / state-only / snapshot-at / updates-in-range, plus `import_batch` / `import_with`),
 > the advanced APIs (awareness, ephemeral store, undo manager, version vectors / frontiers /
-> change ancestors, fractional index, JSON Path, commit hooks). Still outstanding — diff/patch,
-> structured-value navigation, and the doc-utility/attribution
-> long tail — are tracked in [pm/GAPS_PLAN.md](pm/GAPS_PLAN.md). The library installs as a
+> change ancestors, fractional index, JSON Path, commit hooks), diff/patch, structured-value
+> navigation, and the doc-utility/attribution long tail. The remaining divergences from
+> upstream are intentional and listed in [pm/GAPS_PLAN.md](pm/GAPS_PLAN.md). The library installs as a
 > relocatable CMake package (`find_package(loro)`) and ships a `pkg-config` file. A versioned
 > shared library (`cdylib` + `SOVERSION`) is the one remaining packaging follow-up — today the
 > install is a static archive. See [pm/CBINDGEN_PLAN.md](pm/CBINDGEN_PLAN.md) for the original

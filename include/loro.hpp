@@ -591,7 +591,7 @@ inline LoroExpandType to_c_expand(ExpandType e) {
 
 // ---- ContainerType / ContainerId <-> "cid:" string (RESHAPE Phase 2) --------
 //
-// Matches loro-common 1.13.1 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
+// Matches loro-common 1.16.0 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
 //   root:   "cid:root-{name}:{Type}"      (the LAST ':' splits name from type — names may
 //                                           themselves contain ':')
 //   normal: "cid:{counter}@{peer}:{Type}"
@@ -3829,6 +3829,9 @@ struct UndoManager {
     }
     void group_start() { detail::check(loro_undo_manager_group_start(raw_)); }
     void group_end() { detail::check(loro_undo_manager_group_end(raw_)); }
+    void pause() { detail::check(loro_undo_manager_pause(raw_)); }
+    void resume() { detail::check(loro_undo_manager_resume(raw_)); }
+    bool is_paused() { return loro_undo_manager_is_paused(raw_); }
 
     std::optional<LoroValue> top_undo_value() {
         ::LoroValue *cv = loro_undo_manager_top_undo_value(raw_);

@@ -3311,6 +3311,26 @@ enum LoroStatus loro_undo_manager_group_start(struct LoroUndoManager *um);
 enum LoroStatus loro_undo_manager_group_end(struct LoroUndoManager *um);
 
 /**
+ * Pauses the manager: local edits are not recorded as undo steps and checkout events do
+ * not clear the stacks, while imports (remote changes) are still processed so the stacks
+ * stay transformed against concurrent edits. Use it around a temporary checkout (e.g. a
+ * read-only history preview); close any open group with [`loro_undo_manager_group_end`]
+ * first, and call [`loro_undo_manager_resume`] once the document is back in its original
+ * state.
+ */
+enum LoroStatus loro_undo_manager_pause(struct LoroUndoManager *um);
+
+/**
+ * Resumes recording after [`loro_undo_manager_pause`].
+ */
+enum LoroStatus loro_undo_manager_resume(struct LoroUndoManager *um);
+
+/**
+ * Returns whether the manager is currently paused. Returns `false` on a null handle.
+ */
+bool loro_undo_manager_is_paused(const struct LoroUndoManager *um);
+
+/**
  * Installs (or replaces) the on_push listener. The previous listener's `free_user_data`
  * runs when it is replaced.
  */

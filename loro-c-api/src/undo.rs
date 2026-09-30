@@ -457,6 +457,46 @@ pub extern "C" fn loro_undo_manager_group_end(um: *mut LoroUndoManager) -> LoroS
     })
 }
 
+/// Pauses the manager: local edits are not recorded as undo steps and checkout events do
+/// not clear the stacks, while imports (remote changes) are still processed so the stacks
+/// stay transformed against concurrent edits. Use it around a temporary checkout (e.g. a
+/// read-only history preview); close any open group with [`loro_undo_manager_group_end`]
+/// first, and call [`loro_undo_manager_resume`] once the document is back in its original
+/// state.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_pause(um: *mut LoroUndoManager) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let um = match um_mut(um) {
+            Some(u) => u,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        um.0.pause();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Resumes recording after [`loro_undo_manager_pause`].
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_resume(um: *mut LoroUndoManager) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let um = match um_mut(um) {
+            Some(u) => u,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        um.0.resume();
+        LoroStatus::LORO_OK
+    })
+}
+
+/// Returns whether the manager is currently paused. Returns `false` on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_undo_manager_is_paused(um: *const LoroUndoManager) -> bool {
+    ffi_guard!(false, {
+        let um = deref_or!(um, false);
+        um.0.is_paused()
+    })
+}
+
 /// Installs (or replaces) the on_push listener. The previous listener's `free_user_data`
 /// runs when it is replaced.
 #[no_mangle]

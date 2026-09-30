@@ -7,6 +7,49 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [1.16.2.1] - 2026-09-30
+
+- **Upgrade pinned `loro` crate `1.13.9` → `1.16.2`**, the newest published
+  Rust crate (1.16.0 and 1.16.2 are the only releases in between). Cargo.lock
+  re-resolved `loro` and `loro-internal` to 1.16.2, and `loro-common` and
+  `loro-kv-store` to 1.16.0. `loro-common` changed only in
+  `ContainerType::default_value` (`Unknown` now returns `Null` instead of
+  panicking), so the `cid:` string format `loro.hpp` parses is unchanged. The
+  version marker in its comment is bumped to 1.16.0.
+- **New: `UndoManager` pause/resume** (loro-dev/loro#1053), the only public-API
+  addition to the `loro` crate in this range. C: `loro_undo_manager_pause`,
+  `loro_undo_manager_resume`, `loro_undo_manager_is_paused`. C++:
+  `UndoManager::pause()`, `resume()`, `is_paused()`. While paused, local edits
+  are not recorded as undo steps (and are not folded into the next recorded
+  step), `undo`/`redo` return `false` without doing anything, and a checkout
+  does not clear the stacks. Remote imports are still transformed into the
+  stacks. Pause around a temporary checkout, such as a read-only history
+  preview, and resume once the doc is back at its original version.
+- Upstream fixes that reach paths this wrapper exposes:
+  - `import_batch` could leave the doc detached (#1066). Changes unlocked by
+    an earlier change in the same import are now applied (#1064).
+  - `export_snapshot_at` now keeps the history of deleted containers (#1107).
+  - Shallow snapshots enforce concurrency boundaries (#1090), pick shallow
+    roots as critical versions of the retained history (#1104), and build the
+    shallow root state by forward replay (#1091, faster).
+  - Text cursors now anchor correctly at non-BMP UTF-16 boundaries (#1103).
+  - Subscribing from inside an event callback no longer panics (#1105).
+    Before, the FFI panic guard turned this into `LORO_ERR_PANIC`.
+  - Rich text: redundant marks are skipped when a range spans several style
+    ranges (#1059), styled reads no longer clone the whole style op set
+    (#1069), and dead style values are redacted in shallow-snapshot exports
+    (#1072).
+  - Import replay is faster (#1084, #1098).
+- README: the status note no longer lists diff/patch, structured-value
+  navigation and the doc-utility/attribution APIs as outstanding. They landed
+  with GAPS_PLAN G4–G6.
+- Tests: `test_undo` covers pause/resume/is_paused, undo while paused, and
+  paused edits not being folded into the next undo step. `test_c_only` covers
+  undo/redo stacks surviving a paused checkout round-trip, an unpaused
+  checkout still clearing them, and the null-handle fallbacks.
+
+[1.16.2.1]: https://github.com/gsfjohnson/loro-c/compare/v1.13.9.2...v1.16.2.1
+
 ## [1.13.9.2] - 2026-09-02
 
 - **Fix: C++ layer dropped every tree diff event when the peer id had bit 63

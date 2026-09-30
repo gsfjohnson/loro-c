@@ -1179,6 +1179,68 @@ static void test_g6_c(void) {
     loro_doc_free(va);
 }
 
+/* UndoManager pause/resume (loro 1.16): a paused checkout round-trip leaves the undo/redo
+ * stacks intact, mirroring loro's pause_preserves_undo_stacks_across_checkout; without the
+ * pause, a checkout clears them. */
+static int text_is(LoroText* t, const char* s) {
+    LoroBytes b = {0};
+    if (loro_text_to_string(t, &b) != LORO_OK) return 0;
+    int eq = bytes_eq(&b, s);
+    loro_bytes_free(b);
+    return eq;
+}
+
+static void test_undo_pause_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(doc, 1) == LORO_OK);
+    LoroUndoManager* um = loro_undo_manager_new(doc);
+    CHECK(um != NULL);
+    LoroText* t = loro_doc_get_text(doc, "text", 4);
+
+    CHECK(loro_text_insert(t, 0, "Hello", 5) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(loro_text_insert(t, 5, " World", 6) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(loro_undo_manager_can_undo(um));
+
+    CHECK(loro_undo_manager_is_paused(um) == false);
+    CHECK(loro_undo_manager_pause(um) == LORO_OK);
+    CHECK(loro_undo_manager_is_paused(um) == true);
+    LoroFrontiers* empty = loro_frontiers_new();
+    CHECK(loro_doc_checkout(doc, empty) == LORO_OK);
+    CHECK(text_is(t, ""));
+    CHECK(loro_doc_checkout_to_latest(doc) == LORO_OK);
+    CHECK(text_is(t, "Hello World"));
+    CHECK(loro_undo_manager_resume(um) == LORO_OK);
+    CHECK(loro_undo_manager_is_paused(um) == false);
+
+    bool applied = false;
+    CHECK(loro_undo_manager_can_undo(um));
+    CHECK(loro_undo_manager_undo(um, &applied) == LORO_OK && applied);
+    CHECK(text_is(t, "Hello"));
+    CHECK(loro_undo_manager_undo(um, &applied) == LORO_OK && applied);
+    CHECK(text_is(t, ""));
+    CHECK(loro_undo_manager_can_redo(um));
+    CHECK(loro_undo_manager_redo(um, &applied) == LORO_OK && applied);
+    CHECK(loro_undo_manager_redo(um, &applied) == LORO_OK && applied);
+    CHECK(text_is(t, "Hello World"));
+
+    /* unpaused checkout still clears both stacks */
+    CHECK(loro_doc_checkout(doc, empty) == LORO_OK);
+    CHECK(!loro_undo_manager_can_undo(um));
+    CHECK(!loro_undo_manager_can_redo(um));
+
+    /* null-handle fallbacks */
+    CHECK(loro_undo_manager_pause(NULL) == LORO_ERR_INVALID_ARG);
+    CHECK(loro_undo_manager_resume(NULL) == LORO_ERR_INVALID_ARG);
+    CHECK(loro_undo_manager_is_paused(NULL) == false);
+
+    loro_frontiers_free(empty);
+    loro_undo_manager_free(um);
+    loro_text_free(t);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -1193,6 +1255,7 @@ int main(void) {
     test_diff_c();
     test_get_by_path_c();
     test_g6_c();
+    test_undo_pause_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

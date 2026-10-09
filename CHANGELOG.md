@@ -7,24 +7,23 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
-## [Unreleased]
+## [1.16.2.2] - 2026-10-09
 
-- **Android release assets.** The release workflow now cross-builds two
-  Android tarballs: `android-arm64` (ABI `arm64-v8a`, `aarch64-linux-android`)
-  and `android-x86_64` (ABI `x86_64`, `x86_64-linux-android`). They use the
-  same install-prefix layout as the other assets, so `find_package(loro)` works
-  under the NDK toolchain file. Static archives only, built with NDK r30, which
-  is pinned by checksum. Earlier NDKs stop at API 35, and the toolchain file
-  clamps a higher `ANDROID_PLATFORM` down with only a warning. Each job checks
-  the archive's ELF machine type and that it is a bionic build, not glibc. It
-  then cross-builds `tests/consumer` and links it at API 36 (Android 16).
-  CI gains a build-only `arm64-v8a` guard job.
-- **Fix: Android system libraries.** `cmake/LoroSystemLibs.cmake` sent Android
-  triples to the glibc list (`m dl pthread gcc_s util rt`). The NDK has no
-  `libgcc_s`, `libutil`, `librt` or `libpthread`, so any Android consumer link
-  against the installed config failed. Android now gets rustc's own list,
-  `dl log unwind m c`. The list is also used when the NDK toolchain file is in
-  use and no explicit Rust triple is given.
+- **New: prebuilt Android assets.** Each release now includes
+  `loro-c-android-arm64-<tag>.tar.gz` (devices, ABI `arm64-v8a`) and
+  `loro-c-android-x86_64-<tag>.tar.gz` (emulator, ABI `x86_64`). They are
+  static archives with the same layout as the other assets, so
+  `find_package(loro)` works with the NDK toolchain file. Unpack one per ABI.
+  See the README for the CMake recipe. They are built with NDK r30 and checked
+  by linking a test app at API 36 (Android 16). To target API 36 your app
+  needs NDK r30 or newer, because r28 and r29 stop at API 35.
+- **Fix: Android links failed when building from source.** The installed
+  `loroConfig.cmake` and `loro.pc` asked Android apps to link desktop Linux
+  libraries (`gcc_s`, `util`, `rt`, `pthread`) that the NDK doesn't have. They
+  now list `dl log unwind m c`.
+- No API changes. The pinned `loro` crate is still `1.16.2`.
+
+[1.16.2.2]: https://github.com/gsfjohnson/loro-c/compare/v1.16.2.1...v1.16.2.2
 
 ## [1.16.2.1] - 2026-09-30
 

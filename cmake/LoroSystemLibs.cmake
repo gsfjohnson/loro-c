@@ -22,8 +22,9 @@ include_guard(GLOBAL)
 #   2. the pinned rustup toolchain name (LORO_RUST_TOOLCHAIN, manual path): its name
 #      embeds the host triple, which is what cargo builds when no --target is given
 #      (e.g. stable-x86_64-pc-windows-gnullvm on the dev box);
-#   3. the host platform (WIN32/APPLE/else) — only reached when a native CMake drives
-#      cargo's default host target, where host detection IS reliable.
+#   3. the target platform (ANDROID/WIN32/APPLE/else) — only reached when no triple is
+#      given: either the NDK toolchain file is in use, or a native CMake drives cargo's
+#      default host target, where host detection IS reliable.
 function(loro_system_libs out_libs out_pc)
     set(_key "${LORO_CARGO_TARGET}")
     if(NOT _key)
@@ -45,9 +46,18 @@ function(loro_system_libs out_libs out_pc)
         # the libSystem/libc++abi machinery every Apple link carries implicitly, and the
         # crate graph links no Apple frameworks (no security-framework/core-foundation).
         set(_libs "")
+    elseif(_key MATCHES "android")
+        # Android (bionic; aarch64/x86_64-linux-android): rustc reports
+        # "-ldl -llog -lunwind -ldl -lm -lc", deduplicated here. The NDK has no libgcc_s,
+        # util or rt, so the glibc list below would break every consumer link.
+        set(_libs dl log unwind m c)
     elseif(_key)
         # Any other explicit triple: assume the Linux-ish glibc list.
         set(_libs m dl pthread gcc_s util rt)
+    elseif(ANDROID)
+        # No triple hint, but configured with the NDK toolchain file: Corrosion derives
+        # the Android triple from ANDROID_ABI itself, so the key above stays empty.
+        set(_libs dl log unwind m c)
     elseif(WIN32)
         # No triple/toolchain hint: native CMake on Windows drives the msvc host target.
         set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp)

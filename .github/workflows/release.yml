@@ -31,6 +31,10 @@ permissions:
 # build with BUILD_TESTING=OFF and validate via (a) lipo/otool arch + platform
 # checks on the installed archive and (b) a cross-configured *build* (no run)
 # of tests/consumer against the install tree.
+#
+# The build-android job adds two Android ABIs (arm64-v8a, x86_64) the same way:
+# per-ABI tarballs, BUILD_TESTING=OFF, archive checks with the NDK's llvm-readelf/nm,
+# and a cross-built consumer linked at the minimum supported API level.
 
 jobs:
   build:
@@ -460,6 +464,156 @@ jobs:
 
       # Same install-tree tarball layout as the host assets; the tzf listing documents
       # the payload in the job log.
+      - name: Package
+        run: |
+          tar czf "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz" -C "${{ env.INSTALL_DIR }}" .
+          tar tzf "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz"
+
+      - name: Upload run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loro-c-${{ matrix.artifact }}
+          path: loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz" --clobber
+
+  # Android cross builds: one tarball per ABI, same prefix layout as the host assets so
+  # find_package(loro) works unchanged under the NDK toolchain file. Separate job for the
+  # same reason as build-ios: Android binaries cannot run on the runner, so
+  # BUILD_TESTING=OFF and the consumer smoke test is build-only. Like iOS, the only
+  # compiled artifact is the Rust staticlib, and no crate in the graph compiles C for
+  # Android, so the NDK is only exercised by the CMake configure and the consumer link.
+  build-android:
+    name: android (${{ matrix.artifact }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # abi: the NDK's ANDROID_ABI name. machine: llvm-readelf's e_machine string,
+          # asserted by "Verify archive" below.
+          - artifact: android-arm64      # devices
+            rust_target: aarch64-linux-android
+            abi: arm64-v8a
+            machine: AArch64
+          - artifact: android-x86_64     # emulator on x86_64 hosts
+            rust_target: x86_64-linux-android
+            abi: x86_64
+            machine: Advanced Micro Devices X86-64
+
+    env:
+      INSTALL_DIR: ${{ github.workspace }}/install
+      # Version stamp baked into the archive filename; see the build job's env.
+      VERSION: ${{ github.event.release.tag_name || github.ref_name }}
+      # The API level the archive is verified against: Basu Notes' minimum (Android 16).
+      # The archive itself carries no API stamp (rustc's Android std resolves newer
+      # libc symbols weakly), so it links into apps at any level the NDK supports; this
+      # pins the level the consumer link check proves.
+      ANDROID_API: "36"
+      # Pinned NDK. r30 is the first release whose sysroot goes past API 35 (r28 and r29
+      # cap at 35, and the NDK toolchain file only warns before clamping a higher
+      # ANDROID_PLATFORM down). Downloaded by checksum rather than taken from the
+      # runner image, whose preinstalled NDK set changes without notice.
+      NDK_VERSION: r30
+      NDK_SHA1: 5107f898313790e449e87eee2183d9a20602dee9
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `targets:` pre-installs the cross std; Corrosion's FindRust errors if the
+      # requested Rust_CARGO_TARGET is not installed.
+      - name: Install Rust (stable + Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      # Both ABIs run on the same image under the same job id; the per-ABI key keeps
+      # their target/ caches apart.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+          key: ${{ matrix.artifact }}
+
+      # Fails here, not with a silent clamp later, if the pinned NDK lacks the API level.
+      - name: Install Android NDK
+        run: |
+          curl -sSfLo ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          echo "${NDK_SHA1}  ndk.zip" | sha1sum -c
+          unzip -q ndk.zip -d "${RUNNER_TEMP}"
+          rm ndk.zip
+          NDK="${RUNNER_TEMP}/android-ndk-${NDK_VERSION}"
+          test -f "${NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.rust_target }}/${ANDROID_API}/libc.so"
+          echo "ANDROID_NDK=${NDK}" >> "${GITHUB_ENV}"
+
+      # Explicit Rust_CARGO_TARGET even though Corrosion can derive it from ANDROID_ABI:
+      # it is the key cmake/LoroSystemLibs.cmake classifies, and it matches the iOS jobs.
+      # BUILD_TESTING=OFF because Android test binaries cannot run here.
+      - name: Configure (Release, Android cross)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=${{ matrix.abi }}
+          -DANDROID_PLATFORM=android-${ANDROID_API}
+          -DRust_CARGO_TARGET=${{ matrix.rust_target }}
+          -DBUILD_TESTING=OFF
+          -DLORO_BUILD_EXAMPLES=OFF
+          -DCMAKE_INSTALL_PREFIX="${{ env.INSTALL_DIR }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install
+        run: cmake --install build
+
+      # Machine type alone cannot tell the x86_64 Android archive from an x86_64 glibc
+      # host build (the failure mode if the target were ever dropped), so also assert a
+      # bionic marker: Rust's Android std reaches errno through `__errno`, where glibc's
+      # uses `__errno_location`. Tool output goes to files first: under the runner's
+      # `bash -eo pipefail`, `tool | grep -q` can fail on SIGPIPE.
+      - name: Verify archive
+        env:
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          BIN="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          A="${INSTALL_DIR}/lib/libloro_c_api.a"
+          ls -l "$A"
+          "$BIN/llvm-readelf" -h "$A" > "${RUNNER_TEMP}/readelf.txt"
+          awk -v want="$MACHINE" '/Machine:/ { n++; sub(/^ *Machine: */, ""); if ($0 != want) bad++ }
+            END { printf "%d members, %d not %s\n", n, bad, want; exit !(n > 0 && bad == 0) }' \
+            "${RUNNER_TEMP}/readelf.txt"
+          "$BIN/llvm-nm" -u "$A" > "${RUNNER_TEMP}/undef.txt" 2>/dev/null
+          grep -qw '__errno' "${RUNNER_TEMP}/undef.txt"
+          if grep -qw '__errno_location' "${RUNNER_TEMP}/undef.txt"; then
+            echo "archive references glibc's __errno_location: not an Android build" >&2
+            exit 1
+          fi
+
+      # Cross-configure + BUILD (no run) of the standalone consumer at the pinned API
+      # level: proves loroConfig resolves under the NDK toolchain and that its baked
+      # system-lib list is complete for a real Android link. CMAKE_FIND_ROOT_PATH is
+      # needed alongside CMAKE_PREFIX_PATH because the NDK toolchain file restricts
+      # find_package to the find roots (also the documented recipe — README).
+      - name: Consumer find_package cross-build check
+        run: >
+          cmake -S tests/consumer -B build-consumer
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=${{ matrix.abi }}
+          -DANDROID_PLATFORM=android-${ANDROID_API}
+          -DCMAKE_PREFIX_PATH="${{ env.INSTALL_DIR }}"
+          -DCMAKE_FIND_ROOT_PATH="${{ env.INSTALL_DIR }}" &&
+          cmake --build build-consumer --parallel
+
       - name: Package
         run: |
           tar czf "loro-c-${{ matrix.artifact }}-${{ env.VERSION }}.tar.gz" -C "${{ env.INSTALL_DIR }}" .

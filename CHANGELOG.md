@@ -7,6 +7,25 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [Unreleased]
+
+- **Android release assets.** The release workflow now cross-builds two
+  Android tarballs: `android-arm64` (ABI `arm64-v8a`, `aarch64-linux-android`)
+  and `android-x86_64` (ABI `x86_64`, `x86_64-linux-android`). They use the
+  same install-prefix layout as the other assets, so `find_package(loro)` works
+  under the NDK toolchain file. Static archives only, built with NDK r30, which
+  is pinned by checksum. Earlier NDKs stop at API 35, and the toolchain file
+  clamps a higher `ANDROID_PLATFORM` down with only a warning. Each job checks
+  the archive's ELF machine type and that it is a bionic build, not glibc. It
+  then cross-builds `tests/consumer` and links it at API 36 (Android 16).
+  CI gains a build-only `arm64-v8a` guard job.
+- **Fix: Android system libraries.** `cmake/LoroSystemLibs.cmake` sent Android
+  triples to the glibc list (`m dl pthread gcc_s util rt`). The NDK has no
+  `libgcc_s`, `libutil`, `librt` or `libpthread`, so any Android consumer link
+  against the installed config failed. Android now gets rustc's own list,
+  `dl log unwind m c`. The list is also used when the NDK toolchain file is in
+  use and no explicit Rust triple is given.
+
 ## [1.16.2.1] - 2026-09-30
 
 - **Upgrade pinned `loro` crate `1.13.9` → `1.16.2`**, the newest published

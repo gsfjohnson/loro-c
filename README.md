@@ -33,7 +33,7 @@ loro-c-api/               the Rust crate that implements the C ABI
 cmake/                    package config + pkg-config templates; manual cargo->CMake fallback
 examples/                 basic_text, rich_text, cursor_tracking, sync_two_docs, json_sync, subscribe_events
 tests/                    CTest suite (C++ and pure-C) + tests/consumer (find_package smoke test)
-.github/workflows/      CI: build/test matrix + iOS cross guard + install smoke test + cbindgen drift guard
+.github/workflows/      CI: build/test matrix + iOS/Android cross guards + install smoke test + cbindgen drift guard
 ```
 
 ## Building
@@ -115,6 +115,8 @@ toolchain — unpack an archive and point `find_package` at it:
 | `loro-c-ios-arm64-<tag>.tar.gz` | iOS devices (`aarch64-apple-ios`) |
 | `loro-c-ios-sim-arm64-<tag>.tar.gz` | iOS simulator on Apple Silicon (`aarch64-apple-ios-sim`) |
 | `loro-c-ios-sim-x86_64-<tag>.tar.gz` | iOS simulator on Intel Macs (`x86_64-apple-ios`) |
+| `loro-c-android-arm64-<tag>.tar.gz` | Android devices, ABI `arm64-v8a` (`aarch64-linux-android`) |
+| `loro-c-android-x86_64-<tag>.tar.gz` | Android emulator on x86_64 hosts, ABI `x86_64` (`x86_64-linux-android`) |
 
 The iOS slices are static archives only, built without bitcode (deprecated since
 Xcode 14), with a minimum deployment target of iOS 13.0 (14.0 for the arm64 simulator —
@@ -132,8 +134,31 @@ cmake -S app -B build-ios \
 
 Under `CMAKE_SYSTEM_NAME=iOS`, CMake re-roots `find_package` searches beneath the SDK, so
 the prefix must appear in `CMAKE_FIND_ROOT_PATH` as well as `CMAKE_PREFIX_PATH` (or set
-`loro_DIR=<prefix>/lib/cmake/loro` directly, which bypasses the search). The packaged
-`loroConfig.cmake` is self-contained: the Rust-archive snippet it includes is a plain
+`loro_DIR=<prefix>/lib/cmake/loro` directly, which bypasses the search).
+
+The Android archives are static only, built with NDK r30 and verified by linking a
+consumer at API 36 (Android 16). The archive carries no API-level stamp, so the level
+your app builds for is set by your own `ANDROID_PLATFORM`; it must be one your NDK
+supports (API 36 needs NDK r30 or newer; r28 and r29 stop at 35). 16 KB page alignment
+is decided when your app links its shared library, not by this archive. To consume one
+with the NDK toolchain file (or from Gradle's `externalNativeBuild`, which passes the
+same variables):
+
+```sh
+cmake -S app -B build-android \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-36 \
+  -DCMAKE_PREFIX_PATH=/path/to/unpacked/prefix \
+  -DCMAKE_FIND_ROOT_PATH=/path/to/unpacked/prefix
+```
+
+The NDK toolchain file limits `find_package` to the find roots in the same way, so the
+same `CMAKE_FIND_ROOT_PATH` (or `loro_DIR`) rule applies. Unpack one tarball per ABI and
+pick the prefix by `${ANDROID_ABI}`. The packaged config links `dl log unwind m c`, which
+the NDK provides.
+
+The packaged `loroConfig.cmake` is self-contained: the Rust-archive snippet it includes is a plain
 `STATIC IMPORTED` target with a prefix-relative path, so consumers — cross-compiled ones
 included — need neither Rust nor Corrosion at configure time.
 

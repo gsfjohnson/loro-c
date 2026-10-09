@@ -254,6 +254,72 @@ jobs:
           -DCMAKE_FIND_ROOT_PATH="${{ runner.temp }}/loro-install" &&
           cmake --build build-consumer --parallel
 
+  # Android cross guard (arm64-v8a only): the release workflow builds two Android ABIs
+  # (see release.yml's build-android job). One suffices here — the two differ only in
+  # triple/ABI values. Build-only, like the iOS guard; the consumer link at API 36 is the
+  # check that the Android system-lib list in cmake/LoroSystemLibs.cmake is complete.
+  build-android-cross:
+    name: ubuntu-24.04 (Android cross)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    env:
+      # See release.yml's build-android env for why r30 and API 36.
+      ANDROID_API: "36"
+      NDK_VERSION: r30
+      NDK_SHA1: 5107f898313790e449e87eee2183d9a20602dee9
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + Android target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: loro-c-api
+
+      - name: Install Android NDK
+        run: |
+          curl -sSfLo ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          echo "${NDK_SHA1}  ndk.zip" | sha1sum -c
+          unzip -q ndk.zip -d "${RUNNER_TEMP}"
+          rm ndk.zip
+          NDK="${RUNNER_TEMP}/android-ndk-${NDK_VERSION}"
+          test -f "${NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/${ANDROID_API}/libc.so"
+          echo "ANDROID_NDK=${NDK}" >> "${GITHUB_ENV}"
+
+      - name: Configure (Release, Android cross)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=arm64-v8a
+          -DANDROID_PLATFORM=android-${ANDROID_API}
+          -DRust_CARGO_TARGET=aarch64-linux-android
+          -DBUILD_TESTING=OFF
+          -DLORO_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install
+        run: cmake --install build --prefix "${{ runner.temp }}/loro-install"
+
+      - name: Consumer find_package cross-build check
+        run: >
+          cmake -S tests/consumer -B build-consumer
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK}/build/cmake/android.toolchain.cmake"
+          -DANDROID_ABI=arm64-v8a
+          -DANDROID_PLATFORM=android-${ANDROID_API}
+          -DCMAKE_PREFIX_PATH="${{ runner.temp }}/loro-install"
+          -DCMAKE_FIND_ROOT_PATH="${{ runner.temp }}/loro-install" &&
+          cmake --build build-consumer --parallel
+
   # Syntax-check the public headers with clang against libstdc++ — the one compiler/stdlib
   # pairing the build matrix above never produces (Ubuntu jobs default to GCC; the clang
   # jobs pair with libc++ or the MS STL). That blind spot shipped issue #3: JsonValue's

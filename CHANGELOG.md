@@ -7,6 +7,30 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [Unreleased]
+
+- **New: shallow map read.** C: `loro_map_get_value`. C++: `LoroMap::get_value()`.
+  It returns every entry, with child containers as `kContainer` ids rather than
+  their deep values. Lists already had this (`loro_list_get_value`,
+  `LoroList::to_vec`). It is not a faster way to read a few keys: for scalar
+  entries it costs about the same as one `get` per key, and each child container
+  adds the cost of building its id.
+- **New: typed delta and map walks, no JSON.** C: `loro_text_for_each_delta`
+  calls a visitor with each segment's text and its attributes as a `LoroValue`
+  map. `loro_value_map_for_each` calls a visitor with each entry of a map
+  value. Both stop when the visitor returns `false`, and run `free_user_data`
+  once.
+- **Faster:** `LoroText::to_delta()` now reads through
+  `loro_text_for_each_delta`, and every typed map read (`get_value`,
+  `get_deep_value`, map-valued entries and attributes) through
+  `loro_value_map_for_each`. No JSON is written or parsed, and no handle is
+  allocated per entry. The C++ signatures are unchanged.
+- **Fix:** `LoroText::to_delta()` misread number attributes when the app had set
+  a comma-decimal `LC_NUMERIC` (German, French, …): `2.5` came back as `2.0`. The
+  JSON reader used `std::stod`, which follows the C locale. The typed read has no
+  number parsing.
+- `loro_text_to_delta` (JSON) and `loro_value_map_keys` stay for C callers.
+
 ## [1.16.2.2] - 2026-10-09
 
 - **New: prebuilt Android assets.** Each release now includes

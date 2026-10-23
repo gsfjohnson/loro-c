@@ -183,6 +183,17 @@ pub extern "C" fn loro_map_get_value_or_container(
     })
 }
 
+/// Returns the map's *shallow* value as an owned typed `LoroValue*` (a `Map` value; nested
+/// containers appear as `Container` entries, not their deep values). Backs the C++
+/// `get_value`. Free with `loro_value_free`.
+#[no_mangle]
+pub extern "C" fn loro_map_get_value(map: *const LoroMap) -> *mut LoroValue {
+    ffi_guard!(std::ptr::null_mut(), {
+        let map = deref_or!(map, std::ptr::null_mut());
+        crate::value_typed::into_raw(map.inner().get_value())
+    })
+}
+
 /// Returns the map's full recursive state as an owned typed `LoroValue*` (a `Map` value
 /// with nested containers resolved to their deep values). Free with `loro_value_free`.
 #[no_mangle]

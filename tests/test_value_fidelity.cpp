@@ -5,6 +5,7 @@
 // while corrupting data. Here we assert:
 //   * kDouble{2.0} — an integer-valued double — round-trips as kDouble, NOT kI64.
 //   * kBinary round-trips as kBinary, NOT a kList.
+//   * LoroMap::get_value (shallow) and LoroText::to_delta read typed values, with no JSON.
 //   * the loro::ext value helpers (the value-helper portion of loro-cpp's test_ext, which
 //     cannot be compiled standalone in Phase 1 because the rest of that file needs the
 //     subscription / undo / container-template surface from later phases).
@@ -15,7 +16,9 @@
 
 #include <loro/loro_ext.hpp>
 
+#include <clocale>
 #include <cstdint>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -228,6 +231,152 @@ bool test_jsonpath_value_fidelity() {
     return true;
 }
 
+bool same_container(const loro::ContainerId &a, const loro::ContainerId &b) {
+    auto *x = std::get_if<loro::ContainerId::kNormal>(&a.get_variant());
+    auto *y = std::get_if<loro::ContainerId::kNormal>(&b.get_variant());
+    return x && y && x->peer == y->peer && x->counter == y->counter &&
+           x->container_type.get_variant().index() == y->container_type.get_variant().index();
+}
+
+// LoroMap::get_value is the shallow read: scalars as stored, child containers as kContainer ids
+// (get_deep_value resolves them). Entries come through loro_value_map_for_each.
+bool test_map_shallow_value() {
+    using loro::LoroValue;
+    auto doc = loro::LoroDoc::init();
+    auto map = doc->get_map(root("m"));
+    std::vector<uint8_t> bytes{0x00, 0xff};
+    map->insert("d", ext::value_like_from(2.0));
+    map->insert("b", ext::value_like_from(bytes));
+    map->insert("s", str_value("\xc3\xa9t\xc3\xa9"));
+    auto content = map->insert_text_container("content", loro::LoroText::init());
+    content->insert(0, "body");
+    auto child = map->insert_map_container("child", loro::LoroMap::init());
+    child->insert("k", i64_value(1));
+
+    auto shallow = ext::value_as_map(map->get_value());
+    if (!shallow || shallow->size() != 5) return fail("get_value is not a 5-entry map");
+    const LoroValue &d = shallow->at("d");
+    if (!std::holds_alternative<LoroValue::kDouble>(d.get_variant()) ||
+        ext::value_as_double(d) != 2.0) {
+        return fail("get_value: 2.0 is not kDouble");
+    }
+    if (ext::value_as_binary(shallow->at("b")) != bytes) return fail("get_value: binary wrong");
+    if (ext::value_as_string(shallow->at("s")) != "\xc3\xa9t\xc3\xa9") {
+        return fail("get_value: string wrong");
+    }
+    auto content_id = ext::value_as_container(shallow->at("content"));
+    if (!content_id || !same_container(*content_id, content->id())) {
+        return fail("get_value: text child is not its container id");
+    }
+    auto child_id = ext::value_as_container(shallow->at("child"));
+    if (!child_id || !same_container(*child_id, child->id())) {
+        return fail("get_value: map child is not its container id");
+    }
+
+    auto deep = ext::value_as_map(map->get_deep_value());
+    if (!deep || ext::value_as_string(deep->at("content")) != "body") {
+        return fail("get_deep_value: text child not resolved");
+    }
+    auto deep_child = ext::value_as_map(deep->at("child"));
+    if (!deep_child || ext::value_as_i64(deep_child->at("k")) != 1) {
+        return fail("get_deep_value: map child not resolved");
+    }
+
+    auto empty = ext::value_as_map(doc->get_map(root("empty"))->get_value());
+    if (!empty || !empty->empty()) return fail("get_value of an empty map is not empty");
+    return true;
+}
+
+// Switches LC_NUMERIC to a locale whose decimal point is ',' and returns true, or restores
+// "C" and returns false when this host has none.
+bool set_comma_numeric_locale() {
+    for (const char *name : {"de-DE", "de_DE.UTF-8", "de_DE.utf8", "de_DE", "fr-FR",
+                             "fr_FR.UTF-8", "fr_FR.utf8", "German_Germany.1252"}) {
+        if (std::setlocale(LC_NUMERIC, name) && std::localeconv()->decimal_point[0] == ',') {
+            return true;
+        }
+    }
+    std::setlocale(LC_NUMERIC, "C");
+    return false;
+}
+
+// to_delta: segment text and typed attributes, read through loro_text_for_each_delta rather
+// than a JSON array. The JSON reader parsed numbers with std::stod, which follows LC_NUMERIC,
+// so an app that set a comma-decimal locale read a 2.5 attribute back as 2.
+bool test_to_delta_fidelity() {
+    using loro::LoroValue;
+    using loro::TextDelta;
+    auto doc = loro::LoroDoc::init();
+    auto styles = loro::StyleConfigMap::init();
+    for (const char *k : {"bold", "link", "size", "level"}) {
+        styles->insert(k, loro::StyleConfig{loro::ExpandType::kNone});
+    }
+    doc->config_text_style(styles);
+
+    auto empty = doc->get_text(root("empty"));
+    if (!empty->to_delta().empty()) return fail("to_delta of an empty text is not empty");
+
+    // Codepoints: "héllo" 0-4, ' ' 5, "wörld" 6-10, ' ' 11, U+1F600 12.
+    auto text = doc->get_text(root("t"));
+    text->insert(0, "h\xc3\xa9llo w\xc3\xb6rld \xf0\x9f\x98\x80");
+    text->mark(0, 5, "bold", bool_value(true));
+    text->mark(6, 11, "link", str_value("https://example.test/\xc3\xbc"));
+    text->mark(6, 11, "size", double_value(2.5));
+    text->mark(12, 13, "level", i64_value(3));
+    doc->commit();
+
+    auto check = [](const std::vector<TextDelta> &delta) -> bool {
+        std::vector<const TextDelta::kInsert *> ins;
+        for (const auto &d : delta) {
+            auto *i = std::get_if<TextDelta::kInsert>(&d.get_variant());
+            if (!i) return fail("to_delta of a text state holds a non-insert segment");
+            ins.push_back(i);
+        }
+        if (ins.size() != 5) return fail("to_delta segment count wrong");
+        if (ins[0]->insert != "h\xc3\xa9llo" || ins[1]->insert != " " ||
+            ins[2]->insert != "w\xc3\xb6rld" || ins[3]->insert != " " ||
+            ins[4]->insert != "\xf0\x9f\x98\x80") {
+            return fail("to_delta segment text wrong");
+        }
+        if (ins[1]->attributes || ins[3]->attributes) {
+            return fail("an unmarked segment carries attributes");
+        }
+        if (!ins[0]->attributes || ins[0]->attributes->size() != 1 ||
+            ext::value_as_bool(ins[0]->attributes->at("bold")) != true) {
+            return fail("bold attribute wrong");
+        }
+        const auto &a2 = ins[2]->attributes;
+        if (!a2 || a2->size() != 2) return fail("link segment attribute count wrong");
+        if (ext::value_as_string(a2->at("link")) != "https://example.test/\xc3\xbc") {
+            return fail("link attribute wrong");
+        }
+        const LoroValue &size = a2->at("size");
+        if (!std::holds_alternative<LoroValue::kDouble>(size.get_variant()) ||
+            ext::value_as_double(size) != 2.5) {
+            return fail("size attribute is not kDouble 2.5");
+        }
+        if (!ins[4]->attributes) return fail("level attribute missing");
+        const LoroValue &level = ins[4]->attributes->at("level");
+        if (!std::holds_alternative<LoroValue::kI64>(level.get_variant()) ||
+            ext::value_as_i64(level) != 3) {
+            return fail("level attribute is not kI64 3");
+        }
+        return true;
+    };
+
+    if (!check(text->to_delta())) return false;
+
+    std::string saved = std::setlocale(LC_NUMERIC, nullptr);
+    if (set_comma_numeric_locale()) {
+        bool ok = check(text->to_delta());
+        std::setlocale(LC_NUMERIC, saved.c_str());
+        if (!ok) return fail("to_delta under a comma-decimal LC_NUMERIC");
+    } else {
+        std::cerr << "note: no comma-decimal locale here; skipped the LC_NUMERIC check\n";
+    }
+    return true;
+}
+
 bool run() {
     if (!test_value_helpers()) return false;
     if (!test_double_fidelity()) return false;
@@ -237,6 +386,8 @@ bool run() {
     if (!test_import_status_pending()) return false;
     if (!test_undo_meta_value_fidelity()) return false;
     if (!test_jsonpath_value_fidelity()) return false;
+    if (!test_map_shallow_value()) return false;
+    if (!test_to_delta_fidelity()) return false;
     return true;
 }
 

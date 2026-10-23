@@ -1241,6 +1241,127 @@ static void test_undo_pause_c(void) {
     loro_doc_free(doc);
 }
 
+/* Typed reads with no JSON: loro_map_get_value (shallow), loro_value_map_for_each and
+ * loro_text_for_each_delta. Each visitor stops early when invoke returns false, and its
+ * free_user_data runs exactly once per call, errors included. */
+typedef struct {
+    int entries;
+    int stop_after; /* 0 = never stop */
+    int saw_n;
+    int saw_content;
+    int frees;
+} map_visit;
+
+static bool map_visit_entry(const char* key, uintptr_t key_len, const LoroValue* value,
+                            void* user_data) {
+    map_visit* v = (map_visit*)user_data;
+    v->entries++;
+    if (key_len == 1 && memcmp(key, "n", 1) == 0) {
+        int64_t i = 0;
+        v->saw_n = loro_value_as_i64(value, &i) && i == 42;
+    } else if (key_len == 7 && memcmp(key, "content", 7) == 0) {
+        v->saw_content = loro_value_get_type(value) == LORO_VALUE_CONTAINER;
+    }
+    return v->stop_after == 0 || v->entries < v->stop_after;
+}
+
+static void map_visit_free(void* user_data) { ((map_visit*)user_data)->frees++; }
+
+typedef struct {
+    int segments;
+    int stop_after; /* 0 = never stop */
+    char text[64];
+    int bold_first;
+    int plain_second;
+    int frees;
+} delta_visit;
+
+static bool delta_visit_segment(const char* insert, uintptr_t insert_len,
+                                const LoroValue* attributes, void* user_data) {
+    delta_visit* v = (delta_visit*)user_data;
+    size_t used = strlen(v->text);
+    if (used + insert_len < sizeof v->text) {
+        memcpy(v->text + used, insert, insert_len);
+        v->text[used + insert_len] = '\0';
+    }
+    if (v->segments == 0 && attributes != NULL) {
+        LoroValue* bold = loro_value_map_get(attributes, "bold", 4);
+        bool b = false;
+        v->bold_first = bold != NULL && loro_value_as_bool(bold, &b) && b;
+        loro_value_free(bold);
+    } else if (v->segments == 1) {
+        v->plain_second = attributes == NULL;
+    }
+    v->segments++;
+    return v->stop_after == 0 || v->segments < v->stop_after;
+}
+
+static void delta_visit_free(void* user_data) { ((delta_visit*)user_data)->frees++; }
+
+static void test_typed_reads_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    LoroMap* m = loro_doc_get_map(doc, "m", 1);
+    CHECK(loro_map_insert(m, "n", 1, "42", 2) == LORO_OK);
+    CHECK(loro_map_insert(m, "s", 1, "\"hi\"", 4) == LORO_OK);
+    LoroContainer* content =
+        loro_map_insert_container(m, "content", 7, loro_container_new(LORO_CONTAINER_TEXT));
+    CHECK(content != NULL);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    LoroValue* shallow = loro_map_get_value(m);
+    CHECK(shallow != NULL);
+    CHECK(loro_value_get_type(shallow) == LORO_VALUE_MAP);
+    CHECK(loro_value_map_len(shallow) == 3);
+
+    map_visit all = {0};
+    LoroValueMapVisitor all_visitor = {map_visit_entry, &all, map_visit_free};
+    CHECK(loro_value_map_for_each(shallow, all_visitor) == LORO_OK);
+    CHECK(all.entries == 3 && all.saw_n && all.saw_content && all.frees == 1);
+
+    map_visit first = {0};
+    first.stop_after = 1;
+    LoroValueMapVisitor first_visitor = {map_visit_entry, &first, map_visit_free};
+    CHECK(loro_value_map_for_each(shallow, first_visitor) == LORO_OK);
+    CHECK(first.entries == 1 && first.frees == 1);
+
+    LoroValue* num = loro_value_new_i64(1);
+    map_visit bad = {0};
+    LoroValueMapVisitor bad_visitor = {map_visit_entry, &bad, map_visit_free};
+    CHECK(loro_value_map_for_each(num, bad_visitor) == LORO_ERR_INVALID_ARG);
+    CHECK(loro_value_map_for_each(NULL, bad_visitor) == LORO_ERR_INVALID_ARG);
+    CHECK(bad.entries == 0 && bad.frees == 2);
+    CHECK(loro_map_get_value(NULL) == NULL);
+    loro_value_free(num);
+    loro_value_free(shallow);
+
+    LoroText* t = loro_doc_get_text(doc, "t", 1);
+    CHECK(loro_text_insert(t, 0, "Hello world", 11) == LORO_OK);
+    CHECK(loro_text_mark(t, 0, 5, "bold", 4, "true", 4) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    delta_visit whole = {0};
+    LoroTextDeltaVisitor whole_visitor = {delta_visit_segment, &whole, delta_visit_free};
+    CHECK(loro_text_for_each_delta(t, whole_visitor) == LORO_OK);
+    CHECK(whole.segments == 2 && strcmp(whole.text, "Hello world") == 0);
+    CHECK(whole.bold_first && whole.plain_second && whole.frees == 1);
+
+    delta_visit head = {0};
+    head.stop_after = 1;
+    LoroTextDeltaVisitor head_visitor = {delta_visit_segment, &head, delta_visit_free};
+    CHECK(loro_text_for_each_delta(t, head_visitor) == LORO_OK);
+    CHECK(head.segments == 1 && strcmp(head.text, "Hello") == 0 && head.frees == 1);
+
+    delta_visit none = {0};
+    LoroTextDeltaVisitor none_visitor = {delta_visit_segment, &none, delta_visit_free};
+    CHECK(loro_text_for_each_delta(NULL, none_visitor) == LORO_ERR_INVALID_ARG);
+    CHECK(none.segments == 0 && none.frees == 1);
+
+    loro_text_free(t);
+    loro_container_free(content);
+    loro_map_free(m);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -1256,6 +1377,7 @@ int main(void) {
     test_get_by_path_c();
     test_g6_c();
     test_undo_pause_c();
+    test_typed_reads_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

@@ -535,6 +535,24 @@ typedef struct LoroSubscriber {
 } LoroSubscriber;
 
 /**
+ * A visitor for [`loro_text_for_each_delta`].
+ *
+ * `invoke` is called once per segment with its text `(insert, insert_len)` (UTF-8, not
+ * nul-terminated), its attributes as a callback-scoped `const LoroValue*` `Map` (null when the
+ * segment has none; do not free it or keep it past the call) and the opaque `user_data`. It
+ * returns `true` to continue or `false` to stop early. `free_user_data` (may be null) runs once
+ * when the walk returns.
+ */
+typedef struct LoroTextDeltaVisitor {
+    bool (*invoke)(const char *insert,
+                   uintptr_t insert_len,
+                   const struct LoroValue *attributes,
+                   void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroTextDeltaVisitor;
+
+/**
  * Identifies a tree node. Mirrors `loro::TreeID` (`peer`: the creating peer id;
  * `counter`: that peer's op counter at creation).
  */
@@ -682,6 +700,23 @@ typedef struct LoroPathComponent {
      */
     struct LoroTreeID node;
 } LoroPathComponent;
+
+/**
+ * A visitor for [`loro_value_map_for_each`].
+ *
+ * `invoke` is called once per entry with the key `(key, key_len)` (UTF-8, not
+ * nul-terminated), a callback-scoped `const LoroValue*` (do not free it or keep it past the
+ * call) and the opaque `user_data`; it returns `true` to continue or `false` to stop early.
+ * `free_user_data` (may be null) runs once when the walk returns.
+ */
+typedef struct LoroValueMapVisitor {
+    bool (*invoke)(const char *key,
+                   uintptr_t key_len,
+                   const struct LoroValue *value,
+                   void *user_data);
+    void *user_data;
+    void (*free_user_data)(void*);
+} LoroValueMapVisitor;
 
 /**
  * A traveler callback for [`loro_doc_travel_change_ancestors`].
@@ -1381,6 +1416,13 @@ struct LoroValueOrContainer *loro_map_get_value_or_container(const struct LoroMa
                                                              uintptr_t key_len);
 
 /**
+ * Returns the map's *shallow* value as an owned typed `LoroValue*` (a `Map` value; nested
+ * containers appear as `Container` entries, not their deep values). Backs the C++
+ * `get_value`. Free with `loro_value_free`.
+ */
+struct LoroValue *loro_map_get_value(const struct LoroMap *map);
+
+/**
  * Returns the map's full recursive state as an owned typed `LoroValue*` (a `Map` value
  * with nested containers resolved to their deep values). Free with `loro_value_free`.
  */
@@ -1888,6 +1930,14 @@ enum LoroStatus loro_text_get_richtext_value(const struct LoroText *text, struct
  * into `*out`. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
  */
 enum LoroStatus loro_text_to_delta(const struct LoroText *text, struct LoroBytes *out);
+
+/**
+ * Walks the text's delta: the same segments as [`loro_text_to_delta`], in order, each passed
+ * to `visitor.invoke` as typed values instead of one JSON array. A text's state is all
+ * inserts, so every segment is one. `visitor.free_user_data` runs once in every case.
+ */
+enum LoroStatus loro_text_for_each_delta(const struct LoroText *text,
+                                         struct LoroTextDeltaVisitor visitor);
 
 /**
  * Applies a [Quill Delta](https://quilljs.com/docs/delta/), supplied as a JSON array
@@ -3597,6 +3647,15 @@ enum LoroStatus loro_value_map_keys(const struct LoroValue *value, struct LoroBy
 struct LoroValue *loro_value_map_get(const struct LoroValue *value,
                                      const char *key,
                                      uintptr_t key_len);
+
+/**
+ * Calls `visitor.invoke` for each entry of the map `value`, in unspecified order. This is the
+ * typed alternative to [`loro_value_map_keys`] + [`loro_value_map_get`]: no JSON, and no
+ * owned handle per entry. Returns `LORO_ERR_INVALID_ARG` if `value` is null or not a map.
+ * `visitor.free_user_data` runs once in every case.
+ */
+enum LoroStatus loro_value_map_for_each(const struct LoroValue *value,
+                                        struct LoroValueMapVisitor visitor);
 
 /**
  * Writes the container id (a `cid:...` string) of a container-valued `LoroValue` into

@@ -16,10 +16,11 @@
 //! only [`loro_value_as_container`] (cid string) is provided; there is no typed constructor
 //! for them, and the C++ bridge does not yet reconstruct them.
 
+use crate::callbacks::CCallback;
 use crate::error::{set_last_error, LoroStatus};
 use crate::value::{str_from_raw, LoroBytes};
 use loro::LoroValue as InnerValue;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 
 /// Opaque, owned typed value handle wrapping a `loro::LoroValue`. Free with
 /// [`loro_value_free`].
@@ -29,6 +30,13 @@ use std::os::raw::c_char;
 pub struct LoroValue(InnerValue);
 
 impl LoroValue {
+    /// Wraps an owned value without boxing it, for a callback-scoped `*const LoroValue` that
+    /// points at a stack temporary. `loro::LoroValue`'s compound variants are `Arc`s, so the
+    /// clone that feeds this is cheap.
+    pub(crate) fn from_inner(v: InnerValue) -> LoroValue {
+        LoroValue(v)
+    }
+
     pub(crate) fn inner(&self) -> &InnerValue {
         &self.0
     }
@@ -434,6 +442,57 @@ pub extern "C" fn loro_value_map_get(
                 std::ptr::null_mut()
             }
         }
+    })
+}
+
+/// A visitor for [`loro_value_map_for_each`].
+///
+/// `invoke` is called once per entry with the key `(key, key_len)` (UTF-8, not
+/// nul-terminated), a callback-scoped `const LoroValue*` (do not free it or keep it past the
+/// call) and the opaque `user_data`; it returns `true` to continue or `false` to stop early.
+/// `free_user_data` (may be null) runs once when the walk returns.
+#[repr(C)]
+pub struct LoroValueMapVisitor {
+    pub invoke: extern "C" fn(
+        key: *const c_char,
+        key_len: usize,
+        value: *const LoroValue,
+        user_data: *mut c_void,
+    ) -> bool,
+    pub user_data: *mut c_void,
+    pub free_user_data: Option<extern "C" fn(*mut c_void)>,
+}
+
+/// Calls `visitor.invoke` for each entry of the map `value`, in unspecified order. This is the
+/// typed alternative to [`loro_value_map_keys`] + [`loro_value_map_get`]: no JSON, and no
+/// owned handle per entry. Returns `LORO_ERR_INVALID_ARG` if `value` is null or not a map.
+/// `visitor.free_user_data` runs once in every case.
+#[no_mangle]
+pub extern "C" fn loro_value_map_for_each(
+    value: *const LoroValue,
+    visitor: LoroValueMapVisitor,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let cb = CCallback {
+            invoke: visitor.invoke,
+            user_data: visitor.user_data,
+            free_user_data: visitor.free_user_data,
+        };
+        let value = deref_or!(value, LoroStatus::LORO_ERR_INVALID_ARG);
+        let entries = match &value.0 {
+            InnerValue::Map(m) => m,
+            _ => {
+                set_last_error("value is not a map");
+                return LoroStatus::LORO_ERR_INVALID_ARG;
+            }
+        };
+        for (k, v) in entries.iter() {
+            let entry = LoroValue(v.clone());
+            if !(cb.invoke)(k.as_ptr() as *const c_char, k.len(), &entry, cb.user_data) {
+                break;
+            }
+        }
+        LoroStatus::LORO_OK
     })
 }
 

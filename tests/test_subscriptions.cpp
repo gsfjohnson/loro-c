@@ -113,8 +113,97 @@ bool large_peer_tree_events() {
     return true;
 }
 
+class DiffCollector : public loro::Subscriber {
+public:
+    std::vector<loro::DiffEvent> events;
+    void on_diff(const loro::DiffEvent &diff) override { events.push_back(diff); }
+};
+
+bool same_container(const loro::ContainerId &a, const loro::ContainerId &b) {
+    const auto &x = a.get_variant();
+    const auto &y = b.get_variant();
+    if (x.index() != y.index()) return false;
+    if (auto *r = std::get_if<loro::ContainerId::kRoot>(&x)) {
+        return r->name == std::get<loro::ContainerId::kRoot>(y).name;
+    }
+    const auto &n = std::get<loro::ContainerId::kNormal>(x);
+    const auto &m = std::get<loro::ContainerId::kNormal>(y);
+    return n.peer == m.peer && n.counter == m.counter;
+}
+
+bool key_is(const loro::Index &i, const std::string &key) {
+    auto *k = std::get_if<loro::Index::kKey>(&i.get_variant());
+    return k && k->key == key;
+}
+
+bool seq_is(const loro::Index &i, uint32_t index) {
+    auto *s = std::get_if<loro::Index::kSeq>(&i.get_variant());
+    return s && s->index == index;
+}
+
+// A root subscriber runs inside import(), before it returns, and each diff carries its path
+// from the root. A cache keyed by top-level block can then find the block an imported edit
+// touched: the path item whose index is a kSeq under the body list.
+bool import_events_are_synchronous_with_paths() {
+    auto a = loro::LoroDoc::init();
+    a->set_peer_id(1);
+    auto note = a->get_map(root("note"));
+    auto body = note->insert_movable_list_container("body", loro::LoroMovableList::init());
+    std::vector<std::shared_ptr<loro::LoroMap>> blocks;
+    std::vector<std::shared_ptr<loro::LoroText>> contents;
+    for (uint32_t i = 0; i < 2; ++i) {
+        blocks.push_back(body->insert_map_container(i, loro::LoroMap::init()));
+        contents.push_back(blocks[i]->insert_text_container("content", loro::LoroText::init()));
+        contents[i]->insert(0, "block");
+    }
+    a->commit();
+
+    auto b = loro::LoroDoc::init();
+    b->set_peer_id(2);
+    b->import(a->export_snapshot());
+    auto collector = std::make_shared<DiffCollector>();
+    auto handle = b->subscribe_root(collector);
+
+    contents[1]->insert(5, "!");
+    a->commit();
+    b->import(a->export_updates(b->oplog_vv()));
+
+    if (collector->events.size() != 1) {
+        return fail("import did not deliver one event before returning");
+    }
+    const loro::DiffEvent &ev = collector->events[0];
+    if (ev.triggered_by != loro::EventTriggerKind::kImport) {
+        return fail("event not triggered by import");
+    }
+    if (ev.events.size() != 1) return fail("import of one text edit gave other than one diff");
+    const loro::ContainerDiff &d = ev.events[0];
+    if (!same_container(d.target, contents[1]->id())) {
+        return fail("diff target is not the edited text");
+    }
+
+    const auto &p = d.path;
+    bool shape = p.size() == 4 && same_container(p[0].container, note->id()) &&
+                 key_is(p[0].index, "note") && same_container(p[1].container, body->id()) &&
+                 key_is(p[1].index, "body") && same_container(p[2].container, blocks[1]->id()) &&
+                 seq_is(p[2].index, 1) && same_container(p[3].container, contents[1]->id()) &&
+                 key_is(p[3].index, "content");
+    if (!shape) {
+        for (const auto &item : p) {
+            const auto &idx = item.index.get_variant();
+            std::cerr << "  path item: index variant " << idx.index();
+            if (auto *k = std::get_if<loro::Index::kKey>(&idx)) std::cerr << " key " << k->key;
+            if (auto *s = std::get_if<loro::Index::kSeq>(&idx)) std::cerr << " seq " << s->index;
+            std::cerr << "\n";
+        }
+        return fail("path is not note/body/block[1]/content");
+    }
+    handle->unsubscribe();
+    return true;
+}
+
 bool run() {
     if (!large_peer_tree_events()) return false;
+    if (!import_events_are_synchronous_with_paths()) return false;
 
     auto doc = loro::LoroDoc::init();
     doc->set_peer_id(11);

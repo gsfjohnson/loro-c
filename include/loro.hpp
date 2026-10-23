@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -1114,8 +1115,42 @@ inline ::LoroValue *to_c_value(const LoroValue &v) {
         v.get_variant());
 }
 
-/// Reconstructs a typed `loro::LoroValue` from an owned `::LoroValue*` (no JSON). Does not take
-/// ownership of `cv` (the caller frees it).
+inline LoroValue from_c_value(const ::LoroValue *cv);
+
+/// The `user_data` of the `loro_value_map_for_each` visitor below. The visitor must not let an
+/// exception unwind across the C ABI, so it parks the first one here and stops the walk.
+struct ValueMapCollector {
+    std::unordered_map<std::string, LoroValue> out;
+    std::exception_ptr error;
+};
+
+}  // namespace detail
+
+extern "C" inline bool loro_conf_value_map_visit(const char *key, uintptr_t key_len,
+                                                 const ::LoroValue *value, void *user_data) {
+    auto *c = static_cast<detail::ValueMapCollector *>(user_data);
+    try {
+        c->out.emplace(std::string(key, key_len), detail::from_c_value(value));
+        return true;
+    } catch (...) {
+        c->error = std::current_exception();
+        return false;
+    }
+}
+
+namespace detail {
+
+/// The entries of a `Map`-typed `::LoroValue*`, walked in one call rather than fetched by key.
+inline std::unordered_map<std::string, LoroValue> map_entries_from_c(const ::LoroValue *cv) {
+    ValueMapCollector c;
+    check(loro_value_map_for_each(cv, ::LoroValueMapVisitor{loro_conf_value_map_visit, &c,
+                                                            nullptr}));
+    if (c.error) std::rethrow_exception(c.error);
+    return std::move(c.out);
+}
+
+/// Reconstructs a typed `loro::LoroValue` from a `::LoroValue*` (no JSON). Does not take
+/// ownership of `cv`: the caller frees an owned one, and a callback-scoped one needs no free.
 inline LoroValue from_c_value(const ::LoroValue *cv) {
     switch (loro_value_get_type(cv)) {
         case LORO_VALUE_NULL:
@@ -1158,19 +1193,10 @@ inline LoroValue from_c_value(const ::LoroValue *cv) {
             return LoroValue(
                 LoroValue::kList{std::make_shared<std::vector<LoroValue>>(std::move(out))});
         }
-        case LORO_VALUE_MAP: {
-            std::unordered_map<std::string, LoroValue> out;
-            Bytes kb;
-            check(loro_value_map_keys(cv, kb.out()));
-            for (const auto &key : parse_string_array(kb.to_string())) {
-                ::LoroValue *mv = loro_value_map_get(cv, key.data(), key.size());
-                if (!mv) throw LoroError("loro_value_map_get returned null");
-                CValue g(mv);
-                out.emplace(key, from_c_value(mv));
-            }
+        case LORO_VALUE_MAP:
             return LoroValue(LoroValue::kMap{
-                std::make_shared<std::unordered_map<std::string, LoroValue>>(std::move(out))});
-        }
+                std::make_shared<std::unordered_map<std::string, LoroValue>>(
+                    map_entries_from_c(cv))});
         case LORO_VALUE_CONTAINER: {
             Bytes b;
             check(loro_value_as_container(cv, b.out()));
@@ -1181,7 +1207,28 @@ inline LoroValue from_c_value(const ::LoroValue *cv) {
     }
 }
 
+/// The `user_data` of the `loro_text_for_each_delta` visitor below; see [`ValueMapCollector`].
+struct TextDeltaCollector {
+    std::vector<TextDelta> out;
+    std::exception_ptr error;
+};
+
 }  // namespace detail
+
+extern "C" inline bool loro_conf_text_delta_visit(const char *insert, uintptr_t insert_len,
+                                                  const ::LoroValue *attributes,
+                                                  void *user_data) {
+    auto *c = static_cast<detail::TextDeltaCollector *>(user_data);
+    try {
+        std::optional<std::unordered_map<std::string, LoroValue>> attrs;
+        if (attributes) attrs = detail::map_entries_from_c(attributes);
+        c->out.emplace_back(TextDelta::kInsert{std::string(insert, insert_len), std::move(attrs)});
+        return true;
+    } catch (...) {
+        c->error = std::current_exception();
+        return false;
+    }
+}
 
 namespace detail {
 
@@ -1343,50 +1390,19 @@ struct LoroText {
         detail::check(loro_text_unmark(raw_, from, to, key.data(), key.size()));
     }
 
+    /// The text as `kInsert` segments with typed attributes (a text's state has no retains or
+    /// deletes). Read through `loro_text_for_each_delta`, not the JSON `loro_text_to_delta`.
     std::vector<TextDelta> to_delta() {
-        detail::Bytes b;
-        detail::check(loro_text_to_delta(raw_, b.out()));
-        std::vector<TextDelta> out;
-        std::string json = b.to_string();
-        if (json.empty()) return out;
-        detail::JsonValue root = detail::parse_json(json);
-        if (root.kind != detail::JsonValue::Kind::Array) return out;
-        for (const auto &item : root.arr) {
-            if (item.kind != detail::JsonValue::Kind::Object) continue;
-            const detail::JsonValue *ins = item.find("insert");
-            const detail::JsonValue *ret = item.find("retain");
-            const detail::JsonValue *del = item.find("delete");
-            const detail::JsonValue *attrs = item.find("attributes");
-
-            std::optional<std::unordered_map<std::string, LoroValue>> attr_map;
-            if (attrs && attrs->kind == detail::JsonValue::Kind::Object) {
-                std::unordered_map<std::string, LoroValue> m;
-                for (const auto &kv : attrs->obj) {
-                    m.emplace(kv.first, detail::json_to_value(kv.second));
-                }
-                attr_map = std::move(m);
-            }
-
-            if (ins && ins->kind == detail::JsonValue::Kind::String) {
-                out.emplace_back(TextDelta::kInsert{ins->s, std::move(attr_map)});
-            } else if (ret) {
-                uint32_t n = static_cast<uint32_t>(
-                    ret->kind == detail::JsonValue::Kind::Int ? ret->i
-                                                              : static_cast<int64_t>(ret->d));
-                out.emplace_back(TextDelta::kRetain{n, std::move(attr_map)});
-            } else if (del) {
-                uint32_t n = static_cast<uint32_t>(
-                    del->kind == detail::JsonValue::Kind::Int ? del->i
-                                                              : static_cast<int64_t>(del->d));
-                out.emplace_back(TextDelta::kDelete{n});
-            }
-        }
-        return out;
+        detail::TextDeltaCollector c;
+        detail::check(loro_text_for_each_delta(
+            raw_, ::LoroTextDeltaVisitor{loro_conf_text_delta_visit, &c, nullptr}));
+        if (c.error) std::rethrow_exception(c.error);
+        return std::move(c.out);
     }
 
     /// The rich-text value as a delta-with-attributes array `LoroValue` (a list of
     /// `{"insert": "...", "attributes": {...}}` maps). The C ABI emits this as JSON; parsed here
-    /// via the same idiom as `to_delta` / `EphemeralStore::get_all_states`.
+    /// via the same idiom as `EphemeralStore::get_all_states`.
     LoroValue get_richtext_value() {
         detail::Bytes b;
         detail::check(loro_text_get_richtext_value(raw_, b.out()));
@@ -1484,6 +1500,15 @@ struct LoroMap {
     }
 
     std::vector<std::shared_ptr<ValueOrContainer>> values();  // out-of-line
+
+    /// The shallow value: a `kMap` whose child containers are `kContainer` ids, not their deep
+    /// values.
+    LoroValue get_value() {
+        ::LoroValue *cv = loro_map_get_value(map());
+        if (!cv) throw LoroError(detail::last_error_message());
+        detail::CValue g(cv);
+        return detail::from_c_value(cv);
+    }
 
     LoroValue get_deep_value() {
         ::LoroValue *cv = loro_map_get_deep_value(map());

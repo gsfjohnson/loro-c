@@ -10,8 +10,9 @@ use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{value_from_json, value_to_json_bytes, LoroBytes};
+use crate::value_typed::LoroValue;
 use loro::{TextDelta, UpdateOptions};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
 /// Opaque handle to a Loro text container.
@@ -388,6 +389,74 @@ pub extern "C" fn loro_text_to_delta(text: *const LoroText, out: *mut LoroBytes)
             }
         };
         unsafe { out.write(LoroBytes::from_vec(bytes)) };
+        LoroStatus::LORO_OK
+    })
+}
+
+/// A visitor for [`loro_text_for_each_delta`].
+///
+/// `invoke` is called once per segment with its text `(insert, insert_len)` (UTF-8, not
+/// nul-terminated), its attributes as a callback-scoped `const LoroValue*` `Map` (null when the
+/// segment has none; do not free it or keep it past the call) and the opaque `user_data`. It
+/// returns `true` to continue or `false` to stop early. `free_user_data` (may be null) runs once
+/// when the walk returns.
+#[repr(C)]
+pub struct LoroTextDeltaVisitor {
+    pub invoke: extern "C" fn(
+        insert: *const c_char,
+        insert_len: usize,
+        attributes: *const LoroValue,
+        user_data: *mut c_void,
+    ) -> bool,
+    pub user_data: *mut c_void,
+    pub free_user_data: Option<extern "C" fn(*mut c_void)>,
+}
+
+/// Walks the text's delta: the same segments as [`loro_text_to_delta`], in order, each passed
+/// to `visitor.invoke` as typed values instead of one JSON array. A text's state is all
+/// inserts, so every segment is one. `visitor.free_user_data` runs once in every case.
+#[no_mangle]
+pub extern "C" fn loro_text_for_each_delta(
+    text: *const LoroText,
+    visitor: LoroTextDeltaVisitor,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let cb = CCallback {
+            invoke: visitor.invoke,
+            user_data: visitor.user_data,
+            free_user_data: visitor.free_user_data,
+        };
+        let text = deref_or!(text, LoroStatus::LORO_ERR_INVALID_ARG);
+        // `loro::LoroText::to_delta` is built on this value too; walking it directly skips
+        // that copy of every segment's text and attributes.
+        let value = text.inner().get_richtext_value();
+        let segments = match value.as_list() {
+            Some(l) => l,
+            None => {
+                set_last_error("rich-text value is not a list");
+                return LoroStatus::LORO_ERR_OTHER;
+            }
+        };
+        for segment in segments.iter() {
+            let Some(map) = segment.as_map() else {
+                continue;
+            };
+            let Some(insert) = map.get("insert").and_then(|v| v.as_string()) else {
+                continue;
+            };
+            let attributes = map.get("attributes").map(|v| LoroValue::from_inner(v.clone()));
+            let attributes_ptr = attributes
+                .as_ref()
+                .map_or(std::ptr::null(), |a| a as *const LoroValue);
+            if !(cb.invoke)(
+                insert.as_ptr() as *const c_char,
+                insert.len(),
+                attributes_ptr,
+                cb.user_data,
+            ) {
+                break;
+            }
+        }
         LoroStatus::LORO_OK
     })
 }

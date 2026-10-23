@@ -157,8 +157,11 @@ fn um_mut<'a>(um: *mut LoroUndoManager) -> Option<&'a mut LoroUndoManager> {
     }
 }
 
-/// Undoes the last recorded change. Writes whether an undo actually happened into `*applied`
-/// (may be null).
+/// Undoes the last recorded step. Writes whether it changed the document into `*applied` (may
+/// be null). `*applied` is `false` when the stack is empty, and also when the step had become a
+/// no-op after remote edits: that step is consumed and earlier ones may remain, so use
+/// [`loro_undo_manager_can_undo`] rather than `*applied` to tell whether anything is left. On
+/// error the document is unchanged.
 #[no_mangle]
 pub extern "C" fn loro_undo_manager_undo(
     um: *mut LoroUndoManager,
@@ -181,8 +184,10 @@ pub extern "C" fn loro_undo_manager_undo(
     })
 }
 
-/// Redoes the last undone change. Writes whether a redo actually happened into `*applied`
-/// (may be null).
+/// Redoes the last undone step. Writes whether it changed the document into `*applied` (may be
+/// null). As with [`loro_undo_manager_undo`], `*applied` is also `false` for a step that had
+/// become a no-op; use [`loro_undo_manager_can_redo`] to tell whether anything is left. On error
+/// the document is unchanged.
 #[no_mangle]
 pub extern "C" fn loro_undo_manager_redo(
     um: *mut LoroUndoManager,

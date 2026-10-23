@@ -7,6 +7,7 @@ using namespace loro_test;
 namespace {
 
 bool run_pause();
+bool run_noop_steps();
 
 bool run() {
     auto doc = loro::LoroDoc::init();
@@ -80,6 +81,45 @@ bool run_pause() {
     if (!undo->undo()) return fail("undo of 'A' returned false");
     if (text->to_string() != "B") return fail("second undo should leave 'B'");
     if (undo->can_undo()) return fail("the paused edit must not be undoable");
+    return run_noop_steps();
+}
+
+// Since loro 1.17 each undo() consumes at most one step, and a step that remote edits turned
+// into a no-op returns false while earlier steps remain, mirroring loro's
+// consecutive_noops_consume_one_item_and_notify_once.
+bool run_noop_steps() {
+    auto doc = loro::LoroDoc::init();
+    doc->set_peer_id(1);
+    auto undo = loro::UndoManager::init(doc);
+    undo->set_merge_interval(0);
+    auto map = doc->get_map(root("map"));
+    map->insert("prior", i64_value(42));
+    doc->commit();
+    auto text = doc->get_text(root("text"));
+    text->insert(0, "a");
+    doc->commit();
+    text->insert(1, "b");
+    doc->commit();
+
+    // Another peer deletes "ab", so undoing either insert has nothing left to do.
+    auto other = loro::LoroDoc::init();
+    other->import(doc->export_snapshot());
+    other->set_peer_id(2);
+    other->get_text(root("text"))->delete_(0, 2);
+    other->commit();
+    doc->import(other->export_updates(loro::VersionVector::init()));
+    if (undo->undo_count() != 3) return fail("expected three undo steps");
+
+    for (uint32_t remaining : {2u, 1u}) {
+        if (undo->undo()) return fail("undoing a no-op step should return false");
+        if (undo->undo_count() != remaining) return fail("undo consumed more than one step");
+        if (map->len() != 1) return fail("a no-op undo changed the map");
+    }
+    if (!undo->undo()) return fail("undo of 'prior' should change the doc");
+    if (map->len() != 0) return fail("undo of 'prior' did not remove it");
+    if (undo->can_undo()) return fail("all steps should be consumed");
+    if (!undo->redo()) return fail("redo of 'prior' should change the doc");
+    if (map->len() != 1) return fail("redo did not restore 'prior'");
     return true;
 }
 

@@ -180,6 +180,17 @@ enum class DiffKind : int32_t {
     kUnknown = 5,
 };
 
+/// How an import compares ops whose ids the document already has (loro `ImportHistoryMode`; not
+/// in loro-cpp). Mirrors the C ABI `LoroImportHistoryMode`, which documents the details.
+enum class ImportHistoryMode : int32_t {
+    /// Ops the document already has must be identical, as in [`LoroDoc::import`].
+    kExact = 0,
+    /// Also accept the value changes a trip through JSON updates makes (large integers as
+    /// doubles, binary as a list of numbers, ...). For binary data whose history may already
+    /// have arrived as JSON.
+    kJsonLossy = 1,
+};
+
 struct ContainerType {
     struct kText {};
     struct kMap {};
@@ -571,6 +582,14 @@ inline LoroPosType to_c_pos_type(PosType p) {
     return LORO_POS_UNICODE;
 }
 
+inline LoroImportHistoryMode to_c_import_history_mode(ImportHistoryMode m) {
+    switch (m) {
+        case ImportHistoryMode::kExact: return LORO_IMPORT_HISTORY_EXACT;
+        case ImportHistoryMode::kJsonLossy: return LORO_IMPORT_HISTORY_JSON_LOSSY;
+    }
+    return LORO_IMPORT_HISTORY_EXACT;
+}
+
 inline Side from_c_side(LoroSide s) {
     switch (s) {
         case LORO_SIDE_LEFT: return Side::kLeft;
@@ -592,7 +611,7 @@ inline LoroExpandType to_c_expand(ExpandType e) {
 
 // ---- ContainerType / ContainerId <-> "cid:" string (RESHAPE Phase 2) --------
 //
-// Matches loro-common 1.16.0 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
+// Matches loro-common 1.17.0 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
 //   root:   "cid:root-{name}:{Type}"      (the LAST ':' splits name from type — names may
 //                                           themselves contain ':')
 //   normal: "cid:{counter}@{peer}:{Type}"
@@ -1265,6 +1284,20 @@ inline ImportStatus import_status_from_c(::LoroImportStatus *st) {
     loro_import_status_free(st);
     return result;
 }
+
+/// The parallel blob pointer / length arrays the C batch imports take, borrowing from `bytes`.
+struct BlobArrays {
+    std::vector<const uint8_t *> datas;
+    std::vector<uintptr_t> lens;
+    explicit BlobArrays(const std::vector<std::vector<uint8_t>> &bytes) {
+        datas.reserve(bytes.size());
+        lens.reserve(bytes.size());
+        for (const auto &b : bytes) {
+            datas.push_back(b.data());
+            lens.push_back(b.size());
+        }
+    }
+};
 
 }  // namespace detail
 
@@ -2892,6 +2925,18 @@ struct LoroDoc {
         detail::check(loro_doc_export_json_updates(raw_, start_vv->raw_, end_vv->raw_, b.out()));
         return b.to_string();
     }
+
+    /// The remote updates imported but not applied yet because changes they depend on are
+    /// missing, or std::nullopt when there are none (loro-ffi `export_pending_updates`).
+    /// Snapshots leave these out: to keep them across a restart, save them with a snapshot taken
+    /// with no edits or imports in between, then import the snapshot and these with import().
+    std::optional<std::vector<uint8_t>> export_pending_updates() {
+        detail::Bytes b;
+        bool has_pending = false;
+        detail::check(loro_doc_export_pending_updates(raw_, b.out(), &has_pending));
+        if (!has_pending) return std::nullopt;
+        return b.to_vector();
+    }
     ImportStatus import_json_updates(const std::string &json) {
         ::LoroImportStatus *st = nullptr;
         detail::check(loro_doc_import_json_updates_status(raw_, json.data(), json.size(), &st));
@@ -2912,17 +2957,34 @@ struct LoroDoc {
     }
 
     ImportStatus import_batch(const std::vector<std::vector<uint8_t>> &bytes) {
-        std::vector<const uint8_t *> datas;
-        std::vector<uintptr_t> lens;
-        datas.reserve(bytes.size());
-        lens.reserve(bytes.size());
-        for (const auto &b : bytes) {
-            datas.push_back(b.data());
-            lens.push_back(b.size());
-        }
+        detail::BlobArrays blobs(bytes);
         ::LoroImportStatus *st = nullptr;
-        detail::check(
-            loro_doc_import_batch_status(raw_, datas.data(), lens.data(), datas.size(), &st));
+        detail::check(loro_doc_import_batch_status(raw_, blobs.datas.data(), blobs.lens.data(),
+                                                   blobs.datas.size(), &st));
+        return detail::import_status_from_c(st);
+    }
+
+    /// Like import_with(), comparing ops the document already has as `mode` says (not in
+    /// loro-cpp). Use ImportHistoryMode::kJsonLossy for binary data whose history may already
+    /// have arrived here as JSON updates.
+    ImportStatus import_with_history_mode(const std::vector<uint8_t> &bytes,
+                                          const std::string &origin, ImportHistoryMode mode) {
+        ::LoroImportStatus *st = nullptr;
+        detail::check(loro_doc_import_with_history_mode(
+            raw_, bytes.data(), bytes.size(), origin.data(), origin.size(),
+            detail::to_c_import_history_mode(mode), &st));
+        return detail::import_status_from_c(st);
+    }
+
+    /// Like import_batch(), comparing ops the document already has as `mode` says (not in
+    /// loro-cpp).
+    ImportStatus import_batch_with_history_mode(const std::vector<std::vector<uint8_t>> &bytes,
+                                                ImportHistoryMode mode) {
+        detail::BlobArrays blobs(bytes);
+        ::LoroImportStatus *st = nullptr;
+        detail::check(loro_doc_import_batch_with_history_mode(
+            raw_, blobs.datas.data(), blobs.lens.data(), blobs.datas.size(),
+            detail::to_c_import_history_mode(mode), &st));
         return detail::import_status_from_c(st);
     }
 
@@ -3037,6 +3099,15 @@ struct LoroDoc {
     // ---- change introspection / commit config (RESHAPE Phase 3) ----
 
     void set_record_timestamp(bool record) { loro_doc_set_record_timestamp(raw_, record); }
+
+    /// How many lazily decoded container values reads through container handles may keep
+    /// cached: 2048 by default, 0 disables the cache. A larger limit speeds up repeated reads of
+    /// a large imported snapshot at the cost of memory. Forks copy it; it is not exported (not in
+    /// loro-cpp).
+    uintptr_t decoded_value_cache_limit() { return loro_doc_decoded_value_cache_limit(raw_); }
+    void set_decoded_value_cache_limit(uintptr_t limit) {
+        loro_doc_set_decoded_value_cache_limit(raw_, limit);
+    }
 
     /// Attaches `origin` to the next commit (reported to subscribers, not persisted).
     void set_next_commit_origin(const std::string &origin) {
@@ -3839,6 +3910,9 @@ struct UndoManager {
     uint32_t redo_count() { return static_cast<uint32_t>(loro_undo_manager_redo_count(raw_)); }
     uint64_t peer() { return loro_undo_manager_peer(raw_); }
 
+    /// Undoes one recorded step and returns whether the document changed. A step that remote
+    /// edits turned into a no-op is consumed and returns false while earlier steps may remain,
+    /// so loop on can_undo(), not on the result. redo() behaves the same way.
     bool undo() {
         bool applied = false;
         detail::check(loro_undo_manager_undo(raw_, &applied));

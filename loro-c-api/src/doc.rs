@@ -221,6 +221,30 @@ pub extern "C" fn loro_doc_set_change_merge_interval(doc: *const LoroDoc, interv
     });
 }
 
+/// Returns how many lazily decoded container values reads through container handles may keep
+/// cached (loro's default is 2048). Returns 0 on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_decoded_value_cache_limit(doc: *const LoroDoc) -> usize {
+    ffi_guard!(0usize, {
+        let doc = deref_or!(doc, 0usize);
+        doc.inner().decoded_value_cache_limit()
+    })
+}
+
+/// Sets how many lazily decoded container values reads through container handles may keep
+/// cached. A larger limit trades memory for faster repeated reads of a large imported
+/// snapshot; `0` disables the cache. Lowering it evicts the excess at once without losing
+/// edits. The count is of values, not bytes, and whole-document reads such as
+/// [`loro_doc_get_deep_value`] do not fill the cache. The setting belongs to this document:
+/// forks copy it, and it is not exported. No-op on a null handle.
+#[no_mangle]
+pub extern "C" fn loro_doc_set_decoded_value_cache_limit(doc: *const LoroDoc, limit: usize) {
+    ffi_guard!((), {
+        let doc = deref_or!(doc, ());
+        doc.inner().set_decoded_value_cache_limit(limit);
+    });
+}
+
 /// Returns the root text container named `(id, id_len)` (UTF-8, not nul-terminated),
 /// creating it if it does not yet exist. Returns null on error. Release the returned
 /// handle with `loro_text_free`.
@@ -547,12 +571,17 @@ fn export_json_updates_impl(
             set_last_error("null out pointer passed to loro-c-api");
             return LoroStatus::LORO_ERR_INVALID_ARG;
         }
-        let schema = if compress {
+        let result = if compress {
             doc.inner()
                 .export_json_updates(start.inner(), end.inner())
         } else {
             doc.inner()
                 .export_json_updates_without_peer_compression(start.inner(), end.inner())
+        };
+        // Since loro 1.17 this fails (DecodeError) when the history in range can't be read.
+        let schema = match result {
+            Ok(schema) => schema,
+            Err(e) => return record_loro_error(&e),
         };
         match serde_json::to_vec(&schema) {
             Ok(bytes) => {
@@ -691,6 +720,79 @@ pub extern "C" fn loro_doc_export_updates_in_range(
     })
 }
 
+/// Exports the remote updates this document has imported but cannot apply yet, because the
+/// changes they depend on have not arrived. Snapshot and update exports leave these out, so to
+/// keep them across a restart, save them next to a snapshot taken with no edits or imports in
+/// between, and restore by importing the snapshot and then these bytes with an ordinary import;
+/// they then wait for their dependencies as before. Does not commit local edits.
+///
+/// On `LORO_OK`, `*has_pending` (may be null) says whether anything is pending, and `*out` holds
+/// the updates, or an empty buffer when nothing is. Free `*out` with `loro_bytes_free` either way.
+#[no_mangle]
+pub extern "C" fn loro_doc_export_pending_updates(
+    doc: *const LoroDoc,
+    out: *mut LoroBytes,
+    has_pending: *mut bool,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if out.is_null() {
+            set_last_error("null out pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        match doc.inner().export_pending_updates() {
+            Ok(pending) => {
+                if !has_pending.is_null() {
+                    unsafe { has_pending.write(pending.is_some()) };
+                }
+                let bytes = pending.map_or_else(LoroBytes::empty, LoroBytes::from_vec);
+                unsafe { out.write(bytes) };
+                LoroStatus::LORO_OK
+            }
+            Err(e) => record_encode_error(&e),
+        }
+    })
+}
+
+/// Copies the `count` blobs `datas[i]` / `lens[i]` of a batch import, recording an error (naming
+/// `fn_name` for a null blob) and returning `None` on a null pointer.
+fn blobs_from_raw(
+    datas: *const *const u8,
+    lens: *const usize,
+    count: usize,
+    fn_name: &str,
+) -> Option<Vec<Vec<u8>>> {
+    if count != 0 && (datas.is_null() || lens.is_null()) {
+        set_last_error("null datas/lens pointer passed to loro-c-api");
+        return None;
+    }
+    let ptrs = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(datas, count) }
+    };
+    let lengths = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(lens, count) }
+    };
+    let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(count);
+    for (i, &len) in lengths.iter().enumerate() {
+        let ptr = ptrs[i];
+        if ptr.is_null() && len != 0 {
+            set_last_error(format!("null blob pointer passed to {fn_name}"));
+            return None;
+        }
+        let bytes = if len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
+        };
+        blobs.push(bytes);
+    }
+    Some(blobs)
+}
+
 /// Imports a batch of snapshot/update blobs at once. `datas[i]` / `lens[i]` describe the `i`th
 /// blob, for `count` blobs; loro applies them in dependency order regardless of array order.
 #[no_mangle]
@@ -702,34 +804,10 @@ pub extern "C" fn loro_doc_import_batch(
 ) -> LoroStatus {
     ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
         let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
-        if count != 0 && (datas.is_null() || lens.is_null()) {
-            set_last_error("null datas/lens pointer passed to loro-c-api");
-            return LoroStatus::LORO_ERR_INVALID_ARG;
-        }
-        let ptrs = if count == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(datas, count) }
+        let blobs = match blobs_from_raw(datas, lens, count, "loro_doc_import_batch") {
+            Some(b) => b,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
         };
-        let lengths = if count == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(lens, count) }
-        };
-        let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(count);
-        for (i, &len) in lengths.iter().enumerate() {
-            let ptr = ptrs[i];
-            if ptr.is_null() && len != 0 {
-                set_last_error("null blob pointer passed to loro_doc_import_batch");
-                return LoroStatus::LORO_ERR_INVALID_ARG;
-            }
-            let bytes = if len == 0 {
-                Vec::new()
-            } else {
-                unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
-            };
-            blobs.push(bytes);
-        }
         match doc.inner().import_batch(&blobs) {
             Ok(_) => LoroStatus::LORO_OK,
             Err(e) => record_loro_error(&e),
@@ -750,34 +828,10 @@ pub extern "C" fn loro_doc_import_batch_status(
 ) -> LoroStatus {
     ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
         let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
-        if count != 0 && (datas.is_null() || lens.is_null()) {
-            set_last_error("null datas/lens pointer passed to loro-c-api");
-            return LoroStatus::LORO_ERR_INVALID_ARG;
-        }
-        let ptrs = if count == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(datas, count) }
+        let blobs = match blobs_from_raw(datas, lens, count, "loro_doc_import_batch_status") {
+            Some(b) => b,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
         };
-        let lengths = if count == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(lens, count) }
-        };
-        let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(count);
-        for (i, &len) in lengths.iter().enumerate() {
-            let ptr = ptrs[i];
-            if ptr.is_null() && len != 0 {
-                set_last_error("null blob pointer passed to loro_doc_import_batch_status");
-                return LoroStatus::LORO_ERR_INVALID_ARG;
-            }
-            let bytes = if len == 0 {
-                Vec::new()
-            } else {
-                unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
-            };
-            blobs.push(bytes);
-        }
         finish_import_status(doc.inner().import_batch(&blobs), out)
     })
 }
@@ -842,6 +896,94 @@ pub extern "C" fn loro_doc_import_with_status(
             unsafe { std::slice::from_raw_parts(data, len) }
         };
         finish_import_status(doc.inner().import_with(bytes, origin), out)
+    })
+}
+
+/// How an import compares ops whose ids the document already has (loro `ImportHistoryMode`).
+/// Such ops must normally be identical: a mismatch means two writers used the same peer id, and
+/// the import fails with an "ID ... has been used" error.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoroImportHistoryMode {
+    /// Ops the document already has must be identical. What `loro_doc_import` and the other
+    /// binary imports use.
+    LORO_IMPORT_HISTORY_EXACT = 0,
+    /// Also accept the changes a trip through JSON updates makes to values: an integer beyond
+    /// ±2^53 read back as a double, binary as a list of byte numbers, a non-finite double as
+    /// null, a container as its id string. For binary data whose history may already have
+    /// reached this document as JSON (`loro_doc_import_json_updates` uses this mode itself).
+    /// It cannot tell such a change from a real conflict, so only opt in for that case.
+    LORO_IMPORT_HISTORY_JSON_LOSSY = 1,
+}
+
+fn to_import_history_mode(mode: LoroImportHistoryMode) -> loro::ImportHistoryMode {
+    match mode {
+        LoroImportHistoryMode::LORO_IMPORT_HISTORY_EXACT => loro::ImportHistoryMode::Exact,
+        LoroImportHistoryMode::LORO_IMPORT_HISTORY_JSON_LOSSY => loro::ImportHistoryMode::JsonLossy,
+    }
+}
+
+/// Like [`loro_doc_import_with_status`], comparing ops the document already has as `mode` says.
+/// `out` may be null; a written `*out` must be freed with `loro_import_status_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_import_with_history_mode(
+    doc: *mut LoroDoc,
+    data: *const u8,
+    len: usize,
+    origin: *const c_char,
+    origin_len: usize,
+    mode: LoroImportHistoryMode,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        if data.is_null() && len != 0 {
+            set_last_error("null data pointer passed to loro-c-api");
+            return LoroStatus::LORO_ERR_INVALID_ARG;
+        }
+        let origin = match str_from_raw(origin, origin_len) {
+            Some(s) => s,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len) }
+        };
+        let result =
+            doc.inner()
+                .import_with_history_mode(bytes, origin, to_import_history_mode(mode));
+        finish_import_status(result, out)
+    })
+}
+
+/// Like [`loro_doc_import_batch_status`], comparing ops the document already has as `mode`
+/// says. `out` may be null; a written `*out` must be freed with `loro_import_status_free`.
+#[no_mangle]
+pub extern "C" fn loro_doc_import_batch_with_history_mode(
+    doc: *mut LoroDoc,
+    datas: *const *const u8,
+    lens: *const usize,
+    count: usize,
+    mode: LoroImportHistoryMode,
+    out: *mut *mut crate::import_status::LoroImportStatus,
+) -> LoroStatus {
+    ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
+        let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
+        let blobs = match blobs_from_raw(
+            datas,
+            lens,
+            count,
+            "loro_doc_import_batch_with_history_mode",
+        ) {
+            Some(b) => b,
+            None => return LoroStatus::LORO_ERR_INVALID_ARG,
+        };
+        let result = doc
+            .inner()
+            .import_batch_with_history_mode(&blobs, to_import_history_mode(mode));
+        finish_import_status(result, out)
     })
 }
 
@@ -1033,6 +1175,7 @@ pub extern "C" fn loro_doc_get_path_to_container(
 /// Writes the container ids modified in the change range `[id, id+len)` into `*out` as a sorted
 /// JSON array of container-id strings (sorted for deterministic output). This implicitly commits
 /// the current transaction. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+/// Returns `LORO_ERR_DECODE` if a stored change block cannot be parsed.
 #[no_mangle]
 pub extern "C" fn loro_doc_get_changed_containers_in(
     doc: *const LoroDoc,
@@ -1046,7 +1189,10 @@ pub extern "C" fn loro_doc_get_changed_containers_in(
             set_last_error("null out pointer passed to loro-c-api");
             return LoroStatus::LORO_ERR_INVALID_ARG;
         }
-        let set = doc.inner().get_changed_containers_in(id.to_loro(), len);
+        let set = match doc.inner().try_get_changed_containers_in(id.to_loro(), len) {
+            Ok(set) => set,
+            Err(e) => return record_loro_error(&e),
+        };
         let mut cids: Vec<String> = set.iter().map(|c| c.to_string()).collect();
         cids.sort();
         match serde_json::to_vec(&cids) {
@@ -1090,7 +1236,8 @@ pub extern "C" fn loro_doc_cmp_with_frontiers(
 
 /// Returns a minimized equivalent of `frontiers` (the smallest set marking the same version), as
 /// a new owned [`LoroFrontiers`]. Returns null if a frontier id is not included in this
-/// document's history. Release with `loro_frontiers_free`.
+/// document's history, or if a stored change block cannot be parsed. Release with
+/// `loro_frontiers_free`.
 #[no_mangle]
 pub extern "C" fn loro_doc_minimize_frontiers(
     doc: *const LoroDoc,
@@ -1099,10 +1246,10 @@ pub extern "C" fn loro_doc_minimize_frontiers(
     ffi_guard!(std::ptr::null_mut(), {
         let doc = deref_or!(doc, std::ptr::null_mut());
         let frontiers = deref_or!(frontiers, std::ptr::null_mut());
-        match doc.inner().minimize_frontiers(frontiers.inner()) {
+        match doc.inner().try_minimize_frontiers(frontiers.inner()) {
             Ok(f) => Box::into_raw(Box::new(LoroFrontiers::from_inner(f))),
-            Err(id) => {
-                set_last_error(format!("frontier id not included in document: {id}"));
+            Err(e) => {
+                set_last_error(e.to_string());
                 std::ptr::null_mut()
             }
         }
@@ -1259,7 +1406,8 @@ pub extern "C" fn loro_doc_try_get_counter(
 /// Looks up the change containing operation `id` and, on success, writes a new owned
 /// [`LoroChangeMetaOwned`] handle into `*out`. Read it via `loro_change_meta_owned_as_ref` +
 /// the `loro_change_meta_*` accessors; release it with `loro_change_meta_owned_free`. Returns
-/// `LORO_ERR_NOT_FOUND` if no change contains `id`. `*out` is only written on `LORO_OK`.
+/// `LORO_ERR_NOT_FOUND` if no change contains `id`, or `LORO_ERR_DECODE` if the change block
+/// holding it cannot be parsed. `*out` is only written on `LORO_OK`.
 #[no_mangle]
 pub extern "C" fn loro_doc_get_change(
     doc: *const LoroDoc,
@@ -1272,16 +1420,17 @@ pub extern "C" fn loro_doc_get_change(
             set_last_error("null out pointer passed to loro-c-api");
             return LoroStatus::LORO_ERR_INVALID_ARG;
         }
-        match doc.inner().get_change(id.to_loro()) {
-            Some(meta) => {
+        match doc.inner().try_get_change(id.to_loro()) {
+            Ok(Some(meta)) => {
                 let boxed = Box::into_raw(Box::new(LoroChangeMetaOwned(meta)));
                 unsafe { out.write(boxed) };
                 LoroStatus::LORO_OK
             }
-            None => {
+            Ok(None) => {
                 set_last_error("no change at the given id");
                 LoroStatus::LORO_ERR_NOT_FOUND
             }
+            Err(e) => record_loro_error(&e),
         }
     })
 }
@@ -1381,7 +1530,9 @@ fn id_spans_to_json<S: std::hash::BuildHasher>(
 /// Writes the operation id spans between versions `from` and `to` into `*out` as JSON
 /// `{ "retreat": {…}, "forward": {…} }`, where each side is `{ "<peer>": {"start":…, "end":…} }`.
 /// `forward` are spans in `to` but not `from`; `retreat` are spans in `from` but not `to`. `*out`
-/// is only written on `LORO_OK`; free it with `loro_bytes_free`.
+/// is only written on `LORO_OK`; free it with `loro_bytes_free`. Returns `LORO_ERR_NOT_FOUND` if
+/// a frontier id is not in the document's history, or `LORO_ERR_DECODE` if a stored change block
+/// cannot be parsed.
 #[no_mangle]
 pub extern "C" fn loro_doc_find_id_spans_between(
     doc: *const LoroDoc,
@@ -1397,7 +1548,13 @@ pub extern "C" fn loro_doc_find_id_spans_between(
             set_last_error("null out pointer passed to loro-c-api");
             return LoroStatus::LORO_ERR_INVALID_ARG;
         }
-        let diff = doc.inner().find_id_spans_between(from.inner(), to.inner());
+        let diff = match doc
+            .inner()
+            .try_find_id_spans_between(from.inner(), to.inner())
+        {
+            Ok(diff) => diff,
+            Err(e) => return record_loro_error(&e),
+        };
         let value = serde_json::json!({
             "retreat": id_spans_to_json(&diff.retreat),
             "forward": id_spans_to_json(&diff.forward),

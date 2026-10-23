@@ -15,7 +15,7 @@ use crate::doc::LoroDoc;
 use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::undo::LoroCounterSpan;
 use crate::value::LoroBytes;
-use loro::{ChangeMeta, ExportMode, Frontiers, IdSpan, VersionVector, ID};
+use loro::{ChangeMeta, ChangeTravelError, ExportMode, Frontiers, IdSpan, VersionVector, ID};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::ops::ControlFlow;
 use std::os::raw::c_void;
@@ -682,13 +682,19 @@ pub extern "C" fn loro_doc_oplog_vv(doc: *const LoroDoc) -> *mut LoroVersionVect
     })
 }
 
-/// Returns the document's current state version vector. Release with
-/// [`loro_version_vector_free`].
+/// Returns the document's current state version vector, or null if it has to be resolved from
+/// stored history that cannot be parsed. Release with [`loro_version_vector_free`].
 #[no_mangle]
 pub extern "C" fn loro_doc_state_vv(doc: *const LoroDoc) -> *mut LoroVersionVector {
     ffi_guard!(std::ptr::null_mut(), {
         let doc = deref_or!(doc, std::ptr::null_mut());
-        Box::into_raw(Box::new(LoroVersionVector(doc.inner().state_vv())))
+        match doc.inner().try_state_vv() {
+            Ok(vv) => Box::into_raw(Box::new(LoroVersionVector(vv))),
+            Err(e) => {
+                set_last_error(e.to_string());
+                std::ptr::null_mut()
+            }
+        }
     })
 }
 
@@ -732,7 +738,8 @@ pub extern "C" fn loro_doc_shallow_since_vv(doc: *const LoroDoc) -> *mut LoroVer
 }
 
 /// Converts `frontiers` to a version vector against this document, or null if the frontiers
-/// are not contained in the document's history. Release with [`loro_version_vector_free`].
+/// are not contained in the document's history or a stored change block cannot be parsed.
+/// Release with [`loro_version_vector_free`].
 #[no_mangle]
 pub extern "C" fn loro_doc_frontiers_to_vv(
     doc: *const LoroDoc,
@@ -741,18 +748,22 @@ pub extern "C" fn loro_doc_frontiers_to_vv(
     ffi_guard!(std::ptr::null_mut(), {
         let doc = deref_or!(doc, std::ptr::null_mut());
         let f = deref_or!(frontiers, std::ptr::null_mut());
-        match doc.inner().frontiers_to_vv(f.inner()) {
-            Some(vv) => Box::into_raw(Box::new(LoroVersionVector(vv))),
-            None => {
+        match doc.inner().try_frontiers_to_vv(f.inner()) {
+            Ok(Some(vv)) => Box::into_raw(Box::new(LoroVersionVector(vv))),
+            Ok(None) => {
                 set_last_error("frontiers not contained in the document history");
+                std::ptr::null_mut()
+            }
+            Err(e) => {
+                set_last_error(e.to_string());
                 std::ptr::null_mut()
             }
         }
     })
 }
 
-/// Converts a version vector to frontiers against this document. Release with
-/// [`loro_frontiers_free`].
+/// Converts a version vector to frontiers against this document, or null if a stored change
+/// block cannot be parsed. Release with [`loro_frontiers_free`].
 #[no_mangle]
 pub extern "C" fn loro_doc_vv_to_frontiers(
     doc: *const LoroDoc,
@@ -761,7 +772,13 @@ pub extern "C" fn loro_doc_vv_to_frontiers(
     ffi_guard!(std::ptr::null_mut(), {
         let doc = deref_or!(doc, std::ptr::null_mut());
         let vv = deref_or!(vv, std::ptr::null_mut());
-        Box::into_raw(Box::new(LoroFrontiers(doc.inner().vv_to_frontiers(vv.inner()))))
+        match doc.inner().try_vv_to_frontiers(vv.inner()) {
+            Ok(f) => Box::into_raw(Box::new(LoroFrontiers(f))),
+            Err(e) => {
+                set_last_error(e.to_string());
+                std::ptr::null_mut()
+            }
+        }
     })
 }
 
@@ -979,7 +996,8 @@ pub struct LoroChangeAncestorsTraveler {
 
 /// Traverses the ancestors of the changes containing `ids` (including those changes
 /// themselves), in causal order from latest to oldest, calling `traveler.invoke` for each.
-/// Returns `LORO_ERR_NOT_FOUND` if an id is missing from the document history.
+/// Returns `LORO_ERR_NOT_FOUND` if an id is missing from the document history, or
+/// `LORO_ERR_DECODE` if a stored change block on the way cannot be parsed.
 #[no_mangle]
 pub extern "C" fn loro_doc_travel_change_ancestors(
     doc: *const LoroDoc,
@@ -1022,6 +1040,8 @@ pub extern "C" fn loro_doc_travel_change_ancestors(
         };
         match doc.inner().travel_change_ancestors(&loro_ids, &mut f) {
             Ok(()) => LoroStatus::LORO_OK,
+            // loro 1.17+: a change block on the way could not be parsed.
+            Err(ChangeTravelError::HistoryUnreadable(e)) => record_loro_error(&e),
             Err(e) => {
                 set_last_error(e.to_string());
                 LoroStatus::LORO_ERR_NOT_FOUND

@@ -73,7 +73,11 @@ pub fn record_loro_error(err: &loro::LoroError) -> LoroStatus {
 /// Maps a [`loro::LoroEncodeError`] to a [`LoroStatus`] and records its message.
 pub fn record_encode_error(err: &loro::LoroEncodeError) -> LoroStatus {
     set_last_error(err.to_string());
-    LoroStatus::LORO_ERR_ENCODE
+    match err {
+        // The export had to read a stored change block that could not be parsed.
+        loro::LoroEncodeError::DecodeError(_) => LoroStatus::LORO_ERR_DECODE,
+        _ => LoroStatus::LORO_ERR_ENCODE,
+    }
 }
 
 /// Returns a pointer to the current thread's last-error message as a nul-terminated C

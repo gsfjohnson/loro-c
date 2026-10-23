@@ -7,6 +7,42 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [1.17.1.1] - 2026-10-22
+
+- **Upgrade: pinned `loro` crate `1.16.2` → `1.17.1`.** Malformed or
+  conflicting imports return an error instead of crashing, and a failed import,
+  `apply_diff` or `revert_to` leaves the document unchanged. Deeply nested
+  documents no longer overflow the stack. Repeated exports no longer grow memory
+  until they crash. Shallow snapshots are smaller. Fixes to undo, rich text,
+  tree events and shallow-snapshot checkouts.
+- **New: save pending updates.** `loro_doc_export_pending_updates`
+  (C++: `export_pending_updates()`) exports remote updates still waiting for
+  changes they depend on. Snapshots leave these out: save both, and import both
+  to restore.
+- **Changed: re-imported ops must match.** A binary import now fails when it
+  carries ops the document already has with different values. History that went
+  through JSON updates does that (binary, very large integers, NaN). Import it
+  with `loro_doc_import_with_history_mode` or
+  `loro_doc_import_batch_with_history_mode` and `LORO_IMPORT_HISTORY_JSON_LOSSY`
+  (C++: `import_with_history_mode()`, `import_batch_with_history_mode()`,
+  `ImportHistoryMode::kJsonLossy`).
+- **New: decoded-value cache limit.** `loro_doc_set_decoded_value_cache_limit`
+  (C++: `set_decoded_value_cache_limit()`). The default is 2048. Raise it to speed
+  up repeated reads of a large snapshot; 0 turns the cache off.
+- **Changed: undo and redo can return `false` with steps left.** A step that
+  remote edits turned into a no-op is used up and reports `false`. Loop on
+  `can_undo()` / `can_redo()`, not on the result.
+- **Changed: damaged history is reported.** Reads that need a stored change that
+  can't be parsed now return `LORO_ERR_DECODE` (or null, for functions that
+  return a handle; C++ throws `LoroError`). Before, they panicked
+  (`LORO_ERR_PANIC`) or skipped the damaged part. This covers `get_change`,
+  `state_vv`, the frontiers/version conversions, JSON update export, cursor
+  lookups and change-history walks.
+- **Limit:** text and list positions of about 2^30 (1,073,741,822) or more are
+  rejected.
+
+[1.17.1.1]: https://github.com/gsfjohnson/loro-c/compare/v1.16.2.3...v1.17.1.1
+
 ## [1.16.2.3] - 2026-10-22
 
 - **Faster: `LoroText::to_delta()` takes about half the time.** It no longer

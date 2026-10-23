@@ -33,6 +33,8 @@ endforeach()
 # Proves the C ABI is usable from plain C (compiled as C, not C++).
 add_executable(loro_test_c_only test_c_only.c)
 target_link_libraries(loro_test_c_only PRIVATE loro::loro)
+target_compile_definitions(loro_test_c_only PRIVATE
+    LORO_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 add_test(NAME test_c_only COMMAND loro_test_c_only)
 if(TARGET loro_cargo_build)
     add_dependencies(loro_test_c_only loro_cargo_build)

@@ -4,6 +4,7 @@
 #include <loro/loro.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int failures = 0;
@@ -1362,6 +1363,264 @@ static void test_typed_reads_c(void) {
     loro_doc_free(doc);
 }
 
+/* loro 1.17: remote updates still waiting for their dependencies are left out of snapshots;
+ * loro_doc_export_pending_updates saves them so a restored doc keeps waiting for them. Mirrors
+ * the example on loro's LoroDoc::export_pending_updates. */
+static void test_pending_updates_c(void) {
+    LoroDoc* source = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(source, 1) == LORO_OK);
+    LoroText* st = loro_doc_get_text(source, "text", 4);
+    CHECK(loro_text_insert(st, 0, "base|", 5) == LORO_OK);
+    CHECK(loro_doc_commit(source) == LORO_OK);
+    LoroBytes base = {0};
+    CHECK(loro_doc_export_snapshot(source, &base) == LORO_OK);
+    LoroVersionVector* before_a = loro_doc_oplog_vv(source);
+    CHECK(loro_text_insert(st, 5, "A", 1) == LORO_OK);
+    CHECK(loro_doc_commit(source) == LORO_OK);
+    LoroBytes a = {0};
+    CHECK(loro_doc_export_updates_from(source, before_a, &a) == LORO_OK);
+    LoroVersionVector* before_b = loro_doc_oplog_vv(source);
+    CHECK(loro_text_insert(st, 6, "B", 1) == LORO_OK);
+    CHECK(loro_doc_commit(source) == LORO_OK);
+    LoroBytes b = {0};
+    CHECK(loro_doc_export_updates_from(source, before_b, &b) == LORO_OK);
+
+    LoroDoc* receiver = loro_doc_new();
+    CHECK(loro_doc_import(receiver, base.data, base.len) == LORO_OK);
+    LoroBytes none = {0};
+    bool has = true;
+    CHECK(loro_doc_export_pending_updates(receiver, &none, &has) == LORO_OK);
+    CHECK(!has && none.len == 0);
+    loro_bytes_free(none);
+
+    /* B arrives before A, so it waits. */
+    CHECK(loro_doc_import(receiver, b.data, b.len) == LORO_OK);
+    LoroBytes snapshot = {0};
+    CHECK(loro_doc_export_snapshot(receiver, &snapshot) == LORO_OK);
+    LoroBytes pending = {0};
+    CHECK(loro_doc_export_pending_updates(receiver, &pending, &has) == LORO_OK);
+    CHECK(has && pending.len > 0);
+    LoroBytes again = {0};
+    CHECK(loro_doc_export_pending_updates(receiver, &again, NULL) == LORO_OK);
+    CHECK(again.len == pending.len);
+    loro_bytes_free(again);
+
+    /* Restore: the snapshot alone has lost B; importing the pending bytes brings it back. */
+    LoroDoc* restored = loro_doc_new();
+    LoroText* rt = loro_doc_get_text(restored, "text", 4);
+    CHECK(loro_doc_import(restored, snapshot.data, snapshot.len) == LORO_OK);
+    CHECK(loro_doc_import(restored, pending.data, pending.len) == LORO_OK);
+    CHECK(text_is(rt, "base|"));
+    LoroBytes still = {0};
+    CHECK(loro_doc_export_pending_updates(restored, &still, &has) == LORO_OK && has);
+    loro_bytes_free(still);
+    CHECK(loro_doc_import(restored, a.data, a.len) == LORO_OK);
+    CHECK(text_is(rt, "base|AB"));
+    LoroBytes after = {0};
+    CHECK(loro_doc_export_pending_updates(restored, &after, &has) == LORO_OK);
+    CHECK(!has && after.len == 0);
+    loro_bytes_free(after);
+
+    LoroBytes unused = {0};
+    CHECK(loro_doc_export_pending_updates(NULL, &unused, &has) == LORO_ERR_INVALID_ARG);
+    CHECK(loro_doc_export_pending_updates(restored, NULL, &has) == LORO_ERR_INVALID_ARG);
+
+    loro_bytes_free(pending);
+    loro_bytes_free(snapshot);
+    loro_bytes_free(b);
+    loro_bytes_free(a);
+    loro_bytes_free(base);
+    loro_version_vector_free(before_b);
+    loro_version_vector_free(before_a);
+    loro_text_free(rt);
+    loro_text_free(st);
+    loro_doc_free(restored);
+    loro_doc_free(receiver);
+    loro_doc_free(source);
+}
+
+/* Whether root map "m" of `doc` holds binary (not a list) under "bin". */
+static int bin_is_binary(LoroDoc* doc) {
+    LoroMap* m = loro_doc_get_map(doc, "m", 1);
+    LoroValue* v = loro_map_get_value(m);
+    LoroValue* bin = v ? loro_value_map_get(v, "bin", 3) : NULL;
+    int ok = bin != NULL && loro_value_get_type(bin) == LORO_VALUE_BINARY;
+    loro_value_free(bin);
+    loro_value_free(v);
+    loro_map_free(m);
+    return ok;
+}
+
+/* Whether root map "relay" of `doc` has `n` entries. */
+static int relay_len_is(LoroDoc* doc, uintptr_t n) {
+    LoroMap* m = loro_doc_get_map(doc, "relay", 5);
+    int ok = loro_map_len(m) == n;
+    loro_map_free(m);
+    return ok;
+}
+
+/* loro 1.17: binary sent through JSON updates comes back as a list of numbers. When the JSON
+ * receiver passes that history on as binary, an exact import into a doc that has the original
+ * ops is rejected; LORO_IMPORT_HISTORY_JSON_LOSSY accepts it and keeps the receiver's values. */
+static void test_import_history_mode_c(void) {
+    LoroDoc* a = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(a, 1) == LORO_OK);
+    LoroMap* am = loro_doc_get_map(a, "m", 1);
+    const uint8_t raw[3] = {0, 1, 255};
+    LoroValue* bin = loro_value_new_binary(raw, 3);
+    CHECK(loro_map_insert_value(am, "bin", 3, bin) == LORO_OK);
+    loro_value_free(bin);
+    CHECK(loro_doc_commit(a) == LORO_OK);
+    LoroBytes prefix = {0};
+    CHECK(loro_doc_export_updates(a, &prefix) == LORO_OK);
+
+    LoroVersionVector* empty = loro_version_vector_new();
+    LoroVersionVector* a_vv = loro_doc_oplog_vv(a);
+    LoroBytes json = {0};
+    CHECK(loro_doc_export_json_updates(a, empty, a_vv, &json) == LORO_OK);
+    LoroDoc* relay = loro_doc_new();
+    CHECK(loro_doc_set_peer_id(relay, 2) == LORO_OK);
+    CHECK(loro_doc_import_json_updates(relay, (const char*)json.data, json.len) == LORO_OK);
+    CHECK(!bin_is_binary(relay));
+    LoroMap* rm = loro_doc_get_map(relay, "relay", 5);
+    CHECK(loro_map_insert(rm, "extra", 5, "1", 1) == LORO_OK);
+    CHECK(loro_doc_commit(relay) == LORO_OK);
+    LoroBytes blob = {0};
+    CHECK(loro_doc_export_updates(relay, &blob) == LORO_OK);
+
+    /* Exact (the default, and LORO_IMPORT_HISTORY_EXACT) rejects it and changes nothing. */
+    LoroDoc* exact = loro_doc_new();
+    CHECK(loro_doc_import(exact, prefix.data, prefix.len) == LORO_OK);
+    CHECK(loro_doc_import(exact, blob.data, blob.len) != LORO_OK);
+    LoroImportStatus* st = NULL;
+    CHECK(loro_doc_import_with_history_mode(exact, blob.data, blob.len, "", 0,
+                                            LORO_IMPORT_HISTORY_EXACT, &st) != LORO_OK);
+    CHECK(st == NULL);
+    CHECK(relay_len_is(exact, 0) && bin_is_binary(exact));
+
+    LoroDoc* lossy = loro_doc_new();
+    CHECK(loro_doc_import(lossy, prefix.data, prefix.len) == LORO_OK);
+    CHECK(loro_doc_import_with_history_mode(lossy, blob.data, blob.len, "relay", 5,
+                                            LORO_IMPORT_HISTORY_JSON_LOSSY, &st) == LORO_OK);
+    CHECK(st != NULL && loro_import_status_success_len(st) > 0);
+    loro_import_status_free(st);
+    CHECK(relay_len_is(lossy, 1) && bin_is_binary(lossy));
+
+    LoroDoc* batch = loro_doc_new();
+    CHECK(loro_doc_import(batch, prefix.data, prefix.len) == LORO_OK);
+    const uint8_t* datas[1] = {blob.data};
+    size_t lens[1] = {blob.len};
+    CHECK(loro_doc_import_batch_with_history_mode(batch, datas, lens, 1, LORO_IMPORT_HISTORY_EXACT,
+                                                  NULL) != LORO_OK);
+    CHECK(loro_doc_import_batch_with_history_mode(batch, datas, lens, 1,
+                                                  LORO_IMPORT_HISTORY_JSON_LOSSY, NULL) == LORO_OK);
+    CHECK(relay_len_is(batch, 1) && bin_is_binary(batch));
+    CHECK(loro_doc_import_batch_with_history_mode(batch, NULL, lens, 1,
+                                                  LORO_IMPORT_HISTORY_JSON_LOSSY,
+                                                  NULL) == LORO_ERR_INVALID_ARG);
+
+    loro_bytes_free(blob);
+    loro_bytes_free(json);
+    loro_bytes_free(prefix);
+    loro_version_vector_free(a_vv);
+    loro_version_vector_free(empty);
+    loro_map_free(rm);
+    loro_map_free(am);
+    loro_doc_free(batch);
+    loro_doc_free(lossy);
+    loro_doc_free(exact);
+    loro_doc_free(relay);
+    loro_doc_free(a);
+}
+
+static void test_decoded_value_cache_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    CHECK(loro_doc_decoded_value_cache_limit(doc) == 2048);
+    loro_doc_set_decoded_value_cache_limit(doc, 16);
+    CHECK(loro_doc_decoded_value_cache_limit(doc) == 16);
+    LoroDoc* fork = loro_doc_fork(doc);
+    CHECK(loro_doc_decoded_value_cache_limit(fork) == 16);
+    loro_doc_set_decoded_value_cache_limit(fork, 0);
+    CHECK(loro_doc_decoded_value_cache_limit(doc) == 16);
+    CHECK(loro_doc_decoded_value_cache_limit(NULL) == 0);
+    loro_doc_set_decoded_value_cache_limit(NULL, 1); /* no-op */
+    loro_doc_free(fork);
+    loro_doc_free(doc);
+}
+
+/* Reads tests/fixtures/<name> into `*out` (free with free()); returns its size, or 0 on failure. */
+static size_t read_fixture(const char* name, uint8_t** out) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", LORO_TEST_FIXTURES, name);
+    *out = NULL;
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t* buf = n > 0 ? (uint8_t*)malloc((size_t)n) : NULL;
+    size_t got = buf ? fread(buf, 1, (size_t)n, f) : 0;
+    fclose(f);
+    if (got == 0 || got != (size_t)n) {
+        free(buf);
+        return 0;
+    }
+    *out = buf;
+    return got;
+}
+
+/* loro 1.17: reads that need a stored change block that cannot be parsed report it
+ * (LORO_ERR_DECODE, or null from functions returning a handle) instead of panicking or skipping
+ * the block. The fixture's block holding 1@1 is truncated. */
+static void test_unreadable_history_c(void) {
+    uint8_t* bytes = NULL;
+    size_t len = read_fixture("unparsable-history.snapshot.bin", &bytes);
+    CHECK(len > 0);
+    if (len == 0) return;
+    LoroDoc* doc = loro_doc_new();
+    CHECK(loro_doc_import(doc, bytes, len) == LORO_OK);
+    free(bytes);
+
+    /* At the tip the state version comes from the cached oplog version, so it still works. */
+    LoroVersionVector* state = loro_doc_state_vv(doc);
+    CHECK(state != NULL);
+    loro_version_vector_free(state);
+
+    LoroId damaged = {1, 1};
+    LoroFrontiers* at = loro_frontiers_new();
+    CHECK(loro_frontiers_push(at, damaged) == LORO_OK);
+    CHECK(loro_doc_frontiers_to_vv(doc, at) == NULL);
+    CHECK(loro_last_error_message() != NULL &&
+          strstr(loro_last_error_message(), "ecode") != NULL);
+    CHECK(loro_doc_fork_at(doc, at) == NULL);
+
+    LoroVersionVector* start = loro_version_vector_new();
+    LoroId p1 = {1, 2};
+    LoroId p2 = {2, 1};
+    CHECK(loro_version_vector_set_end(start, p1) == LORO_OK);
+    CHECK(loro_version_vector_set_end(start, p2) == LORO_OK);
+    LoroVersionVector* end = loro_doc_oplog_vv(doc);
+    LoroBytes json = {0};
+    CHECK(loro_doc_export_json_updates(doc, start, end, &json) == LORO_ERR_DECODE);
+    CHECK(loro_doc_export_json_updates_without_peer_compression(doc, start, end, &json) ==
+          LORO_ERR_DECODE);
+
+    LoroChangeMetaOwned* meta = NULL;
+    CHECK(loro_doc_get_change(doc, damaged, &meta) == LORO_ERR_DECODE);
+    CHECK(meta == NULL);
+
+    /* The doc stays usable. */
+    LoroText* t = loro_doc_get_text(doc, "text", 4);
+    CHECK(loro_text_insert(t, 0, "still works", 11) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+
+    loro_text_free(t);
+    loro_version_vector_free(end);
+    loro_version_vector_free(start);
+    loro_frontiers_free(at);
+    loro_doc_free(doc);
+}
+
 int main(void) {
     CHECK(loro_version() != NULL);
     test_snapshot_round_trip();
@@ -1378,6 +1637,10 @@ int main(void) {
     test_g6_c();
     test_undo_pause_c();
     test_typed_reads_c();
+    test_pending_updates_c();
+    test_import_history_mode_c();
+    test_decoded_value_cache_c();
+    test_unreadable_history_c();
 
     if (failures == 0) {
         puts("test_c_only: OK");

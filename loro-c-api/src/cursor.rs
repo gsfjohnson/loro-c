@@ -17,7 +17,7 @@ use crate::doc::LoroDoc;
 use crate::error::{set_last_error, LoroStatus};
 use crate::value::{str_from_raw, LoroBytes};
 use crate::version::LoroId;
-use loro::cursor::{Cursor, Side};
+use loro::cursor::{CannotFindRelativePosition, Cursor, Side};
 use loro::{ContainerID, ID};
 use std::os::raw::c_char;
 
@@ -224,10 +224,21 @@ pub extern "C" fn loro_movable_list_get_cursor(
     })
 }
 
+/// Maps a failed cursor lookup to a [`LoroStatus`] and records its message: unreadable stored
+/// history (loro 1.17+) is `LORO_ERR_DECODE`, anything else `LORO_ERR_NOT_FOUND`.
+fn record_cursor_error(err: &CannotFindRelativePosition) -> LoroStatus {
+    set_last_error(err.to_string());
+    match err {
+        CannotFindRelativePosition::HistoryUnreadable => LoroStatus::LORO_ERR_DECODE,
+        _ => LoroStatus::LORO_ERR_NOT_FOUND,
+    }
+}
+
 /// Resolves `cursor` against the current state of `doc`, writing the absolute position and
 /// resolved side into `*out`. `*out` is only written on `LORO_OK`. Returns
 /// `LORO_ERR_NOT_FOUND` if the relative position cannot be located (the container was deleted,
-/// the id is unknown, or the relevant history was cleared).
+/// the id is unknown, or the relevant history was cleared), or `LORO_ERR_DECODE` if the lookup
+/// needed stored history that cannot be parsed.
 #[no_mangle]
 pub extern "C" fn loro_doc_get_cursor_pos(
     doc: *const LoroDoc,
@@ -251,10 +262,7 @@ pub extern "C" fn loro_doc_get_cursor_pos(
                 };
                 LoroStatus::LORO_OK
             }
-            Err(e) => {
-                set_last_error(e.to_string());
-                LoroStatus::LORO_ERR_NOT_FOUND
-            }
+            Err(e) => record_cursor_error(&e),
         }
     })
 }
@@ -263,7 +271,7 @@ pub extern "C" fn loro_doc_get_cursor_pos(
 /// `PosQueryResult.update`): the resolved absolute position goes into `*out_pos`, and `*out_update`
 /// receives a fresh, independent `LoroCursor*` (free it separately with [`loro_cursor_free`]) or
 /// null when there is no update. `*out_pos` and `*out_update` are only written on `LORO_OK`.
-/// Returns `LORO_ERR_NOT_FOUND` if the relative position cannot be located.
+/// Returns `LORO_ERR_NOT_FOUND` or `LORO_ERR_DECODE` as [`loro_doc_get_cursor_pos`] does.
 #[no_mangle]
 pub extern "C" fn loro_doc_get_cursor_pos_full(
     doc: *const LoroDoc,
@@ -293,10 +301,7 @@ pub extern "C" fn loro_doc_get_cursor_pos_full(
                 }
                 LoroStatus::LORO_OK
             }
-            Err(e) => {
-                set_last_error(e.to_string());
-                LoroStatus::LORO_ERR_NOT_FOUND
-            }
+            Err(e) => record_cursor_error(&e),
         }
     })
 }

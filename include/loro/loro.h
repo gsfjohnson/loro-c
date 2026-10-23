@@ -150,6 +150,27 @@ typedef enum LoroSide {
 } LoroSide;
 
 /**
+ * How an import compares ops whose ids the document already has (loro `ImportHistoryMode`).
+ * Such ops must normally be identical: a mismatch means two writers used the same peer id, and
+ * the import fails with an "ID ... has been used" error.
+ */
+typedef enum LoroImportHistoryMode {
+    /**
+     * Ops the document already has must be identical. What `loro_doc_import` and the other
+     * binary imports use.
+     */
+    LORO_IMPORT_HISTORY_EXACT = 0,
+    /**
+     * Also accept the changes a trip through JSON updates makes to values: an integer beyond
+     * ±2^53 read back as a double, binary as a list of byte numbers, a non-finite double as
+     * null, a container as its id string. For binary data whose history may already have
+     * reached this document as JSON (`loro_doc_import_json_updates` uses this mode itself).
+     * It cannot tell such a change from a real conflict, so only opt in for that case.
+     */
+    LORO_IMPORT_HISTORY_JSON_LOSSY = 1,
+} LoroImportHistoryMode;
+
+/**
  * How a diff event was triggered. Mirrors `loro::EventTriggerKind`.
  */
 typedef enum LoroEventTriggerKind {
@@ -2375,7 +2396,8 @@ struct LoroCursor *loro_movable_list_get_cursor(const struct LoroMovableList *li
  * Resolves `cursor` against the current state of `doc`, writing the absolute position and
  * resolved side into `*out`. `*out` is only written on `LORO_OK`. Returns
  * `LORO_ERR_NOT_FOUND` if the relative position cannot be located (the container was deleted,
- * the id is unknown, or the relevant history was cleared).
+ * the id is unknown, or the relevant history was cleared), or `LORO_ERR_DECODE` if the lookup
+ * needed stored history that cannot be parsed.
  */
 enum LoroStatus loro_doc_get_cursor_pos(const struct LoroDoc *doc,
                                         const struct LoroCursor *cursor,
@@ -2386,7 +2408,7 @@ enum LoroStatus loro_doc_get_cursor_pos(const struct LoroDoc *doc,
  * `PosQueryResult.update`): the resolved absolute position goes into `*out_pos`, and `*out_update`
  * receives a fresh, independent `LoroCursor*` (free it separately with [`loro_cursor_free`]) or
  * null when there is no update. `*out_pos` and `*out_update` are only written on `LORO_OK`.
- * Returns `LORO_ERR_NOT_FOUND` if the relative position cannot be located.
+ * Returns `LORO_ERR_NOT_FOUND` or `LORO_ERR_DECODE` as [`loro_doc_get_cursor_pos`] does.
  */
 enum LoroStatus loro_doc_get_cursor_pos_full(const struct LoroDoc *doc,
                                              const struct LoroCursor *cursor,
@@ -2516,6 +2538,22 @@ void loro_doc_set_record_timestamp(const struct LoroDoc *doc, bool record);
  * change-merge interval in seconds. No-op on a null handle.
  */
 void loro_doc_set_change_merge_interval(const struct LoroDoc *doc, int64_t interval);
+
+/**
+ * Returns how many lazily decoded container values reads through container handles may keep
+ * cached (loro's default is 2048). Returns 0 on a null handle.
+ */
+uintptr_t loro_doc_decoded_value_cache_limit(const struct LoroDoc *doc);
+
+/**
+ * Sets how many lazily decoded container values reads through container handles may keep
+ * cached. A larger limit trades memory for faster repeated reads of a large imported
+ * snapshot; `0` disables the cache. Lowering it evicts the excess at once without losing
+ * edits. The count is of values, not bytes, and whole-document reads such as
+ * [`loro_doc_get_deep_value`] do not fill the cache. The setting belongs to this document:
+ * forks copy it, and it is not exported. No-op on a null handle.
+ */
+void loro_doc_set_decoded_value_cache_limit(const struct LoroDoc *doc, uintptr_t limit);
 
 /**
  * Returns the root text container named `(id, id_len)` (UTF-8, not nul-terminated),
@@ -2680,6 +2718,20 @@ enum LoroStatus loro_doc_export_updates_in_range(const struct LoroDoc *doc,
                                                  struct LoroBytes *out);
 
 /**
+ * Exports the remote updates this document has imported but cannot apply yet, because the
+ * changes they depend on have not arrived. Snapshot and update exports leave these out, so to
+ * keep them across a restart, save them next to a snapshot taken with no edits or imports in
+ * between, and restore by importing the snapshot and then these bytes with an ordinary import;
+ * they then wait for their dependencies as before. Does not commit local edits.
+ *
+ * On `LORO_OK`, `*has_pending` (may be null) says whether anything is pending, and `*out` holds
+ * the updates, or an empty buffer when nothing is. Free `*out` with `loro_bytes_free` either way.
+ */
+enum LoroStatus loro_doc_export_pending_updates(const struct LoroDoc *doc,
+                                                struct LoroBytes *out,
+                                                bool *has_pending);
+
+/**
  * Imports a batch of snapshot/update blobs at once. `datas[i]` / `lens[i]` describe the `i`th
  * blob, for `count` blobs; loro applies them in dependency order regardless of array order.
  */
@@ -2720,6 +2772,29 @@ enum LoroStatus loro_doc_import_with_status(struct LoroDoc *doc,
                                             const char *origin,
                                             uintptr_t origin_len,
                                             struct LoroImportStatus **out);
+
+/**
+ * Like [`loro_doc_import_with_status`], comparing ops the document already has as `mode` says.
+ * `out` may be null; a written `*out` must be freed with `loro_import_status_free`.
+ */
+enum LoroStatus loro_doc_import_with_history_mode(struct LoroDoc *doc,
+                                                  const uint8_t *data,
+                                                  uintptr_t len,
+                                                  const char *origin,
+                                                  uintptr_t origin_len,
+                                                  enum LoroImportHistoryMode mode,
+                                                  struct LoroImportStatus **out);
+
+/**
+ * Like [`loro_doc_import_batch_status`], comparing ops the document already has as `mode`
+ * says. `out` may be null; a written `*out` must be freed with `loro_import_status_free`.
+ */
+enum LoroStatus loro_doc_import_batch_with_history_mode(struct LoroDoc *doc,
+                                                        const uint8_t *const *datas,
+                                                        const uintptr_t *lens,
+                                                        uintptr_t count,
+                                                        enum LoroImportHistoryMode mode,
+                                                        struct LoroImportStatus **out);
 
 /**
  * Returns the total number of operations in the document's OpLog. Returns 0 on a null handle.
@@ -2792,6 +2867,7 @@ enum LoroStatus loro_doc_get_path_to_container(const struct LoroDoc *doc,
  * Writes the container ids modified in the change range `[id, id+len)` into `*out` as a sorted
  * JSON array of container-id strings (sorted for deterministic output). This implicitly commits
  * the current transaction. `*out` is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ * Returns `LORO_ERR_DECODE` if a stored change block cannot be parsed.
  */
 enum LoroStatus loro_doc_get_changed_containers_in(const struct LoroDoc *doc,
                                                    struct LoroId id,
@@ -2810,7 +2886,8 @@ enum LoroStatus loro_doc_cmp_with_frontiers(const struct LoroDoc *doc,
 /**
  * Returns a minimized equivalent of `frontiers` (the smallest set marking the same version), as
  * a new owned [`LoroFrontiers`]. Returns null if a frontier id is not included in this
- * document's history. Release with `loro_frontiers_free`.
+ * document's history, or if a stored change block cannot be parsed. Release with
+ * `loro_frontiers_free`.
  */
 struct LoroFrontiers *loro_doc_minimize_frontiers(const struct LoroDoc *doc,
                                                   const struct LoroFrontiers *frontiers);
@@ -2872,7 +2949,8 @@ struct LoroCounter *loro_doc_try_get_counter(const struct LoroDoc *doc,
  * Looks up the change containing operation `id` and, on success, writes a new owned
  * [`LoroChangeMetaOwned`] handle into `*out`. Read it via `loro_change_meta_owned_as_ref` +
  * the `loro_change_meta_*` accessors; release it with `loro_change_meta_owned_free`. Returns
- * `LORO_ERR_NOT_FOUND` if no change contains `id`. `*out` is only written on `LORO_OK`.
+ * `LORO_ERR_NOT_FOUND` if no change contains `id`, or `LORO_ERR_DECODE` if the change block
+ * holding it cannot be parsed. `*out` is only written on `LORO_OK`.
  */
 enum LoroStatus loro_doc_get_change(const struct LoroDoc *doc,
                                     struct LoroId id,
@@ -2909,7 +2987,9 @@ enum LoroStatus loro_doc_get_deep_value_with_id_json(const struct LoroDoc *doc,
  * Writes the operation id spans between versions `from` and `to` into `*out` as JSON
  * `{ "retreat": {…}, "forward": {…} }`, where each side is `{ "<peer>": {"start":…, "end":…} }`.
  * `forward` are spans in `to` but not `from`; `retreat` are spans in `from` but not `to`. `*out`
- * is only written on `LORO_OK`; free it with `loro_bytes_free`.
+ * is only written on `LORO_OK`; free it with `loro_bytes_free`. Returns `LORO_ERR_NOT_FOUND` if
+ * a frontier id is not in the document's history, or `LORO_ERR_DECODE` if a stored change block
+ * cannot be parsed.
  */
 enum LoroStatus loro_doc_find_id_spans_between(const struct LoroDoc *doc,
                                                const struct LoroFrontiers *from,
@@ -3247,14 +3327,19 @@ struct LoroUndoManager *loro_undo_manager_new(const struct LoroDoc *doc);
 void loro_undo_manager_free(struct LoroUndoManager *um);
 
 /**
- * Undoes the last recorded change. Writes whether an undo actually happened into `*applied`
- * (may be null).
+ * Undoes the last recorded step. Writes whether it changed the document into `*applied` (may
+ * be null). `*applied` is `false` when the stack is empty, and also when the step had become a
+ * no-op after remote edits: that step is consumed and earlier ones may remain, so use
+ * [`loro_undo_manager_can_undo`] rather than `*applied` to tell whether anything is left. On
+ * error the document is unchanged.
  */
 enum LoroStatus loro_undo_manager_undo(struct LoroUndoManager *um, bool *applied);
 
 /**
- * Redoes the last undone change. Writes whether a redo actually happened into `*applied`
- * (may be null).
+ * Redoes the last undone step. Writes whether it changed the document into `*applied` (may be
+ * null). As with [`loro_undo_manager_undo`], `*applied` is also `false` for a step that had
+ * become a no-op; use [`loro_undo_manager_can_redo`] to tell whether anything is left. On error
+ * the document is unchanged.
  */
 enum LoroStatus loro_undo_manager_redo(struct LoroUndoManager *um, bool *applied);
 
@@ -3863,8 +3948,8 @@ enum LoroStatus loro_frontiers_push(struct LoroFrontiers *frontiers, struct Loro
 struct LoroVersionVector *loro_doc_oplog_vv(const struct LoroDoc *doc);
 
 /**
- * Returns the document's current state version vector. Release with
- * [`loro_version_vector_free`].
+ * Returns the document's current state version vector, or null if it has to be resolved from
+ * stored history that cannot be parsed. Release with [`loro_version_vector_free`].
  */
 struct LoroVersionVector *loro_doc_state_vv(const struct LoroDoc *doc);
 
@@ -3893,14 +3978,15 @@ struct LoroVersionVector *loro_doc_shallow_since_vv(const struct LoroDoc *doc);
 
 /**
  * Converts `frontiers` to a version vector against this document, or null if the frontiers
- * are not contained in the document's history. Release with [`loro_version_vector_free`].
+ * are not contained in the document's history or a stored change block cannot be parsed.
+ * Release with [`loro_version_vector_free`].
  */
 struct LoroVersionVector *loro_doc_frontiers_to_vv(const struct LoroDoc *doc,
                                                    const struct LoroFrontiers *frontiers);
 
 /**
- * Converts a version vector to frontiers against this document. Release with
- * [`loro_frontiers_free`].
+ * Converts a version vector to frontiers against this document, or null if a stored change
+ * block cannot be parsed. Release with [`loro_frontiers_free`].
  */
 struct LoroFrontiers *loro_doc_vv_to_frontiers(const struct LoroDoc *doc,
                                                const struct LoroVersionVector *vv);
@@ -3979,7 +4065,8 @@ const struct LoroChangeMeta *loro_change_meta_owned_as_ref(const struct LoroChan
 /**
  * Traverses the ancestors of the changes containing `ids` (including those changes
  * themselves), in causal order from latest to oldest, calling `traveler.invoke` for each.
- * Returns `LORO_ERR_NOT_FOUND` if an id is missing from the document history.
+ * Returns `LORO_ERR_NOT_FOUND` if an id is missing from the document history, or
+ * `LORO_ERR_DECODE` if a stored change block on the way cannot be parsed.
  */
 enum LoroStatus loro_doc_travel_change_ancestors(const struct LoroDoc *doc,
                                                  const struct LoroId *ids,

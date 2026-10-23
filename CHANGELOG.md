@@ -7,29 +7,23 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
-## [Unreleased]
+## [1.16.2.3] - 2026-10-22
 
-- **New: shallow map read.** C: `loro_map_get_value`. C++: `LoroMap::get_value()`.
-  It returns every entry, with child containers as `kContainer` ids rather than
-  their deep values. Lists already had this (`loro_list_get_value`,
-  `LoroList::to_vec`). It is not a faster way to read a few keys: for scalar
-  entries it costs about the same as one `get` per key, and each child container
-  adds the cost of building its id.
-- **New: typed delta and map walks, no JSON.** C: `loro_text_for_each_delta`
-  calls a visitor with each segment's text and its attributes as a `LoroValue`
-  map. `loro_value_map_for_each` calls a visitor with each entry of a map
-  value. Both stop when the visitor returns `false`, and run `free_user_data`
-  once.
-- **Faster:** `LoroText::to_delta()` now reads through
-  `loro_text_for_each_delta`, and every typed map read (`get_value`,
-  `get_deep_value`, map-valued entries and attributes) through
-  `loro_value_map_for_each`. No JSON is written or parsed, and no handle is
-  allocated per entry. The C++ signatures are unchanged.
-- **Fix:** `LoroText::to_delta()` misread number attributes when the app had set
-  a comma-decimal `LC_NUMERIC` (German, French, …): `2.5` came back as `2.0`. The
-  JSON reader used `std::stod`, which follows the C locale. The typed read has no
-  number parsing.
-- `loro_text_to_delta` (JSON) and `loro_value_map_keys` stay for C callers.
+- **Faster: `LoroText::to_delta()` takes about half the time.** It no longer
+  goes through JSON. Typed map reads (`get_deep_value`, maps nested in values,
+  mark attributes) skip JSON too and are about 25% faster. No signature changes:
+  rebuild and you get it.
+- **Fix: `to_delta()` misread numbers under a comma-decimal locale.** If your app
+  set `LC_NUMERIC` to German, French and so on, a `2.5` attribute came back as
+  `2.0`.
+- **New C API:** `loro_text_for_each_delta` and `loro_value_map_for_each` walk a
+  text's segments or a map value's entries through a visitor, with no JSON.
+  `loro_map_get_value` (C++: `LoroMap::get_value()`) returns a map's shallow
+  value, with child containers as ids. Lists already had it. It is no faster
+  than `get` for reading a few keys.
+- The pinned `loro` crate is still `1.16.2`.
+
+[1.16.2.3]: https://github.com/gsfjohnson/loro-c/compare/v1.16.2.2...v1.16.2.3
 
 ## [1.16.2.2] - 2026-10-09
 

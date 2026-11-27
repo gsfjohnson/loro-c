@@ -181,8 +181,10 @@ bool run_loro_1_17() {
     if (restored_text->to_string() != "base|AB") return fail("A did not release the pending B");
     if (restored->export_pending_updates()) return fail("nothing should be pending after A");
 
-    // Binary that went through JSON updates comes back as a list of numbers. Passing that
-    // history on as binary is rejected by an exact import and accepted by kJsonLossy.
+    // JSON updates written by loro 1.18 or earlier carry binary as a list of numbers, and it
+    // is imported as a list. Passing that history on as binary is rejected by an exact import
+    // and accepted by kJsonLossy. loro 1.19 writes binary as a "<parrot>:binary:<base64>"
+    // string that stays binary, so the old form is rebuilt here from the exported JSON.
     auto writer = loro::LoroDoc::init();
     writer->set_peer_id(1);
     writer->get_map(root("m"))->insert(
@@ -190,10 +192,25 @@ bool run_loro_1_17() {
                    loro::LoroValue(loro::LoroValue::kBinary{{0, 1, 255}})));
     writer->commit();
     auto prefix = writer->export_updates(loro::VersionVector::init());
+    std::string json =
+        writer->export_json_updates(loro::VersionVector::init(), writer->oplog_vv());
+    auto modern = loro::LoroDoc::init();
+    modern->import_json_updates(json);
+    auto survived = modern->get_map(root("m"))->get("bin")->as_value();
+    if (!survived || !std::holds_alternative<loro::LoroValue::kBinary>(survived->get_variant())) {
+        return fail("binary should survive a trip through JSON updates");
+    }
+    const std::string marker = "\"\xF0\x9F\xA6\x9C:binary:AAH/\"";  // bytes {0, 1, 255}
+    const auto at = json.find(marker);
+    if (at == std::string::npos) return fail("JSON updates should write binary as a string");
+    json.replace(at, marker.size(), "[0,1,255]");
     auto relay = loro::LoroDoc::init();
     relay->set_peer_id(2);
-    relay->import_json_updates(
-        writer->export_json_updates(loro::VersionVector::init(), writer->oplog_vv()));
+    relay->import_json_updates(json);
+    auto degraded = relay->get_map(root("m"))->get("bin")->as_value();
+    if (!degraded || std::holds_alternative<loro::LoroValue::kBinary>(degraded->get_variant())) {
+        return fail("binary from old-format JSON updates should be imported as a list");
+    }
     relay->get_map(root("relay"))->insert("extra", i64_value(1));
     relay->commit();
     auto blob = relay->export_updates(loro::VersionVector::init());

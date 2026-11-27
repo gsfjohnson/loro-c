@@ -11,7 +11,7 @@ use crate::error::{record_loro_error, set_last_error, LoroStatus};
 use crate::event::{LoroDiffEvent, LoroSubscriber, LoroSubscription};
 use crate::value::{value_from_json, value_to_json_bytes, LoroBytes};
 use crate::value_typed::LoroValue;
-use loro::{TextDelta, UpdateOptions};
+use loro::{TextDelta, UpdateOptions, UpdateTimeoutError};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
@@ -494,10 +494,23 @@ pub extern "C" fn loro_text_apply_delta(
     })
 }
 
+/// Maps a failed `update` / `update_by_line` to a status. A timeout is `LORO_ERR_OTHER`; an edit
+/// loro rejected (deleted container, read-only document, ...) keeps its own error and message.
+fn record_update_error(err: &UpdateTimeoutError) -> LoroStatus {
+    match err {
+        UpdateTimeoutError::Timeout => {
+            set_last_error("text update timed out");
+            LoroStatus::LORO_ERR_OTHER
+        }
+        UpdateTimeoutError::Loro(e) => record_loro_error(e),
+    }
+}
+
 /// Replaces the whole content of the text with `(s, len)` by computing and applying a diff.
 /// `timeout_ms` bounds the diff computation; pass a negative value for no timeout.
 /// `use_refined_diff` selects the slower-but-more-precise diff algorithm. Returns
-/// `LORO_ERR_OTHER` if the computation times out.
+/// `LORO_ERR_OTHER` if the computation times out, and the edit's own error when loro rejects
+/// it (a deleted container, for example).
 #[no_mangle]
 pub extern "C" fn loro_text_update(
     text: *mut LoroText,
@@ -518,10 +531,7 @@ pub extern "C" fn loro_text_update(
         };
         match text.inner().update(s, options) {
             Ok(()) => LoroStatus::LORO_OK,
-            Err(_) => {
-                set_last_error("text update timed out");
-                LoroStatus::LORO_ERR_OTHER
-            }
+            Err(e) => record_update_error(&e),
         }
     })
 }
@@ -547,10 +557,7 @@ pub extern "C" fn loro_text_update_by_line(
         };
         match text.inner().update_by_line(s, options) {
             Ok(()) => LoroStatus::LORO_OK,
-            Err(_) => {
-                set_last_error("text update timed out");
-                LoroStatus::LORO_ERR_OTHER
-            }
+            Err(e) => record_update_error(&e),
         }
     })
 }

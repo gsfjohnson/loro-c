@@ -1459,9 +1459,34 @@ static int relay_len_is(LoroDoc* doc, uintptr_t n) {
     return ok;
 }
 
-/* loro 1.17: binary sent through JSON updates comes back as a list of numbers. When the JSON
- * receiver passes that history on as binary, an exact import into a doc that has the original
- * ops is rejected; LORO_IMPORT_HISTORY_JSON_LOSSY accepts it and keeps the receiver's values. */
+/* A malloc'd copy of `src` with the first `from` replaced by `to`, its length in `*out_len`.
+ * NULL when `from` does not occur. */
+static char* replace_first(const LoroBytes* src, const char* from, const char* to,
+                           size_t* out_len) {
+    size_t from_len = strlen(from);
+    size_t to_len = strlen(to);
+    for (size_t i = 0; i + from_len <= src->len; i++) {
+        if (memcmp(src->data + i, from, from_len) != 0) continue;
+        size_t tail = src->len - i - from_len;
+        char* out = (char*)malloc(i + to_len + tail + 1);
+        if (out == NULL) return NULL;
+        memcpy(out, src->data, i);
+        memcpy(out + i, to, to_len);
+        memcpy(out + i + to_len, src->data + i + from_len, tail);
+        *out_len = i + to_len + tail;
+        return out;
+    }
+    return NULL;
+}
+
+/* Bytes {0, 1, 255} as JSON updates write them since loro 1.19: "<parrot>:binary:<base64>". */
+#define BIN_JSON_MARKER "\"\xF0\x9F\xA6\x9C:binary:AAH/\""
+
+/* JSON updates written by loro 1.18 or earlier carry binary as a list of numbers, and it is
+ * imported as a list. When the JSON receiver passes that history on as binary, an exact import
+ * into a doc that has the original ops is rejected; LORO_IMPORT_HISTORY_JSON_LOSSY accepts it
+ * and keeps the receiver's values. loro 1.19 writes binary as a marker string that stays
+ * binary, so the old form is rebuilt here from the exported JSON. */
 static void test_import_history_mode_c(void) {
     LoroDoc* a = loro_doc_new();
     CHECK(loro_doc_set_peer_id(a, 1) == LORO_OK);
@@ -1478,9 +1503,20 @@ static void test_import_history_mode_c(void) {
     LoroVersionVector* a_vv = loro_doc_oplog_vv(a);
     LoroBytes json = {0};
     CHECK(loro_doc_export_json_updates(a, empty, a_vv, &json) == LORO_OK);
+    /* As exported, the binary value survives the JSON trip. */
+    CHECK(bytes_contains(&json, BIN_JSON_MARKER));
+    LoroDoc* modern = loro_doc_new();
+    CHECK(loro_doc_import_json_updates(modern, (const char*)json.data, json.len) == LORO_OK);
+    CHECK(bin_is_binary(modern));
+    loro_doc_free(modern);
+
+    size_t legacy_len = 0;
+    char* legacy = replace_first(&json, BIN_JSON_MARKER, "[0,1,255]", &legacy_len);
+    CHECK(legacy != NULL);
     LoroDoc* relay = loro_doc_new();
     CHECK(loro_doc_set_peer_id(relay, 2) == LORO_OK);
-    CHECK(loro_doc_import_json_updates(relay, (const char*)json.data, json.len) == LORO_OK);
+    CHECK(loro_doc_import_json_updates(relay, legacy, legacy_len) == LORO_OK);
+    free(legacy);
     CHECK(!bin_is_binary(relay));
     LoroMap* rm = loro_doc_get_map(relay, "relay", 5);
     CHECK(loro_map_insert(rm, "extra", 5, "1", 1) == LORO_OK);
@@ -1531,6 +1567,48 @@ static void test_import_history_mode_c(void) {
     loro_doc_free(exact);
     loro_doc_free(relay);
     loro_doc_free(a);
+}
+
+/* loro 1.18: a text update that loro rejects reports the edit's error, not a timeout. */
+static void test_text_update_c(void) {
+    LoroDoc* doc = loro_doc_new();
+    LoroText* root = loro_doc_get_text(doc, "t", 1);
+    CHECK(loro_text_insert(root, 0, "hello", 5) == LORO_OK);
+    CHECK(loro_text_update(root, "help", 4, -1.0, true) == LORO_OK);
+    LoroBytes str = {0};
+    CHECK(loro_text_to_string(root, &str) == LORO_OK);
+    CHECK(bytes_eq(&str, "help"));
+    loro_bytes_free(str);
+    CHECK(loro_text_update_by_line(root, "a\nb\n", 4, -1.0, false) == LORO_OK);
+    CHECK(loro_text_to_string(root, &str) == LORO_OK);
+    CHECK(bytes_eq(&str, "a\nb\n"));
+    loro_bytes_free(str);
+
+    LoroMap* m = loro_doc_get_map(doc, "m", 1);
+    LoroContainer* child =
+        loro_map_insert_container(m, "child", 5, loro_container_new(LORO_CONTAINER_TEXT));
+    CHECK(child != NULL);
+    LoroText* text = loro_container_get_text(child);
+    CHECK(text != NULL);
+    CHECK(loro_text_update(text, "abc", 3, -1.0, true) == LORO_OK);
+    CHECK(loro_map_delete(m, "child", 5) == LORO_OK);
+    CHECK(loro_doc_commit(doc) == LORO_OK);
+    CHECK(loro_text_is_deleted(text) == true);
+
+    CHECK(loro_text_update(text, "abcd", 4, -1.0, true) != LORO_OK);
+    const char* msg = loro_last_error_message();
+    CHECK(msg != NULL && strstr(msg, "timed out") == NULL);
+    CHECK(loro_text_update_by_line(text, "abcd", 4, -1.0, true) != LORO_OK);
+    msg = loro_last_error_message();
+    CHECK(msg != NULL && strstr(msg, "timed out") == NULL);
+
+    CHECK(loro_text_update(NULL, "x", 1, -1.0, true) == LORO_ERR_INVALID_ARG);
+
+    loro_text_free(text);
+    loro_container_free(child);
+    loro_map_free(m);
+    loro_text_free(root);
+    loro_doc_free(doc);
 }
 
 static void test_decoded_value_cache_c(void) {
@@ -1639,6 +1717,7 @@ int main(void) {
     test_typed_reads_c();
     test_pending_updates_c();
     test_import_history_mode_c();
+    test_text_update_c();
     test_decoded_value_cache_c();
     test_unreadable_history_c();
 

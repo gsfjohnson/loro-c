@@ -599,6 +599,10 @@ fn export_json_updates_impl(
 /// Exports the ops in the range `(start_vv, end_vv]` as JSON bytes into `*out`. `*out` is only
 /// written on `LORO_OK`; free it with `loro_bytes_free`. Use an empty version vector for
 /// `start_vv` to export the full history.
+///
+/// A binary value is written as the string `"🦜:binary:<base64>"`, so it is still binary after
+/// [`loro_doc_import_json_updates`]. loro 1.18 and earlier wrote an array of numbers, which is
+/// still accepted on import, and they reject JSON that carries the string form.
 #[no_mangle]
 pub extern "C" fn loro_doc_export_json_updates(
     doc: *const LoroDoc,
@@ -795,6 +799,8 @@ fn blobs_from_raw(
 
 /// Imports a batch of snapshot/update blobs at once. `datas[i]` / `lens[i]` describe the `i`th
 /// blob, for `count` blobs; loro applies them in dependency order regardless of array order.
+/// Not all-or-nothing: when one blob fails on its own the call fails, and what the other blobs
+/// imported stays in the document.
 #[no_mangle]
 pub extern "C" fn loro_doc_import_batch(
     doc: *mut LoroDoc,
@@ -910,9 +916,10 @@ pub enum LoroImportHistoryMode {
     /// binary imports use.
     LORO_IMPORT_HISTORY_EXACT = 0,
     /// Also accept the changes a trip through JSON updates makes to values: an integer beyond
-    /// ±2^53 read back as a double, binary as a list of byte numbers, a non-finite double as
-    /// null, a container as its id string. For binary data whose history may already have
-    /// reached this document as JSON (`loro_doc_import_json_updates` uses this mode itself).
+    /// ±2^53 read back as a double, binary as a list of byte numbers (JSON written by loro
+    /// 1.18 or earlier; later versions keep binary), a non-finite double as null, a container
+    /// as its id string. For binary data whose history may already have reached this document
+    /// as JSON (`loro_doc_import_json_updates` uses this mode itself).
     /// It cannot tell such a change from a real conflict, so only opt in for that case.
     LORO_IMPORT_HISTORY_JSON_LOSSY = 1,
 }
@@ -1440,12 +1447,16 @@ pub extern "C" fn loro_doc_get_change(
 // ---------------------------------------------------------------------------
 
 /// Forces the document into attached mode, re-syncing the doc state to the latest version.
+/// Fails when the latest version cannot be checked out (history imported while detached that
+/// the state rejects); the document then stays detached at its version and usable.
 #[no_mangle]
 pub extern "C" fn loro_doc_attach(doc: *const LoroDoc) -> LoroStatus {
     ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
         let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
-        doc.inner().attach();
-        LoroStatus::LORO_OK
+        match doc.inner().try_attach() {
+            Ok(()) => LoroStatus::LORO_OK,
+            Err(e) => record_loro_error(&e),
+        }
     })
 }
 

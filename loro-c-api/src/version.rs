@@ -798,13 +798,17 @@ pub extern "C" fn loro_doc_checkout(
     })
 }
 
-/// Re-attaches the document state to the latest version after a [`loro_doc_checkout`].
+/// Re-attaches the document state to the latest version after a [`loro_doc_checkout`]. Fails
+/// when the latest version cannot be checked out (see [`loro_doc_attach`]); the document then
+/// stays detached at its version and usable.
 #[no_mangle]
 pub extern "C" fn loro_doc_checkout_to_latest(doc: *mut LoroDoc) -> LoroStatus {
     ffi_guard!(LoroStatus::LORO_ERR_PANIC, {
         let doc = deref_or!(doc, LoroStatus::LORO_ERR_INVALID_ARG);
-        doc.inner().checkout_to_latest();
-        LoroStatus::LORO_OK
+        match doc.inner().try_checkout_to_latest() {
+            Ok(()) => LoroStatus::LORO_OK,
+            Err(e) => record_loro_error(&e),
+        }
     })
 }
 

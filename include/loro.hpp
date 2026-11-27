@@ -186,8 +186,8 @@ enum class ImportHistoryMode : int32_t {
     /// Ops the document already has must be identical, as in [`LoroDoc::import`].
     kExact = 0,
     /// Also accept the value changes a trip through JSON updates makes (large integers as
-    /// doubles, binary as a list of numbers, ...). For binary data whose history may already
-    /// have arrived as JSON.
+    /// doubles, binary as a list of numbers in JSON from loro 1.18 or earlier, ...). For binary
+    /// data whose history may already have arrived as JSON.
     kJsonLossy = 1,
 };
 
@@ -611,7 +611,7 @@ inline LoroExpandType to_c_expand(ExpandType e) {
 
 // ---- ContainerType / ContainerId <-> "cid:" string (RESHAPE Phase 2) --------
 //
-// Matches loro-common 1.17.0 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
+// Matches loro-common 1.19.0 (`ContainerType`/`ContainerID` Display + TryFrom<&str>):
 //   root:   "cid:root-{name}:{Type}"      (the LAST ':' splits name from type — names may
 //                                           themselves contain ':')
 //   normal: "cid:{counter}@{peer}:{Type}"

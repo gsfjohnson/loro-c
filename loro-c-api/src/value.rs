@@ -8,7 +8,10 @@
 //!
 //! Container values cross the boundary as JSON: inputs via [`value_from_json`], outputs
 //! via [`value_to_json_bytes`]. `loro::LoroValue` round-trips cleanly through `serde_json`
-//! (its human-readable serde representation is plain JSON).
+//! (its human-readable serde representation is plain JSON), with two reserved string
+//! prefixes on input: `"🦜:<container id>"` reads as a container reference and, since loro
+//! 1.19, `"🦜:binary:<base64>"` reads as binary (invalid Base64 after it is an error). Binary
+//! is still written as an array of numbers on output.
 
 use crate::error::set_last_error;
 use std::os::raw::c_char;

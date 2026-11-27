@@ -162,9 +162,10 @@ typedef enum LoroImportHistoryMode {
     LORO_IMPORT_HISTORY_EXACT = 0,
     /**
      * Also accept the changes a trip through JSON updates makes to values: an integer beyond
-     * ±2^53 read back as a double, binary as a list of byte numbers, a non-finite double as
-     * null, a container as its id string. For binary data whose history may already have
-     * reached this document as JSON (`loro_doc_import_json_updates` uses this mode itself).
+     * ±2^53 read back as a double, binary as a list of byte numbers (JSON written by loro
+     * 1.18 or earlier; later versions keep binary), a non-finite double as null, a container
+     * as its id string. For binary data whose history may already have reached this document
+     * as JSON (`loro_doc_import_json_updates` uses this mode itself).
      * It cannot tell such a change from a real conflict, so only opt in for that case.
      */
     LORO_IMPORT_HISTORY_JSON_LOSSY = 1,
@@ -1970,7 +1971,8 @@ enum LoroStatus loro_text_apply_delta(struct LoroText *text, const char *delta, 
  * Replaces the whole content of the text with `(s, len)` by computing and applying a diff.
  * `timeout_ms` bounds the diff computation; pass a negative value for no timeout.
  * `use_refined_diff` selects the slower-but-more-precise diff algorithm. Returns
- * `LORO_ERR_OTHER` if the computation times out.
+ * `LORO_ERR_OTHER` if the computation times out, and the edit's own error when loro rejects
+ * it (a deleted container, for example).
  */
 enum LoroStatus loro_text_update(struct LoroText *text,
                                  const char *s,
@@ -2659,6 +2661,10 @@ enum LoroStatus loro_doc_import_json_updates_status(struct LoroDoc *doc,
  * Exports the ops in the range `(start_vv, end_vv]` as JSON bytes into `*out`. `*out` is only
  * written on `LORO_OK`; free it with `loro_bytes_free`. Use an empty version vector for
  * `start_vv` to export the full history.
+ *
+ * A binary value is written as the string `"🦜:binary:<base64>"`, so it is still binary after
+ * [`loro_doc_import_json_updates`]. loro 1.18 and earlier wrote an array of numbers, which is
+ * still accepted on import, and they reject JSON that carries the string form.
  */
 enum LoroStatus loro_doc_export_json_updates(const struct LoroDoc *doc,
                                              const struct LoroVersionVector *start_vv,
@@ -2734,6 +2740,8 @@ enum LoroStatus loro_doc_export_pending_updates(const struct LoroDoc *doc,
 /**
  * Imports a batch of snapshot/update blobs at once. `datas[i]` / `lens[i]` describe the `i`th
  * blob, for `count` blobs; loro applies them in dependency order regardless of array order.
+ * Not all-or-nothing: when one blob fails on its own the call fails, and what the other blobs
+ * imported stays in the document.
  */
 enum LoroStatus loro_doc_import_batch(struct LoroDoc *doc,
                                       const uint8_t *const *datas,
@@ -2958,6 +2966,8 @@ enum LoroStatus loro_doc_get_change(const struct LoroDoc *doc,
 
 /**
  * Forces the document into attached mode, re-syncing the doc state to the latest version.
+ * Fails when the latest version cannot be checked out (history imported while detached that
+ * the state rejects); the document then stays detached at its version and usable.
  */
 enum LoroStatus loro_doc_attach(const struct LoroDoc *doc);
 
@@ -3997,7 +4007,9 @@ struct LoroFrontiers *loro_doc_vv_to_frontiers(const struct LoroDoc *doc,
 enum LoroStatus loro_doc_checkout(struct LoroDoc *doc, const struct LoroFrontiers *frontiers);
 
 /**
- * Re-attaches the document state to the latest version after a [`loro_doc_checkout`].
+ * Re-attaches the document state to the latest version after a [`loro_doc_checkout`]. Fails
+ * when the latest version cannot be checked out (see [`loro_doc_attach`]); the document then
+ * stays detached at its version and usable.
  */
 enum LoroStatus loro_doc_checkout_to_latest(struct LoroDoc *doc);
 

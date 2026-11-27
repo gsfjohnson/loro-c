@@ -7,6 +7,57 @@ This project tracks the pinned upstream `loro` crate version with a fourth
 component for binding-level releases (e.g. `1.13.1.2` = the second `loro-c`
 release against `loro 1.13.1`).
 
+## [1.19.1.1] - 2026-11-26
+
+- **Upgrade: pinned `loro` crate `1.17.1` → `1.19.1`** (through 1.18.0 and
+  1.19.0). More malformed updates are rejected with an error instead of
+  crashing or damaging the document. Imports, snapshots, exports, checkouts and
+  undo of large texts and many-peer documents are faster and use less memory.
+  Fixes to undo, tree fractional indexes and shallow snapshots. No functions are
+  added or removed.
+- **Changed: JSON updates keep binary values.** `loro_doc_export_json_updates`
+  (C++: `export_json_updates()`) writes a binary value as the string
+  `"🦜:binary:<base64>"`, and it is still binary after
+  `loro_doc_import_json_updates`. Before, it was written as an array of numbers
+  and came back as a list. JSON written by earlier versions is still accepted.
+  Earlier versions (loro-c 1.17.1.1 and older) reject JSON that holds the new
+  form, so upgrade every peer that exchanges JSON updates first. Binary
+  `export` / `import` is unchanged.
+- **Changed: `"🦜:binary:"` is a reserved string prefix in JSON values.** A JSON
+  string that starts with it, passed to a function that takes a JSON-encoded
+  value (`loro_map_insert`, `loro_list_insert`, ...), is stored as binary, and
+  is an error when the rest is not valid Base64. Values are still written as
+  before: binary is an array of numbers in `*_to_json` output. The typed
+  `LoroValue` functions are not affected.
+- **Changed: text update reports the real error.** `loro_text_update` and
+  `loro_text_update_by_line` return the edit's own error and message when loro
+  rejects it, such as a deleted container. Before, every failure was reported
+  as "text update timed out". A timeout is still `LORO_ERR_OTHER`.
+- **Changed: `loro_doc_attach` and `loro_doc_checkout_to_latest` can fail
+  cleanly.** When the latest version cannot be checked out they return an error
+  and the document stays detached and usable. Before, they returned
+  `LORO_ERR_PANIC`.
+- **Changed: a batch import is not all-or-nothing.** When one blob of
+  `loro_doc_import_batch` fails on its own, the call fails and what the other
+  blobs imported stays in the document. A single `loro_doc_import` still
+  changes nothing when it fails.
+- **Changed: stricter imports and writes.** An import of conflicting data that
+  brings no new ops now fails with an "ID ... has been used" error; it used to
+  succeed and drop the data. A local edit or commit is rejected while updates
+  that use the document's own peer id wait for a dependency, and in detached
+  editing when the peer id already has later ops. Import the missing
+  dependency or set a new peer id to recover.
+- **Changed: checkout, undo and text deltas.** A checkout to the version a
+  detached document is already at keeps it detached. Undo brings a deleted tree
+  node back with its own id, and undo history survives a multi-blob
+  `import_batch`. Lowering `set_max_undo_steps` drops the oldest steps at once.
+  `to_delta` merges adjacent runs whose attributes are equal after an unmark.
+- **Changed: smaller behaviours.** A tree keeps its fractional-index jitter
+  setting across snapshot import and fork, and each peer draws different
+  jitter. A JSONPath root name is read as a literal key.
+
+[1.19.1.1]: https://github.com/gsfjohnson/loro-c/compare/v1.17.1.1...v1.19.1.1
+
 ## [1.17.1.1] - 2026-10-22
 
 - **Upgrade: pinned `loro` crate `1.16.2` → `1.17.1`.** Malformed or

@@ -34,13 +34,15 @@ function(loro_system_libs out_libs out_pc)
         set(_key "${LORO_RUST_TOOLCHAIN}")
     endif()
 
+    # Windows: `synchronization` (WaitOnAddress / WakeByAddress*) is required since Rust
+    # 1.100, whose std Mutex/Condvar became futex-based on Windows; harmless on older Rust.
     if(_key MATCHES "windows-gnullvm")
         # gnullvm: DWARF unwinding via LLVM libunwind (the crate builds panic=unwind).
-        set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp unwind)
+        set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp synchronization unwind)
     elseif(_key MATCHES "windows")
         # msvc-style Windows: SEH unwinding, no libunwind. (windows-gnu/mingw-gcc is not
         # a supported target; it would additionally need gcc_eh/pthread.)
-        set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp)
+        set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp synchronization)
     elseif(_key MATCHES "apple")
         # macOS and iOS (device + simulator): rustc reports no native-static-libs beyond
         # the libSystem/libc++abi machinery every Apple link carries implicitly, and the
@@ -60,7 +62,7 @@ function(loro_system_libs out_libs out_pc)
         set(_libs dl log unwind m c)
     elseif(WIN32)
         # No triple/toolchain hint: native CMake on Windows drives the msvc host target.
-        set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp)
+        set(_libs bcrypt advapi32 kernel32 ntdll userenv ws2_32 dbghelp synchronization)
     elseif(APPLE)
         set(_libs "")
     else()
